@@ -719,6 +719,15 @@ func (s *Server) registerSpotifySourceForDevice(deviceIP string, accounts []spot
 		registered = true
 	}
 
+	// Seed firmware-internal placeholder sources (e.g. SPOTIFY/SpotifyConnectUserName)
+	// so storePreset payloads originating from Spotify-Connect playback bind to the
+	// Connect placeholder rather than the OAuth-brokered entry above. Idempotent.
+	if registered && deviceID != "" {
+		if err := marge.EnsurePlaceholderSources(s.ds, accountID, deviceID); err != nil {
+			log.Printf("[Spotify Watchdog] Failed to seed placeholder sources for account %s device %s: %v", accountID, deviceID, err)
+		}
+	}
+
 	// Tell the speaker its sources list changed so it re-fetches from marge.
 	// Without this its on-device Sources.xml stays stale until something else
 	// triggers a sync — which leaves storePreset failing with
