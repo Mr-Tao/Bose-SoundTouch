@@ -1212,6 +1212,66 @@ func RemovePreset(ds *datastore.DataStore, account, device string, presetNumber 
 }
 
 // UpdatePreset updates or creates a preset for the specified account and device.
+// findMatchingSourceForUpdatePreset implements the three-tier match for a
+// storePreset payload, in order of decreasing specificity:
+//
+//  1. Exact source ID match — used when the speaker echoes back an ID we
+//     previously gave it.
+//  2. Exact (SourceKeyType, SourceKeyAccount) match — lets firmware-internal
+//     sourceAccounts (e.g. "SpotifyConnectUserName" for Connect-initiated
+//     playback) bind to their dedicated placeholder source rather than
+//     collapsing onto an unrelated OAuth-brokered entry of the same type.
+//     See marge.EnsurePlaceholderSources.
+//  3. SourceKeyType-only fallback for the well-known provider strings —
+//     preserves legacy behavior when the speaker only sends a provider name
+//     and no account.
+//
+// Returns nil if no tier matches; callers turn that into "invalid account/source".
+func findMatchingSourceForUpdatePreset(sources []models.ConfiguredSource, sourceID, source, sourceAccount string) *models.ConfiguredSource {
+	if sourceID != "" {
+		for i := range sources {
+			if sources[i].ID == sourceID {
+				return &sources[i]
+			}
+		}
+	}
+
+	if source != "" && sourceAccount != "" {
+		for i := range sources {
+			if sources[i].SourceKeyType == source && sources[i].SourceKeyAccount == sourceAccount {
+				return &sources[i]
+			}
+		}
+	}
+
+	if isWellKnownProviderID(sourceID) {
+		for i := range sources {
+			if sources[i].SourceKeyType == sourceID {
+				return &sources[i]
+			}
+		}
+	}
+
+	return nil
+}
+
+func isWellKnownProviderID(sourceID string) bool {
+	switch sourceID {
+	case constants.ProviderInternetRadio,
+		constants.ProviderTunein,
+		constants.ProviderSpotify,
+		constants.ProviderAmazon:
+		return true
+	}
+
+	return false
+}
+
+// UpdatePreset handles a storePreset payload from a speaker: it parses the
+// preset XML, looks up the configured source it should bind to via
+// findMatchingSourceForUpdatePreset, persists the preset under the account's
+// device directory, and returns the parity XML body the speaker expects.
+// Returns an error with "invalid account/source" if no source matches.
 func UpdatePreset(ds *datastore.DataStore, account, device string, presetNumber int, sourceXML []byte) ([]byte, error) {
 	sources, err := ds.GetConfiguredSources(account, device)
 	if err != nil {
@@ -1236,47 +1296,14 @@ func UpdatePreset(ds *datastore.DataStore, account, device string, presetNumber 
 		return nil, err
 	}
 
-	var matchingSrc *models.ConfiguredSource
-
 	log.Printf("[Marge] Searching for source matching ID=%s source=%s sourceAccount=%s in %d sources",
 		newPresetElem.SourceID, newPresetElem.Source, newPresetElem.SourceAccount, len(sources))
 
 	for i := range sources {
 		log.Printf("[Marge]   Source[%d]: ID=%s, Type=%s, SourceKeyType=%s, SourceKeyAccount=%s", i, sources[i].ID, sources[i].Type, sources[i].SourceKeyType, sources[i].SourceKeyAccount)
-
-		if sources[i].ID == newPresetElem.SourceID {
-			matchingSrc = &sources[i]
-			break
-		}
 	}
 
-	// Prefer an exact (SourceKeyType, SourceKeyAccount) match before falling
-	// back to type-only. This lets firmware-internal sourceAccounts (e.g.
-	// "SpotifyConnectUserName" for Connect-initiated playback) bind to their
-	// dedicated placeholder source rather than collapsing onto an unrelated
-	// OAuth-brokered entry with the same SourceKeyType. See
-	// marge.EnsurePlaceholderSources for the seeded placeholders.
-	if matchingSrc == nil && newPresetElem.Source != "" && newPresetElem.SourceAccount != "" {
-		for i := range sources {
-			if sources[i].SourceKeyType == newPresetElem.Source && sources[i].SourceKeyAccount == newPresetElem.SourceAccount {
-				matchingSrc = &sources[i]
-				break
-			}
-		}
-	}
-
-	if matchingSrc == nil {
-		if newPresetElem.SourceID == constants.ProviderInternetRadio || newPresetElem.SourceID == constants.ProviderTunein || newPresetElem.SourceID == constants.ProviderSpotify || newPresetElem.SourceID == constants.ProviderAmazon {
-			// Find by SourceKeyType instead of ID if it's a default source
-			for i := range sources {
-				if sources[i].SourceKeyType == newPresetElem.SourceID {
-					matchingSrc = &sources[i]
-					break
-				}
-			}
-		}
-	}
-
+	matchingSrc := findMatchingSourceForUpdatePreset(sources, newPresetElem.SourceID, newPresetElem.Source, newPresetElem.SourceAccount)
 	if matchingSrc == nil {
 		return nil, fmt.Errorf("invalid account/source")
 	}
