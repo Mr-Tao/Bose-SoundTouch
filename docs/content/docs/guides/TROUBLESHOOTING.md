@@ -594,6 +594,31 @@ Once the source plays once, it gets persisted to `/mnt/nv/BoseApp-Persistence/1/
 
 If `soundtouch-cli source content --source TUNEIN ...` returns `1005` on a reset device that has never had TuneIn, the speaker is refusing because the source isn't registered yet — chicken-and-egg. The SoundTouch app is then the only practical path to register it; we can't write `Sources.xml` directly over telnet on most models.
 
+### ❌ Changing Target Domain in Settings doesn't change what a speaker actually uses {#settings-vs-migrate}
+
+**Symptoms:**
+
+- You update **Settings → Target Domain / Server URL** (via the Admin UI, `SERVER_URL`, or `--deployment-mode`), and the Admin UI confirms the new value with no warning.
+- An already-migrated speaker's own behavior is unchanged: playback/BMX requests still go to the *old* address, and `soundtouch-cli setup inspect --telnet` still shows the old `margeServerUrl`/`statsServerUrl`/`bmxRegistryUrl`/`swUpdateUrl`.
+
+**Cause:** Settings only updates the *service's own* record of its address (`s.serverURL`, persisted to `settings.json`) — the save handler never contacts any device. A speaker only learns a new address at migrate time: the telnet method writes it via `sys configuration ...` plus a closing `envswitch boseurls set ...` for the reboot-persisted layer; the XML/SSH method uploads a fresh `SoundTouchSdkPrivateCfg.xml`. Both write **once**, with no mechanism for a speaker to later re-fetch its own config from the service — this is equally true for either migration method. A "Sync" or `sourcesUpdated` notification only refreshes the speaker's source *list*, not its server URL configuration.
+
+**Fix:** Any Target Domain change that needs to reach an already-migrated speaker requires a fresh Migrate afterward — Settings alone is never enough for a speaker that's been migrated before:
+
+```bash
+soundtouch-cli --host <speaker-ip> setup migrate --method telnet --service-url <new-target-domain>
+```
+
+Confirm it took:
+
+```bash
+soundtouch-cli --host <speaker-ip> setup inspect --telnet
+```
+
+`margeServerUrl`/`statsServerUrl`/`bmxRegistryUrl`/`swUpdateUrl` should all match the new value. Repeat per speaker — Settings is one service-wide value, but each speaker keeps its own independently-migrated copy, so a multi-speaker household needs a re-migrate for each one.
+
+This also applies to a freshly-fixed on-device default (see `DEPLOYMENT_MODE`, #546): the installer now gets the *default* right for new installs automatically, but an install that was already migrated before you updated still needs the explicit re-migrate above — the fix only stops a *new* bad value from being written, it doesn't retroactively correct an already-migrated speaker.
+
 ### ❌ Radio sources never activate after an in-place migration {#radio-sources-after-migration}
 
 **Symptoms:**
