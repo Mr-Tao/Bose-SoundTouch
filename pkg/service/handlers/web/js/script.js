@@ -2882,7 +2882,16 @@ function readPlanURLOptions() {
 // on the speaker itself). For the typical "AfterTouch on a separate
 // host" deployment, the speaker can't reach loopback on a different
 // machine, so the URL must be a LAN-reachable IP or hostname.
-function validateURL(value) {
+//
+// referenceOrigin (optional) is the plan's own Target URL origin. A
+// loopback value that matches it is exempted from the warning: it means
+// this is exactly what the service itself is already configured to
+// answer as (e.g. an on-device install's `http://localhost:8000`,
+// auto-set since #546), not a mistaken paste. Without this exemption,
+// every on-device install's Suggested Plan fails validation by
+// default and silently disables Apply/Pre-flight before the user does
+// anything (#546 follow-up, reported via #621).
+function validateURL(value, referenceOrigin) {
     const v = (value || "").trim();
     if (!v) return {ok: true, error: ""};
 
@@ -2899,7 +2908,8 @@ function validateURL(value) {
 
     if (!u.hostname) return {ok: false, error: "hostname is empty"};
 
-    if (u.hostname === "localhost" || u.hostname === "127.0.0.1") {
+    const isLoopback = u.hostname === "localhost" || u.hostname === "127.0.0.1";
+    if (isLoopback && u.origin !== referenceOrigin) {
         return {ok: false, error: "loopback URL — speakers can only reach this if AfterTouch is installed on the speaker itself (on-device install). For the typical multi-device setup, use a LAN-reachable IP or hostname."};
     }
 
@@ -2918,12 +2928,23 @@ function validatePlanURLs() {
         ["bmxRegistryUrl", "plan-bmx-url"],
     ];
 
+    const targetUrl = (document.getElementById("plan-target-url") || {}).value || "";
+    let referenceOrigin = "";
+    try {
+        referenceOrigin = new URL(targetUrl).origin;
+    } catch (e) {
+        // Target URL isn't a valid absolute URL yet (e.g. empty) — leave
+        // referenceOrigin empty, so a loopback field simply won't match
+        // it and falls back to today's warning, same as before this
+        // exemption existed.
+    }
+
     const errors = [];
 
     for (const [name, elemId] of fields) {
         const el = document.getElementById(elemId);
         if (!el) continue;
-        const v = validateURL(el.value);
+        const v = validateURL(el.value, referenceOrigin);
         el.style.borderColor = v.ok ? "" : "#c62828";
         if (!v.ok) errors.push(`${name}: ${v.error}`);
     }
