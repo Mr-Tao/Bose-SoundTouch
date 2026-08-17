@@ -195,7 +195,8 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 				logNowPlayingError(deviceID, np.Source, np.SourceAccount)
 			}
 
-			if item, attempt, shouldResume := resumeState.observe(prevSource, np); shouldResume {
+			if item, attempt, shouldResume := resumeState.observe(prevSource, np); shouldResume &&
+				app.AutoResumeOnSourceDisconnect != nil && app.AutoResumeOnSourceDisconnect() {
 				go autoResumePlayback(conn, deviceID, item, attempt)
 			}
 

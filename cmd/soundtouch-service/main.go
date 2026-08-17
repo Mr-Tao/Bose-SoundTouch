@@ -1471,6 +1471,17 @@ func newEmbeddedWebApp(server *handlers.Server, serverURL, internalURL string, d
 		return err
 	}
 
+	// Opt-in (#622): hand-edit settings.json's auto_resume_on_source_disconnect
+	// to enable. Read fresh per drop so toggling it applies without a restart.
+	webApp.AutoResumeOnSourceDisconnect = func() bool {
+		settings, err := ds.GetSettings()
+		if err != nil {
+			return false
+		}
+
+		return settings.AutoResumeOnSourceDisconnect
+	}
+
 	// Keep the UI registry live as the service discovers or devices are added.
 	server.SetDevicesChangedHook(func() {
 		webApp.SeedExtraDevices()

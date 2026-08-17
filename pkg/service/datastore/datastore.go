@@ -2651,6 +2651,19 @@ type Settings struct {
 	// individual format tokens.
 	TuneInStreamFormats string `json:"tunein_stream_formats,omitempty"`
 
+	// AutoResumeOnSourceDisconnect, when true, re-issues a device's last
+	// playing content item if now_playing drops into an error source right
+	// after a healthy one, instead of leaving the speaker silent until a
+	// user manually re-selects it. See #622: some TuneIn streams disconnect
+	// the speaker's own audio pipeline (errorUpdate 1041
+	// SOURCE_DISCONNECTED) on their own, mid-playback, with the SoundTouch
+	// WebSocket control channel staying healthy throughout; the observed
+	// fix is exactly what pressing the preset again does. Opt-in (default
+	// false): this automatically re-triggers content selection without a
+	// user action, which not every operator wants. Hand-edit settings.json
+	// to enable — no admin UI control yet, matching TuneInStreamFormats.
+	AutoResumeOnSourceDisconnect bool `json:"auto_resume_on_source_disconnect,omitempty"`
+
 	// DefaultLanding selects what the root path "/" serves to a browser:
 	//   "chooser" (or empty) — the neutral landing page that links to the
 	//                          player and the admin/setup console;

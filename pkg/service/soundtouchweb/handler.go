@@ -78,6 +78,15 @@ type WebApp struct {
 	// removal only prunes the in-memory registry).
 	RemoveDeviceHook func(deviceID string) error
 
+	// AutoResumeOnSourceDisconnect, when set and returning true, makes
+	// ConnectDeviceWebSocket re-issue a device's last playing content item
+	// after an unsolicited drop into an error source (#622). Opt-in: the
+	// embedded build wires it to Settings.AutoResumeOnSourceDisconnect
+	// (settings.json, default false); standalone soundtouch-player leaves it
+	// nil, which disables the behaviour. Read once per drop rather than
+	// cached, so toggling the setting takes effect without a restart.
+	AutoResumeOnSourceDisconnect func() bool
+
 	discoveryStatus atomic.Value // stores *webtypes.DiscoveryStatus
 }
 
