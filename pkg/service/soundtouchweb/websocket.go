@@ -166,6 +166,12 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 	// error source is logged once per transition into it, not on every event.
 	var prevSource string
 
+	// resumeState survives both the speaker's own WebSocket reconnects and
+	// this loop's outer reconnects (declared once, outside the loop) so an
+	// auto-resume can fire regardless of which layer last re-established
+	// the connection.
+	resumeState := &autoResumeState{}
+
 	for {
 		// Stop if the device was removed from the registry (conn.Close()).
 		select {
@@ -187,6 +193,10 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			// so it lands in a diagnostic export without needing a live trace.
 			if np.Source != prevSource && isErrorSource(np.Source) {
 				logNowPlayingError(deviceID, np.Source, np.SourceAccount)
+			}
+
+			if item, attempt, shouldResume := resumeState.observe(prevSource, np); shouldResume {
+				go autoResumePlayback(conn, deviceID, item, attempt)
 			}
 
 			prevSource = np.Source
