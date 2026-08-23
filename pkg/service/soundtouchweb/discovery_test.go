@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDiscoverDevicesRetriesConfiguredHosts(t *testing.T) {
@@ -54,5 +55,39 @@ func TestDiscoverDevicesRetriesConfiguredHosts(t *testing.T) {
 
 	if !app.RemoveDevice(configuredHost) {
 		t.Fatal("configured device was not registered under its host")
+	}
+
+	// AddDeviceByHost spawns a one-shot status-update goroutine and a 30s-
+	// ticker poll loop on successful registration. RemoveDevice signals the
+	// ticker loop to exit via conn.Done() but doesn't wait for it to actually
+	// observe the close, and the one-shot goroutine has no cancellation at
+	// all. Give them a moment to finish before the deferred server.Close()
+	// runs, so a still-in-flight request against the closing httptest server
+	// doesn't produce log noise or -race flakiness.
+	time.Sleep(50 * time.Millisecond)
+}
+
+// TestClassifySource covers the case the test above can't reach without a
+// real mDNS/UPnP sweep: mergeDeviceData joins discovery methods with "+"
+// when a configured host is also found via mDNS/UPnP in the same pass (see
+// pkg/discovery/unified.go), so DiscoveryMethod is not always exactly
+// "Configuration" for a manually configured device.
+func TestClassifySource(t *testing.T) {
+	tests := []struct {
+		discoveryMethod string
+		want            string
+	}{
+		{"Configuration", "manual"},
+		{"Configuration+mDNS/Bonjour", "manual"},
+		{"mDNS/Bonjour+Configuration", "manual"},
+		{"mDNS/Bonjour", "discovered"},
+		{"SSDP/UPnP", "discovered"},
+		{"", "discovered"},
+	}
+
+	for _, tt := range tests {
+		if got := classifySource(tt.discoveryMethod); got != tt.want {
+			t.Errorf("classifySource(%q) = %q, want %q", tt.discoveryMethod, got, tt.want)
+		}
 	}
 }
