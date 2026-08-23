@@ -170,6 +170,15 @@ func main() {
 
 				webApp.BroadcastDiscoveryStatus("starting", webApp.DeviceCount())
 
+				// Register configured devices immediately rather than waiting for
+				// the full mDNS/UPnP sweep below (bounded by cfg.DiscoveryTimeout,
+				// currently 10s) to complete. manualHosts are also folded into
+				// discoveryService's PreferredDevices so a host that's offline
+				// right now still gets retried on every subsequent discovery pass.
+				for _, host := range manualHosts {
+					webApp.AddDeviceByHost(host, 8090, "manual")
+				}
+
 				webApp.DiscoverDevices(ctx, discoveryService)
 
 				webApp.BroadcastDiscoveryStatus("completed", webApp.DeviceCount())

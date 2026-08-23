@@ -3,6 +3,7 @@ package soundtouchweb
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,11 @@ import (
 // NewDiscoveryService loads config and returns a unified discovery service
 // preconfigured for the web UI's use (10 s discovery timeout, cache on).
 // When discoveryInterface is non-empty, mDNS/UPnP are pinned to that NIC.
+// configuredHosts (e.g. from --devices) are folded into cfg.PreferredDevices
+// alongside any already loaded from PREFERRED_DEVICES (deduplicated by
+// host), so they're retried on every subsequent DiscoverDevices pass, not
+// just once at startup -- a host that's offline now still gets picked up
+// once it comes online.
 func NewDiscoveryService(discoveryInterface string, configuredHosts ...string) *discovery.UnifiedDiscoveryService {
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
@@ -31,8 +37,13 @@ func NewDiscoveryService(discoveryInterface string, configuredHosts ...string) *
 		cfg.DiscoveryInterface = discoveryInterface
 	}
 
+	existingHosts := make(map[string]bool, len(cfg.PreferredDevices))
+	for _, d := range cfg.PreferredDevices {
+		existingHosts[d.Host] = true
+	}
+
 	for _, host := range configuredHosts {
-		if host == "" {
+		if host == "" || existingHosts[host] {
 			continue
 		}
 
@@ -40,6 +51,7 @@ func NewDiscoveryService(discoveryInterface string, configuredHosts ...string) *
 			Host: host,
 			Port: speaker.HTTPPort,
 		})
+		existingHosts[host] = true
 	}
 
 	return discovery.NewUnifiedDiscoveryService(cfg)
@@ -176,11 +188,21 @@ func (app *WebApp) DiscoverDevices(ctx context.Context, discoveryService *discov
 	log.Printf("Found %d devices", len(devices))
 
 	for _, device := range devices {
-		source := "discovered"
-		if device.DiscoveryMethod == "Configuration" {
-			source = "manual"
-		}
-
-		app.AddDeviceByHost(device.Host, device.Port, source)
+		app.AddDeviceByHost(device.Host, device.Port, classifySource(device.DiscoveryMethod))
 	}
+}
+
+// classifySource labels a discovered device "manual" if it came from (at
+// least in part) a configured host, "discovered" otherwise. discoveryMethod
+// can be a "+"-joined composite (e.g. "Configuration+mDNS/Bonjour") when
+// mergeDeviceData combines a configured host with the same device found via
+// mDNS/UPnP in the same sweep -- match by substring, not exact equality, so
+// a manually configured host that's also independently discoverable still
+// gets labeled "manual".
+func classifySource(discoveryMethod string) string {
+	if strings.Contains(discoveryMethod, "Configuration") {
+		return "manual"
+	}
+
+	return "discovered"
 }
