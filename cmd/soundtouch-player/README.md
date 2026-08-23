@@ -88,7 +88,7 @@ go build -o soundtouch-player
 ./soundtouch-player -port 8888
 
 # Connect to specific device
-./soundtouch-player -host 192.0.2.100
+./soundtouch-player --devices 192.0.2.100
 ```
 
 ### Command Line Options
@@ -137,7 +137,7 @@ device datastore).
 The application automatically discovers SoundTouch devices using:
 - **mDNS discovery** for local network devices
 - **UPnP/SSDP discovery** as fallback
-- **Manual device addition** via IP address
+- **Configured devices** via `--devices`, retried whenever discovery runs
 
 ### Real-time Updates
 The interface maintains WebSocket connections to each device for instant updates of:
