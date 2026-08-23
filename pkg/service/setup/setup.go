@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/client"
@@ -107,10 +108,11 @@ type MigrationSummary struct {
 
 	// Telnet (port 17000) preflight state — populated when the user is about to
 	// or has just used MigrationMethodTelnet.
-	TelnetReachable      bool   `json:"telnet_reachable"`
-	TelnetBanner         string `json:"telnet_banner,omitempty"`
-	TelnetVerifiedConfig string `json:"telnet_verified_config,omitempty"`
-	TelnetProbeError     string `json:"telnet_probe_error,omitempty"`
+	TelnetReachable       bool   `json:"telnet_reachable"`
+	TelnetBanner          string `json:"telnet_banner,omitempty"`
+	TelnetVerifiedConfig  string `json:"telnet_verified_config,omitempty"`
+	TelnetProbeError      string `json:"telnet_probe_error,omitempty"`
+	TelnetRevertAvailable bool   `json:"telnet_revert_available"`
 
 	// KnownAccountIDs are accountIDs already present in the local datastore;
 	// the UI offers them as choices when pairing a fresh device.
@@ -155,6 +157,11 @@ type Manager struct {
 	NewSSH    func(host string) SSHClient
 	NewTelnet func(host string) TelnetClient
 
+	// URL-changing telnet operations are multi-command sequences. Keep each
+	// speaker's sequence contiguous while allowing different speakers to run
+	// independently.
+	telnetURLMutationLocks sync.Map // device IP -> *sync.Mutex
+
 	// NewSession opens the WebSocket setup state-machine session used
 	// by ExecuteInitPlan. Tests inject an in-memory fake; the production
 	// default is DialSession.
@@ -169,6 +176,19 @@ type Manager struct {
 	// Spotify management credentials for the boot primer
 	MgmtUsername string
 	MgmtPassword string
+}
+
+func (m *Manager) lockTelnetURLMutation(deviceIP string) func() {
+	value, _ := m.telnetURLMutationLocks.LoadOrStore(deviceIP, &sync.Mutex{})
+
+	mu, ok := value.(*sync.Mutex)
+	if !ok {
+		panic("setup: telnet URL mutation lock has unexpected type")
+	}
+
+	mu.Lock()
+
+	return mu.Unlock
 }
 
 // NewManager creates a new Manager with the given base server URL.
@@ -526,6 +546,7 @@ func (m *Manager) buildServerHTTPSURL(targetURL string) string {
 // up in `getpdo CurrentSystemConfiguration`.
 func (m *Manager) checkIsMigrated(summary *MigrationSummary, deviceIP string) {
 	summary.TelnetMigrated = m.isTelnetMigrated(summary)
+	summary.TelnetRevertAvailable = telnetRevertAvailable(summary.TelnetVerifiedConfig)
 
 	if summary.SSHSuccess {
 		client := m.NewSSH(deviceIP)
@@ -886,7 +907,7 @@ func (m *Manager) MigrateSpeaker(deviceIP, targetURL, proxyURL string, options m
 	// rooted via remote_services.
 	if method == MigrationMethodTelnet {
 		urls := telnetURLsFromOptions(targetURL, options)
-		return m.migrateViaTelnet(deviceIP, targetURL, urls)
+		return m.migrateViaTelnet(deviceIP, urls)
 	}
 
 	var logs string
@@ -2253,6 +2274,10 @@ func (m *Manager) rebootViaTelnet(deviceIP string) (string, error) {
 	if m.NewTelnet == nil {
 		return "", errors.New("telnet reboot not configured: Manager.NewTelnet is nil")
 	}
+
+	// Do not let a reboot cut through a multi-command URL mutation.
+	unlock := m.lockTelnetURLMutation(deviceIP)
+	defer unlock()
 
 	fmt.Printf("Rebooting speaker at %s via telnet\n", deviceIP)
 
