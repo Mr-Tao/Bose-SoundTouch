@@ -10,12 +10,13 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/config"
 	"github.com/gesellix/bose-soundtouch/pkg/discovery"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
+	"github.com/gesellix/bose-soundtouch/pkg/speaker"
 )
 
 // NewDiscoveryService loads config and returns a unified discovery service
 // preconfigured for the web UI's use (10 s discovery timeout, cache on).
 // When discoveryInterface is non-empty, mDNS/UPnP are pinned to that NIC.
-func NewDiscoveryService(discoveryInterface string) *discovery.UnifiedDiscoveryService {
+func NewDiscoveryService(discoveryInterface string, configuredHosts ...string) *discovery.UnifiedDiscoveryService {
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
 		log.Printf("Failed to load config: %v, using defaults", err)
@@ -28,6 +29,17 @@ func NewDiscoveryService(discoveryInterface string) *discovery.UnifiedDiscoveryS
 
 	if discoveryInterface != "" {
 		cfg.DiscoveryInterface = discoveryInterface
+	}
+
+	for _, host := range configuredHosts {
+		if host == "" {
+			continue
+		}
+
+		cfg.PreferredDevices = append(cfg.PreferredDevices, config.DeviceConfig{
+			Host: host,
+			Port: speaker.HTTPPort,
+		})
 	}
 
 	return discovery.NewUnifiedDiscoveryService(cfg)
@@ -164,6 +176,11 @@ func (app *WebApp) DiscoverDevices(ctx context.Context, discoveryService *discov
 	log.Printf("Found %d devices", len(devices))
 
 	for _, device := range devices {
-		app.AddDeviceByHost(device.Host, device.Port, "discovered")
+		source := "discovered"
+		if device.DiscoveryMethod == "Configuration" {
+			source = "manual"
+		}
+
+		app.AddDeviceByHost(device.Host, device.Port, source)
 	}
 }

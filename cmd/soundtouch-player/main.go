@@ -161,7 +161,7 @@ func main() {
 				log.Printf("Trusting AfterTouch service CA from %s", sanitizeLog(caPath))
 			}
 
-			discoveryService := soundtouchweb.NewDiscoveryService(ifaceName)
+			discoveryService := soundtouchweb.NewDiscoveryService(ifaceName, manualHosts...)
 
 			// Discover devices on startup
 			go func() {
@@ -169,10 +169,6 @@ func main() {
 				defer cancel()
 
 				webApp.BroadcastDiscoveryStatus("starting", webApp.DeviceCount())
-
-				for _, host := range manualHosts {
-					webApp.AddDeviceByHost(host, 8090, "manual")
-				}
 
 				webApp.DiscoverDevices(ctx, discoveryService)
 
