@@ -14,7 +14,13 @@ func TestDiscoverDevicesRetriesConfiguredHosts(t *testing.T) {
 	var available atomic.Bool
 	var infoRequests atomic.Int32
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// NewTestServer (Go 1.27) registers its own t.Cleanup(Close) instead of
+	// needing a manual defer, and fails the test on a handler panic. It
+	// defaults to an in-memory transport reachable only via Server.Client(),
+	// but our production client.NewClient dials a real address, so Start()
+	// (rather than Client()) is used here to get a real loopback listener,
+	// same as the old NewServer -- see https://pkg.go.dev/net/http/httptest#NewTestServer.
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/info" {
 			http.NotFound(w, r)
 			return
@@ -29,7 +35,7 @@ func TestDiscoverDevicesRetriesConfiguredHosts(t *testing.T) {
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write([]byte(`<info deviceID="TESTDEVICE"><name>Configured speaker</name><type>SoundTouch 10</type></info>`))
 	}))
-	defer server.Close()
+	server.Start()
 
 	t.Setenv("UPNP_ENABLED", "false")
 	t.Setenv("MDNS_ENABLED", "false")
