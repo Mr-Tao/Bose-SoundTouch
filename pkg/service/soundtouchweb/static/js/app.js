@@ -1,6 +1,6 @@
-import { h, render } from 'preact';
-import { useState, useEffect, useCallback } from 'preact/hooks';
-import htm from 'htm';
+import { h, render } from '/app/static/lib/preact.module.js';
+import { useState, useEffect, useCallback } from '/app/static/lib/preact-hooks.module.js';
+import htm from '/app/static/lib/htm.module.js';
 import { DeviceList } from './components/DeviceList.js';
 import { NowPlaying } from './components/NowPlaying.js';
 import { Controls } from './components/Controls.js';
