@@ -1,5 +1,5 @@
-import { h } from 'preact';
-import htm from 'htm';
+import { h } from '/app/static/lib/preact.module.js';
+import htm from '/app/static/lib/htm.module.js';
 import { api } from '../api.js';
 
 const html = htm.bind(h);

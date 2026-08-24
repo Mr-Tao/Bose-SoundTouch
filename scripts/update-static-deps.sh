@@ -24,6 +24,13 @@ cp node_modules/preact/dist/preact.module.js "$LIB_DIR/preact.module.js"
 
 echo "Copying Preact Hooks..."
 cp node_modules/preact/hooks/dist/hooks.module.js "$LIB_DIR/preact-hooks.module.js"
+# Browsers without import map support need the peer dependency to use a local URL.
+sed -i.bak 's/from"preact"/from".\/preact.module.js"/' "$LIB_DIR/preact-hooks.module.js"
+rm -f "$LIB_DIR/preact-hooks.module.js.bak"
+if ! grep -q 'from".\/preact.module.js"' "$LIB_DIR/preact-hooks.module.js"; then
+    echo "Failed to rewrite the Preact Hooks peer dependency" >&2
+    exit 1
+fi
 
 echo "Copying HTM..."
 cp node_modules/htm/dist/htm.module.js "$LIB_DIR/htm.module.js"
