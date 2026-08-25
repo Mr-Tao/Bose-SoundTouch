@@ -46,6 +46,11 @@ var (
 	repoURL = "https://github.com/gesellix/bose-soundtouch"
 )
 
+const (
+	embeddedDeviceSeedRetryInterval = 30 * time.Second
+	embeddedDeviceSeedRetryWindow   = 10 * time.Minute
+)
+
 func updateBuildInfo() {
 	if info, ok := debug.ReadBuildInfo(); ok {
 		if info.Main.Path != "" {
@@ -1478,10 +1483,14 @@ func newEmbeddedWebApp(server *handlers.Server, serverURL, internalURL string, d
 	})
 
 	go func() {
-		// Project the current device set into the UI; the devices-changed hook
-		// and the service's periodic discovery keep it current from here on.
-		webApp.SeedExtraDevices()
-		webApp.BroadcastDeviceList()
+		// Project the current device set into the UI. During gateway boot the
+		// service can start before persisted speaker addresses are routable, so
+		// retry only those known addresses for a bounded startup window. The
+		// devices-changed hook and explicit discovery keep it current afterwards.
+		ctx, cancel := context.WithTimeout(context.Background(), embeddedDeviceSeedRetryWindow)
+		defer cancel()
+
+		webApp.SeedExtraDevicesUntilReady(ctx, embeddedDeviceSeedRetryInterval)
 	}()
 
 	return webApp
