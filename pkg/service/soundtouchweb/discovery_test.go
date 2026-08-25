@@ -8,6 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gesellix/bose-soundtouch/pkg/models"
+	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
 )
 
 func TestDiscoverDevicesRetriesConfiguredHosts(t *testing.T) {
@@ -96,4 +99,85 @@ func TestClassifySource(t *testing.T) {
 			t.Errorf("classifySource(%q) = %q, want %q", tt.discoveryMethod, got, tt.want)
 		}
 	}
+}
+
+func TestRetryUntilReadyStopsAfterSuccess(t *testing.T) {
+	attempts := 0
+	retryUntilReady(context.Background(), time.Millisecond, func() bool {
+		attempts++
+		return attempts == 3
+	})
+
+	if attempts != 3 {
+		t.Fatalf("attempt count = %d, want 3", attempts)
+	}
+}
+
+func TestRetryUntilReadyStopsAfterContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+
+	retryUntilReady(ctx, time.Hour, func() bool {
+		attempts++
+		cancel()
+
+		return false
+	})
+
+	if attempts != 1 {
+		t.Fatalf("attempt count = %d, want 1", attempts)
+	}
+}
+
+func TestExtraDeviceHostsPresent(t *testing.T) {
+	app := NewWebApp()
+	app.ExtraDeviceHosts = func() []string { return []string{"known", "", "known", "missing"} }
+	app.AddDevice("known", &webtypes.DeviceConnection{})
+	desired := app.extraDeviceHostSet()
+
+	if len(desired) != 2 {
+		t.Fatalf("desired host count = %d, want 2", len(desired))
+	}
+	if app.extraDeviceHostsPresent(desired) {
+		t.Fatal("extraDeviceHostsPresent = true with a missing host")
+	}
+
+	app.AddDevice("missing", &webtypes.DeviceConnection{})
+	if !app.extraDeviceHostsPresent(desired) {
+		t.Fatal("extraDeviceHostsPresent = false with all hosts registered")
+	}
+}
+
+func TestSeedExtraDevicesSkipsKnownHosts(t *testing.T) {
+	app := NewWebApp()
+	app.ExtraDeviceHosts = func() []string { return []string{"known"} }
+	lastSeen := time.Unix(123, 0)
+	conn := &webtypes.DeviceConnection{LastSeen: lastSeen}
+	app.AddDevice("known", conn)
+
+	app.SeedExtraDevices()
+
+	if !conn.LastSeen.Equal(lastSeen) {
+		t.Fatalf("known host LastSeen changed from %s to %s", lastSeen, conn.LastSeen)
+	}
+}
+
+func TestRemoveDeviceIfMatchKeepsReplacement(t *testing.T) {
+	app := NewWebApp()
+	original := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{})
+	replacement := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{})
+	app.AddDevice("speaker", original)
+	app.RemoveDevice("speaker")
+	app.AddDevice("speaker", replacement)
+
+	if app.removeDeviceIfMatch("speaker", original) {
+		t.Fatal("removeDeviceIfMatch removed a replacement connection")
+	}
+
+	got, ok := app.GetDevice("speaker")
+	if !ok || got != replacement {
+		t.Fatal("replacement connection was not preserved")
+	}
+
+	app.RemoveDevice("speaker")
 }

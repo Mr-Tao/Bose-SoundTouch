@@ -214,6 +214,28 @@ func (app *WebApp) RemoveDevice(id string) bool {
 	return ok
 }
 
+// removeDeviceIfMatch removes id only when it still points at expected. It is
+// used when an asynchronous probe must not delete a newer replacement that was
+// registered under the same host.
+func (app *WebApp) removeDeviceIfMatch(id string, expected *webtypes.DeviceConnection) bool {
+	app.devicesMu.Lock()
+
+	current, ok := app.devices[id]
+	if ok && current == expected {
+		delete(app.devices, id)
+	} else {
+		ok = false
+	}
+
+	app.devicesMu.Unlock()
+
+	if ok {
+		expected.Close()
+	}
+
+	return ok
+}
+
 // HandleAPIDevices returns all devices as JSON
 func (app *WebApp) HandleAPIDevices(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
