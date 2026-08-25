@@ -724,6 +724,11 @@ func (s *Server) HandleMigrateDevice(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusBadRequest
 		}
 
+		var notReady *setup.MigrationDataNotReadyError
+		if errors.As(err, &notReady) {
+			status = http.StatusConflict
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 
