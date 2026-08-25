@@ -64,9 +64,13 @@ func NewDiscoveryService(discoveryInterface string, configuredHosts ...string) *
 // mDNS/UPnP. If the host is already known, the existing entry's
 // LastSeen is bumped and the function returns without re-fetching.
 func (app *WebApp) AddDeviceByHost(host string, port int, source string) {
+	app.addDeviceByHost(host, port, source)
+}
+
+func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtypes.DeviceConnection {
 	// Fast path: skip the network call if we already know this host.
 	if app.TouchDevice(host) {
-		return
+		return nil
 	}
 
 	c := client.NewClient(&client.Config{
@@ -78,7 +82,7 @@ func (app *WebApp) AddDeviceByHost(host string, port int, source string) {
 	info, err := c.GetDeviceInfo()
 	if err != nil {
 		log.Printf("Failed to fetch device info from %s (%s): %v", sanitizeLog(host), sanitizeLog(source), err)
-		return
+		return nil
 	}
 
 	// Ensure IPAddress is set for the web UI
@@ -91,7 +95,7 @@ func (app *WebApp) AddDeviceByHost(host string, port int, source string) {
 		// Lost a race — another goroutine inserted the same host
 		// between TouchDevice and AddDevice. AddDevice bumped LastSeen
 		// on the existing entry; discard our conn.
-		return
+		return nil
 	}
 
 	go app.UpdateDeviceStatus(host, conn)
@@ -114,6 +118,8 @@ func (app *WebApp) AddDeviceByHost(host string, port int, source string) {
 	}()
 
 	log.Printf("Added %s device %s (%s) at %s:%d", sanitizeLog(source), sanitizeLog(info.Name), sanitizeLog(info.Type), sanitizeLog(host), port)
+
+	return conn
 }
 
 // SeedExtraDevices registers any devices reported by the ExtraDeviceHosts hook
@@ -127,14 +133,26 @@ func (app *WebApp) AddDeviceByHost(host string, port int, source string) {
 // out bounds the cost to roughly a single timeout regardless of how many
 // devices are offline. AddDeviceByHost is registry-safe under concurrency.
 func (app *WebApp) SeedExtraDevices() {
+	app.seedExtraDevices()
+}
+
+type seededExtraDevice struct {
+	host string
+	conn *webtypes.DeviceConnection
+}
+
+func (app *WebApp) seedExtraDevices() []seededExtraDevice {
 	if app.ExtraDeviceHosts == nil {
-		return
+		return nil
 	}
+
+	hosts := app.extraDeviceHosts()
+	inserted := make(chan seededExtraDevice, len(hosts))
 
 	var wg sync.WaitGroup
 
-	for _, host := range app.ExtraDeviceHosts() {
-		if host == "" {
+	for _, host := range hosts {
+		if _, ok := app.GetDevice(host); ok {
 			continue
 		}
 
@@ -143,11 +161,112 @@ func (app *WebApp) SeedExtraDevices() {
 		go func(h string) {
 			defer wg.Done()
 
-			app.AddDeviceByHost(h, 8090, "service-store")
+			if conn := app.addDeviceByHost(h, 8090, "service-store"); conn != nil {
+				inserted <- seededExtraDevice{host: h, conn: conn}
+			}
 		}(host)
 	}
 
 	wg.Wait()
+	close(inserted)
+
+	added := make([]seededExtraDevice, 0, len(inserted))
+	for device := range inserted {
+		added = append(added, device)
+	}
+
+	return added
+}
+
+// SeedExtraDevicesUntilReady retries only the hosts returned by
+// ExtraDeviceHosts until all of them have been registered or ctx expires. It
+// does not run mDNS or UPnP discovery. This gives embedded deployments a
+// bounded way to recover when their persisted speakers are not yet routable
+// while the service is starting.
+func (app *WebApp) SeedExtraDevicesUntilReady(ctx context.Context, retryInterval time.Duration) {
+	retryUntilReady(ctx, retryInterval, func() bool {
+		inserted := app.seedExtraDevices()
+		desired := app.extraDeviceHostSet()
+
+		for _, device := range inserted {
+			if _, ok := desired[device.host]; !ok {
+				app.removeDeviceIfMatch(device.host, device.conn)
+			}
+		}
+
+		if len(inserted) > 0 {
+			app.BroadcastDeviceList()
+		}
+
+		return app.extraDeviceHostsPresent(app.extraDeviceHostSet())
+	})
+}
+
+func (app *WebApp) extraDeviceHosts() []string {
+	if app.ExtraDeviceHosts == nil {
+		return nil
+	}
+
+	hosts := make([]string, 0)
+	seen := make(map[string]struct{})
+
+	for _, host := range app.ExtraDeviceHosts() {
+		if host == "" {
+			continue
+		}
+
+		if _, ok := seen[host]; ok {
+			continue
+		}
+
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+
+	return hosts
+}
+
+func (app *WebApp) extraDeviceHostSet() map[string]struct{} {
+	hosts := app.extraDeviceHosts()
+	desired := make(map[string]struct{}, len(hosts))
+
+	for _, host := range hosts {
+		desired[host] = struct{}{}
+	}
+
+	return desired
+}
+
+func (app *WebApp) extraDeviceHostsPresent(desired map[string]struct{}) bool {
+	for host := range desired {
+		if _, ok := app.GetDevice(host); !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+func retryUntilReady(ctx context.Context, retryInterval time.Duration, attempt func() bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		if attempt() {
+			return
+		}
+
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 // DiscoverDevices refreshes the device registry. When TriggerDiscovery is set
