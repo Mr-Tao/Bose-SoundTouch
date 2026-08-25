@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/certmanager"
 	"github.com/gesellix/bose-soundtouch/pkg/service/datastore"
 )
@@ -2031,15 +2032,30 @@ func TestMigrateSpeaker_ResolvBlocking(t *testing.T) {
 
 	// Mock HTTP server for device info
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/info" {
+		switch r.URL.Path {
+		case "/info":
 			w.Header().Set("Content-Type", "application/xml")
 			_, _ = w.Write([]byte(`<info deviceID="12345"><name>Test Speaker</name><type>ST10</type><maccAddress>00:11:22:33:44:55</maccAddress><margeAccountUUID>acc-123</margeAccountUUID></info>`))
+		case "/presets":
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<presets/>`))
 		}
 	}))
 	defer ts.Close()
 
 	// Use the test server address as device IP
 	tsIP := strings.TrimPrefix(ts.URL, "http://")
+	if err := ds.SaveDeviceInfo("acc-123", "12345", &models.ServiceDeviceInfo{
+		DeviceID:  "12345",
+		AccountID: "acc-123",
+		IPAddress: tsIP,
+		Name:      "Test Speaker",
+	}); err != nil {
+		t.Fatalf("SaveDeviceInfo: %v", err)
+	}
+	if err := ds.SavePresets("acc-123", "12345", nil); err != nil {
+		t.Fatalf("SavePresets: %v", err)
+	}
 
 	_, err = m.MigrateSpeaker(tsIP, "", "", nil, MigrationMethodResolvConf)
 	if err == nil || !strings.Contains(err.Error(), "DNS discovery server is not enabled") {

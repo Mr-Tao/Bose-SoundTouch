@@ -174,6 +174,18 @@ Once the speaker appears, click **Sync Data**. This connects to the speaker and 
 
 Sync pulls the speaker's local state into AfterTouch's datastore, creating an off-device backup of its configuration. If you ran this before May 6, 2026, your account data from Bose's servers was also captured at that time.
 
+Migration is refused until the service has a valid snapshot for that exact
+account and device and verifies that its rendered account data preserves every
+live preset slot. If the migration page asks for Data Sync, sync the device and
+retry instead of bypassing the check.
+
+Migration is also refused while the rendered account contains another device.
+Some speaker firmware wipes its presets after a reboot-triggered resync of a
+shared account even when `/full` contains the correct data. Move the speaker to
+a dedicated account, run Data Sync for it, and then retry migration. Merely
+removing the other devices is not sufficient because discovery can add them
+again before the speaker fetches `/full` after reboot.
+
 ---
 
 ## Step 5: Migrate
