@@ -594,6 +594,28 @@ Once the source plays once, it gets persisted to `/mnt/nv/BoseApp-Persistence/1/
 
 If `soundtouch-cli source content --source TUNEIN ...` returns `1005` on a reset device that has never had TuneIn, the speaker is refusing because the source isn't registered yet — chicken-and-egg. The SoundTouch app is then the only practical path to register it; we can't write `Sources.xml` directly over telnet on most models.
 
+### ❌ Presets get wiped after a reboot, on a speaker sharing its Marge account with other devices {#preset-wipe-shared-account}
+
+**Symptoms:**
+
+- Presets are programmed and confirmed correct (e.g. via the Admin UI or `soundtouch-cli`), but after a plain reboot of the speaker, its own preset list comes back empty (`<presets />`) — even though the service's own `Presets.xml` for that device is untouched and still shows the correct presets.
+- The affected speaker is one of several devices under the **same** Marge account — for example a separate on-device AfterTouch instance per speaker, or several physical speakers migrated to one shared account.
+- Clicking **Sync** in the Admin UI can also lose presets, but since v0.129.0 that path shows a confirmation warning before it overwrites anything destructively — that's a different, already-fixed issue (a stale-snapshot overwrite guard), not the reboot behavior described here.
+
+**Cause:**
+
+Not fully root-caused — this is firmware-internal. A byte-exact capture of the speaker's own `/full` request confirmed AfterTouch serves the correct preset data at the exact moment of the reboot-triggered resync; the wipe happens *after* that, entirely inside the speaker's own firmware callback chain, with no further network exchange to intercept from the service side. The trigger correlates with the **number of devices** listed under the account, not the account ID itself: removing the other devices from the account fixed it for one reporter, while changing only the account ID (with the other devices still present) did not. This isn't a universal shared-account problem either — a setup using a distinct account ID per speaker, with discovery left enabled, has not reproduced it — so treat this as an observed correlation, not a proven mechanism. See [issue #614](https://github.com/gesellix/Bose-SoundTouch/issues/614) for the full debugging history.
+
+**Workaround (confirmed working, root cause still open):**
+
+1. Admin UI → **Settings** → disable **"Enable Periodic Discovery"** first. Order matters — leaving it on lets a background sweep re-add a device you just removed, mid-cleanup.
+2. Admin UI → **Devices** tab → click **✕** to remove every other device from the account, leaving only the speaker you're troubleshooting.
+3. Reboot the speaker and confirm the presets survive.
+
+This is fully reversible: re-enabling discovery brings the other devices back as harmless entries, and it doesn't touch their own presets/recents.
+
+If you'd rather not change device-list membership, the Health tab's **"Restore presets to speaker"** QuickFix pushes the service's stored presets back onto the speaker without a reboot — a workaround for the symptom rather than the trigger, but useful if you hit this again before removing devices.
+
 ### ❌ Changing Target Domain in Settings doesn't change what a speaker actually uses {#settings-vs-migrate}
 
 **Symptoms:**
