@@ -17,19 +17,28 @@ func TestStaticModulesDoNotRequireImportMaps(t *testing.T) {
 		t.Fatal("index.html must not require import map support")
 	}
 
-	dependencies := map[string]string{
-		"/app/static/lib/preact.module.js":       "static/lib/preact.module.js",
-		"/app/static/lib/preact-hooks.module.js": "static/lib/preact-hooks.module.js",
-		"/app/static/lib/htm.module.js":          "static/lib/htm.module.js",
+	const dependencyModulePath = "static/js/dependencies.js"
+	dependencyModule, err := fs.ReadFile(StaticFS, dependencyModulePath)
+	if err != nil {
+		t.Fatalf("read dependency module: %v", err)
 	}
-	usedDependencies := make(map[string]bool, len(dependencies))
-	for publicPath, embeddedPath := range dependencies {
+
+	dependencies := map[string]string{
+		"../lib/preact.module.js":       "static/lib/preact.module.js",
+		"../lib/preact-hooks.module.js": "static/lib/preact-hooks.module.js",
+		"../lib/htm.module.js":          "static/lib/htm.module.js",
+	}
+	for modulePath, embeddedPath := range dependencies {
 		if _, err := fs.Stat(StaticFS, embeddedPath); err != nil {
-			t.Errorf("static dependency %q: %v", publicPath, err)
+			t.Errorf("static dependency %q: %v", modulePath, err)
+		}
+		if !bytes.Contains(dependencyModule, []byte(modulePath)) {
+			t.Errorf("dependency module does not import %q", modulePath)
 		}
 	}
 
 	bareDependency := regexp.MustCompile(`\bfrom\s*['"](?:preact(?:/hooks)?|htm)['"]`)
+	directDependency := regexp.MustCompile(`\bfrom\s*['"][^'"]*lib/(?:preact(?:-hooks)?|htm)\.module\.js['"]`)
 	err = fs.WalkDir(StaticFS, "static", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -45,21 +54,13 @@ func TestStaticModulesDoNotRequireImportMaps(t *testing.T) {
 		if bareDependency.Match(source) {
 			t.Errorf("%s contains a bare dependency import", path)
 		}
-		for publicPath := range dependencies {
-			if bytes.Contains(source, []byte(publicPath)) {
-				usedDependencies[publicPath] = true
-			}
+		if path != dependencyModulePath && strings.HasPrefix(path, "static/js/") && directDependency.Match(source) {
+			t.Errorf("%s bypasses %s", path, dependencyModulePath)
 		}
 
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk JavaScript modules: %v", err)
-	}
-
-	for publicPath := range dependencies {
-		if !usedDependencies[publicPath] {
-			t.Errorf("static dependency %q is not imported", publicPath)
-		}
 	}
 }

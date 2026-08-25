@@ -1,6 +1,4 @@
-import { h } from '/app/static/lib/preact.module.js';
-import { useState } from '/app/static/lib/preact-hooks.module.js';
-import htm from '/app/static/lib/htm.module.js';
+import { h, htm, useState } from '../dependencies.js';
 
 const html = htm.bind(h);
 
