@@ -596,6 +596,22 @@ func (ds *DataStore) GetDeviceInfo(account, device string) (*models.ServiceDevic
 	return ds.getDeviceInfoNoLock(account, device)
 }
 
+// GetExactDeviceInfo retrieves DeviceInfo.xml from the literal account/device
+// directory, without applying legacy device-ID mappings.
+func (ds *DataStore) GetExactDeviceInfo(account, device string) (*models.ServiceDeviceInfo, error) {
+	ds.fileMutex.RLock()
+	defer ds.fileMutex.RUnlock()
+
+	path := ds.safeJoin("accounts", account, constants.DevicesDir, device, constants.DeviceInfoFile)
+
+	data, err := ds.rootReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeDeviceInfo(data, account)
+}
+
 func (ds *DataStore) getDeviceInfoNoLock(account, device string) (*models.ServiceDeviceInfo, error) {
 	path := ds.AccountDeviceDir(account, device)
 	deviceInfoPath := filepath.Join(path, constants.DeviceInfoFile)
@@ -605,6 +621,10 @@ func (ds *DataStore) getDeviceInfoNoLock(account, device string) (*models.Servic
 		return nil, err
 	}
 
+	return decodeDeviceInfo(data, account)
+}
+
+func decodeDeviceInfo(data []byte, account string) (*models.ServiceDeviceInfo, error) {
 	var info struct {
 		XMLName    xml.Name `xml:"info"`
 		DeviceID   string   `xml:"deviceID,attr"`
@@ -982,6 +1002,70 @@ func (ds *DataStore) parseDeviceInfoFile(path string) (*models.ServiceDeviceInfo
 	return deviceInfo, nil
 }
 
+// PresetSnapshotState describes whether Presets.xml is a usable persisted
+// snapshot. GetPresets intentionally treats the non-valid states as empty for
+// serving compatibility; migration readiness needs to distinguish them.
+type PresetSnapshotState string
+
+// PresetSnapshotValid and related constants describe persisted preset snapshot states.
+const (
+	PresetSnapshotValid     PresetSnapshotState = "valid"
+	PresetSnapshotMissing   PresetSnapshotState = "missing"
+	PresetSnapshotEmpty     PresetSnapshotState = "empty"
+	PresetSnapshotMalformed PresetSnapshotState = "malformed"
+)
+
+// PresetSnapshot is a read-only view of the exact account/device Presets.xml.
+type PresetSnapshot struct {
+	State        PresetSnapshotState
+	Presets      []models.ServicePreset
+	NeedsRewrite bool
+}
+
+// ReadPresetSnapshot reads the literal account/device Presets.xml without
+// rewriting legacy XML or collapsing missing/corrupt files into a valid empty
+// snapshot.
+func (ds *DataStore) ReadPresetSnapshot(account, device string) (PresetSnapshot, error) {
+	ds.fileMutex.RLock()
+	defer ds.fileMutex.RUnlock()
+
+	path := ds.safeJoin("accounts", account, constants.DevicesDir, device, constants.PresetsFile)
+
+	data, err := ds.rootReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return PresetSnapshot{State: PresetSnapshotMissing}, nil
+		}
+
+		return PresetSnapshot{}, err
+	}
+
+	if len(bytes.TrimSpace(data)) == 0 {
+		return PresetSnapshot{State: PresetSnapshotEmpty}, nil
+	}
+
+	normalized := bytes.ReplaceAll(data, []byte("<ContentItem"), []byte("<contentItem"))
+	normalized = bytes.ReplaceAll(normalized, []byte("</ContentItem>"), []byte("</contentItem>"))
+
+	var root struct {
+		XMLName xml.Name `xml:"presets"`
+	}
+	if unmarshalErr := xml.Unmarshal(normalized, &root); unmarshalErr != nil {
+		return PresetSnapshot{State: PresetSnapshotMalformed}, nil
+	}
+
+	presets, _, err := ds.readPresetsNoLock(account, device)
+	if err != nil {
+		return PresetSnapshot{}, err
+	}
+
+	return PresetSnapshot{
+		State:        PresetSnapshotValid,
+		Presets:      presets,
+		NeedsRewrite: !bytes.Equal(normalized, data),
+	}, nil
+}
+
 // GetPresets retrieves all presets for the specified account and device.
 func (ds *DataStore) GetPresets(account, device string) ([]models.ServicePreset, error) {
 	ds.fileMutex.RLock()
@@ -1001,6 +1085,18 @@ func (ds *DataStore) GetPresets(account, device string) ([]models.ServicePreset,
 	}
 
 	return presets, nil
+}
+
+// GetPresetsReadOnly retrieves presets without canonicalizing legacy XML on
+// disk. It is intended for preflight paths which must not mutate datastore
+// state while rendering the response they are about to validate.
+func (ds *DataStore) GetPresetsReadOnly(account, device string) ([]models.ServicePreset, error) {
+	ds.fileMutex.RLock()
+	defer ds.fileMutex.RUnlock()
+
+	presets, _, err := ds.readPresetsNoLock(account, device)
+
+	return presets, err
 }
 
 // MutatePresets atomically reads the current preset list, transforms it via

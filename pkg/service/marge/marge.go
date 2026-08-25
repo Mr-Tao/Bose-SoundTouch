@@ -695,6 +695,10 @@ func APIVersionsToXML() ([]byte, error) {
 
 // CreateAccountDevice creates an AccountDevice model for the given account and device.
 func CreateAccountDevice(ds *datastore.DataStore, account, deviceID string) (models.AccountDevice, error) {
+	return createAccountDevice(ds, account, deviceID, ds.GetPresets)
+}
+
+func createAccountDevice(ds *datastore.DataStore, account, deviceID string, readPresets func(string, string) ([]models.ServicePreset, error)) (models.AccountDevice, error) {
 	info, err := ds.GetDeviceInfo(account, deviceID)
 	if err != nil {
 		return models.AccountDevice{}, err
@@ -746,7 +750,7 @@ func CreateAccountDevice(ds *datastore.DataStore, account, deviceID string) (mod
 		return models.AccountDevice{}, err
 	}
 
-	presets, _ := ds.GetPresets(account, deviceID)
+	presets, _ := readPresets(account, deviceID)
 	recents, _ := ds.GetRecents(account, deviceID)
 
 	device.Presets = mapPresetsToFullResponse(presets, sources)
@@ -1261,6 +1265,10 @@ func fillAccountInfo(ds *datastore.DataStore, account string, resp *models.Accou
 }
 
 func getAccountDevices(ds *datastore.DataStore, account string, entries []os.DirEntry) ([]models.AccountDevice, string) {
+	return getAccountDevicesWithPresetReader(ds, account, entries, ds.GetPresets)
+}
+
+func getAccountDevicesWithPresetReader(ds *datastore.DataStore, account string, entries []os.DirEntry, readPresets func(string, string) ([]models.ServicePreset, error)) ([]models.AccountDevice, string) {
 	var (
 		devices      []models.AccountDevice
 		lastDeviceID string
@@ -1274,7 +1282,7 @@ func getAccountDevices(ds *datastore.DataStore, account string, entries []os.Dir
 		deviceID := entry.Name()
 		lastDeviceID = deviceID
 
-		dev, err := CreateAccountDevice(ds, account, deviceID)
+		dev, err := createAccountDevice(ds, account, deviceID, readPresets)
 		if err != nil {
 			continue
 		}
@@ -1469,6 +1477,16 @@ func AccountDevicesToXML(ds *datastore.DataStore, account string) ([]byte, error
 
 // AccountFullToXML generates a complete account XML with devices, presets, and recents.
 func AccountFullToXML(ds *datastore.DataStore, account string) ([]byte, error) {
+	return accountFullToXML(ds, account, ds.GetPresets)
+}
+
+// AccountFullToXMLReadOnly generates the same account XML without rewriting
+// legacy preset snapshots while traversing account devices.
+func AccountFullToXMLReadOnly(ds *datastore.DataStore, account string) ([]byte, error) {
+	return accountFullToXML(ds, account, ds.GetPresetsReadOnly)
+}
+
+func accountFullToXML(ds *datastore.DataStore, account string, readPresets func(string, string) ([]models.ServicePreset, error)) ([]byte, error) {
 	devicesDir := ds.AccountDevicesDir(account)
 
 	resp := models.AccountFullResponse{
@@ -1486,7 +1504,7 @@ func AccountFullToXML(ds *datastore.DataStore, account string) ([]byte, error) {
 		return nil, err
 	}
 
-	devices, lastDeviceID := getAccountDevices(ds, account, entries)
+	devices, lastDeviceID := getAccountDevicesWithPresetReader(ds, account, entries, readPresets)
 	resp.Devices = devices
 	resp.Sources = getAccountSources(ds, account, lastDeviceID)
 

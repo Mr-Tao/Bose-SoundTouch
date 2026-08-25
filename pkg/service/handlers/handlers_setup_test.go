@@ -714,6 +714,12 @@ func TestMigrationAndCA(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader(xml)),
 			}, nil
 		}
+		if strings.HasSuffix(url, "/presets") {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`<presets/>`)),
+			}, nil
+		}
 		return &http.Response{
 			StatusCode: http.StatusNotFound,
 			Body:       io.NopCloser(strings.NewReader("Not Found")),
@@ -732,6 +738,7 @@ func TestMigrationAndCA(t *testing.T) {
 		IPAddress: "192.0.2.10",
 		AccountID: "default",
 	})
+	_ = ds.SavePresets("default", "192.0.2.10", nil)
 
 	// 1. Test GET /setup/ca.crt
 	res, err := http.Get(ts.URL + "/setup/ca.crt")

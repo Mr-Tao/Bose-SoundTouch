@@ -3,6 +3,8 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"fmt"
 
 	"github.com/gesellix/bose-soundtouch/pkg/discovery"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
@@ -719,8 +719,15 @@ func (s *Server) HandleMigrateDevice(w http.ResponseWriter, r *http.Request) {
 
 	output, err := s.sm.MigrateSpeaker(deviceIP, targetURL, proxyURL, options, method)
 	if err != nil {
+		status := http.StatusInternalServerError
+
+		var notReady *setup.MigrationDataNotReadyError
+		if errors.As(err, &notReady) {
+			status = http.StatusConflict
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(status)
 
 		if encodeErr := json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "message": err.Error(), "output": output}); encodeErr != nil {
 			http.Error(w, "Failed to encode response", http.StatusInternalServerError)

@@ -873,6 +873,10 @@ func (m *Manager) firstCACertBodyLine() (string, bool) {
 
 // MigrateSpeaker configures the speaker at the given IP to use this service.
 func (m *Manager) MigrateSpeaker(deviceIP, targetURL, proxyURL string, options map[string]string, method MigrationMethod) (string, error) {
+	if err := m.checkMigrationDataReady(deviceIP); err != nil {
+		return "", err
+	}
+
 	if targetURL == "" {
 		targetURL = m.ServerURL
 	}
@@ -2867,6 +2871,10 @@ func (m *Manager) fetchLivePresets(deviceIP string) ([]models.ServicePreset, err
 	}
 
 	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("GET %s returned %d", presetsURL, resp.StatusCode)
+	}
 
 	var ps models.Presets
 	if decodeErr := xml.NewDecoder(resp.Body).Decode(&ps); decodeErr != nil {
