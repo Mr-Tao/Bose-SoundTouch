@@ -18,6 +18,17 @@ type deviceView struct {
 	StereoPair *stereoPairView        `json:"stereoPair,omitempty"`
 }
 
+// deviceProjectionEntry captures one immutable status pointer per physical
+// device. Projection must not re-read live connection state midway through
+// building a response, otherwise group membership and the emitted status can
+// describe different moments.
+type deviceProjectionEntry struct {
+	ID       string
+	Info     *models.DeviceInfo
+	Status   *webtypes.DeviceStatus
+	LastSeen time.Time
+}
+
 // stereoPairView describes the physical members represented by a logical
 // player target. Controls are always sent to MasterDeviceID via the map key.
 type stereoPairView struct {
@@ -48,13 +59,35 @@ func (app *WebApp) deviceViewSnapshot() map[string]deviceView {
 }
 
 func projectDeviceEntries(snapshot []DeviceEntry) map[string]deviceView {
-	byDeviceID := make(map[string][]DeviceEntry, len(snapshot))
+	return projectCapturedDeviceEntries(captureDeviceProjectionEntries(snapshot))
+}
+
+func captureDeviceProjectionEntries(snapshot []DeviceEntry) []deviceProjectionEntry {
+	captured := make([]deviceProjectionEntry, 0, len(snapshot))
 	for _, entry := range snapshot {
-		if entry.Device == nil || entry.Device.DeviceInfo == nil {
+		if entry.Device == nil {
 			continue
 		}
 
-		deviceID := strings.TrimSpace(entry.Device.DeviceInfo.DeviceID)
+		captured = append(captured, deviceProjectionEntry{
+			ID:       entry.ID,
+			Info:     entry.Device.DeviceInfo,
+			Status:   entry.Device.Status(),
+			LastSeen: entry.Device.LastSeen,
+		})
+	}
+
+	return captured
+}
+
+func projectCapturedDeviceEntries(snapshot []deviceProjectionEntry) map[string]deviceView {
+	byDeviceID := make(map[string][]deviceProjectionEntry, len(snapshot))
+	for _, entry := range snapshot {
+		if entry.Info == nil {
+			continue
+		}
+
+		deviceID := strings.TrimSpace(entry.Info.DeviceID)
 		if deviceID != "" {
 			byDeviceID[deviceID] = append(byDeviceID[deviceID], entry)
 		}
@@ -64,24 +97,23 @@ func projectDeviceEntries(snapshot []DeviceEntry) map[string]deviceView {
 	hidden := make(map[string]bool)
 
 	for _, entry := range snapshot {
-		if entry.Device == nil || entry.Device.DeviceInfo == nil {
+		if entry.Info == nil {
 			continue
 		}
 
-		status := entry.Device.Status()
-		if status == nil || !validMasterGroup(entry.Device.DeviceInfo.DeviceID, status.Group) {
+		if entry.Status == nil || !validMasterGroup(entry.Info.DeviceID, entry.Status.Group) {
 			continue
 		}
 
-		master, unique := uniqueDeviceEntry(byDeviceID, status.Group.MasterDeviceID)
-		if !unique || master.ID != entry.ID || !registeredMembersAgree(status.Group, byDeviceID) {
+		master, unique := uniqueDeviceEntry(byDeviceID, entry.Status.Group.MasterDeviceID)
+		if !unique || master.ID != entry.ID || !registeredMembersAgree(entry.Status.Group, byDeviceID) {
 			continue
 		}
 
-		pair := newStereoPairView(status.Group, byDeviceID)
+		pair := newStereoPairView(entry.Status.Group, byDeviceID)
 		masters[entry.ID] = pair
 
-		for _, role := range status.Group.Roles.Roles {
+		for _, role := range entry.Status.Group.Roles.Roles {
 			member, ok := uniqueDeviceEntry(byDeviceID, role.DeviceID)
 			if ok && member.ID != entry.ID {
 				hidden[member.ID] = true
@@ -91,15 +123,15 @@ func projectDeviceEntries(snapshot []DeviceEntry) map[string]deviceView {
 
 	devices := make(map[string]deviceView, len(snapshot))
 	for _, entry := range snapshot {
-		if entry.Device == nil || hidden[entry.ID] {
+		if hidden[entry.ID] {
 			continue
 		}
 
 		pair := masters[entry.ID]
 		devices[entry.ID] = deviceView{
-			Info:       projectedDeviceInfo(entry.Device.DeviceInfo, pair),
-			Status:     entry.Device.Status(),
-			LastSeen:   entry.Device.LastSeen,
+			Info:       projectedDeviceInfo(entry.Info, pair),
+			Status:     entry.Status,
+			LastSeen:   entry.LastSeen,
 			StereoPair: pair,
 		}
 	}
@@ -120,6 +152,7 @@ func validMasterGroup(deviceID string, group *models.Group) bool {
 
 	for _, role := range group.Roles.Roles {
 		memberID := strings.TrimSpace(role.DeviceID)
+
 		memberRole := strings.ToUpper(strings.TrimSpace(role.Role))
 		if memberID == "" || seenDevices[memberID] || (memberRole != "LEFT" && memberRole != "RIGHT") || seenRoles[memberRole] {
 			return false
@@ -133,16 +166,16 @@ func validMasterGroup(deviceID string, group *models.Group) bool {
 	return masterPresent && seenRoles["LEFT"] && seenRoles["RIGHT"]
 }
 
-func uniqueDeviceEntry(byDeviceID map[string][]DeviceEntry, deviceID string) (DeviceEntry, bool) {
+func uniqueDeviceEntry(byDeviceID map[string][]deviceProjectionEntry, deviceID string) (deviceProjectionEntry, bool) {
 	entries := byDeviceID[strings.TrimSpace(deviceID)]
 	if len(entries) != 1 {
-		return DeviceEntry{}, false
+		return deviceProjectionEntry{}, false
 	}
 
 	return entries[0], true
 }
 
-func registeredMembersAgree(group *models.Group, byDeviceID map[string][]DeviceEntry) bool {
+func registeredMembersAgree(group *models.Group, byDeviceID map[string][]deviceProjectionEntry) bool {
 	for _, role := range group.Roles.Roles {
 		entries := byDeviceID[strings.TrimSpace(role.DeviceID)]
 		if len(entries) > 1 {
@@ -153,8 +186,7 @@ func registeredMembersAgree(group *models.Group, byDeviceID map[string][]DeviceE
 			continue
 		}
 
-		status := entries[0].Device.Status()
-		if status == nil || !sameGroupClaim(group, status.Group) {
+		if entries[0].Status == nil || !sameGroupClaim(group, entries[0].Status.Group) {
 			return false
 		}
 	}
@@ -182,7 +214,7 @@ func sameGroupClaim(left, right *models.Group) bool {
 	return true
 }
 
-func newStereoPairView(group *models.Group, byDeviceID map[string][]DeviceEntry) *stereoPairView {
+func newStereoPairView(group *models.Group, byDeviceID map[string][]deviceProjectionEntry) *stereoPairView {
 	members := make([]stereoPairMemberView, 0, len(group.Roles.Roles))
 	available := 0
 
@@ -193,16 +225,15 @@ func newStereoPairView(group *models.Group, byDeviceID map[string][]DeviceEntry)
 			IPAddress: role.IPAddress,
 		}
 
-		if entry, ok := uniqueDeviceEntry(byDeviceID, role.DeviceID); ok && entry.Device != nil {
-			if entry.Device.DeviceInfo != nil {
-				member.Name = entry.Device.DeviceInfo.Name
-				if entry.Device.DeviceInfo.IPAddress != "" {
-					member.IPAddress = entry.Device.DeviceInfo.IPAddress
+		if entry, ok := uniqueDeviceEntry(byDeviceID, role.DeviceID); ok {
+			if entry.Info != nil {
+				member.Name = entry.Info.Name
+				if entry.Info.IPAddress != "" {
+					member.IPAddress = entry.Info.IPAddress
 				}
 			}
 
-			status := entry.Device.Status()
-			member.Available = status != nil && status.IsConnected
+			member.Available = entry.Status != nil && entry.Status.IsConnected
 			if member.Available {
 				available++
 			}
@@ -236,6 +267,7 @@ func projectedDeviceInfo(info *models.DeviceInfo, pair *stereoPairView) *models.
 
 func logicalPairName(groupName string, members []stereoPairMemberView) string {
 	commonName := ""
+
 	for _, member := range members {
 		name := strings.TrimSpace(member.Name)
 		if name == "" {

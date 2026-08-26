@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
@@ -147,6 +148,28 @@ func TestProjectDeviceEntriesRejectsConflictingMemberClaim(t *testing.T) {
 
 	if len(got) != 2 {
 		t.Fatalf("conflicting pair claims must fail open: %+v", got)
+	}
+}
+
+func TestProjectCapturedDeviceEntriesUsesOneCoherentStatusPerDevice(t *testing.T) {
+	group := testStereoGroup()
+	entries := []DeviceEntry{
+		projectionDevice("192.0.2.10", "left-id", "Living Room", true, group),
+		projectionDevice("192.0.2.11", "right-id", "Living Room", true, group),
+	}
+	captured := captureDeviceProjectionEntries(entries)
+
+	entries[0].Device.ApplyGroupEvent(&models.Group{}, time.Now())
+	entries[1].Device.ApplyGroupEvent(&models.Group{}, time.Now())
+
+	got := projectCapturedDeviceEntries(captured)
+	master := got["192.0.2.10"]
+	if master.StereoPair == nil || master.Status == nil || master.Status.Group == nil || master.Status.Group.ID != "pair-1" {
+		t.Fatalf("captured projection mixed newer connection state into its response: %+v", got)
+	}
+
+	if fresh := projectDeviceEntries(entries); len(fresh) != 2 {
+		t.Fatalf("fresh projection did not observe the cleared group: %+v", fresh)
 	}
 }
 

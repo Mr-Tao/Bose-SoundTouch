@@ -29,7 +29,6 @@ type SoundTouchClient interface {
 	GetPresets() (*models.Presets, error)
 	GetSources() (*models.Sources, error)
 	GetBass() (*models.Bass, error)
-	GetGroup() (*models.Group, error)
 	NewWebSocketClient(config interface{}) *client.WebSocketClient
 }
 
