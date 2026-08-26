@@ -45,21 +45,9 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Send initial device list
-	snapshot := app.DeviceSnapshot()
-	devices := make(map[string]interface{}, len(snapshot))
-
-	for _, entry := range snapshot {
-		devices[entry.ID] = map[string]interface{}{
-			"info":     entry.Device.DeviceInfo,
-			"status":   entry.Device.Status(),
-			"lastSeen": entry.Device.LastSeen,
-		}
-	}
-
 	initialMessage := webtypes.WebSocketMessage{
 		Type: "devices",
-		Data: devices,
+		Data: app.deviceListSnapshot(),
 	}
 
 	if err := conn.WriteJSON(initialMessage); err != nil {

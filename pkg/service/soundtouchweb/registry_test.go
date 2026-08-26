@@ -4,9 +4,11 @@
 package soundtouchweb
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
@@ -115,6 +117,63 @@ func TestDeviceSnapshotAndCount(t *testing.T) {
 			t.Errorf("DeviceSnapshot missing %s", id)
 		}
 	}
+}
+
+func TestDeviceSnapshotCapturesLastSeen(t *testing.T) {
+	app := NewWebApp()
+	conn := newRegistryDevice("first")
+	fixed := time.Date(2026, time.August, 26, 12, 0, 0, 0, time.UTC)
+	conn.LastSeen = fixed
+	app.AddDevice("host-1", conn)
+
+	snapshot := app.DeviceSnapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("DeviceSnapshot len = %d; want 1", len(snapshot))
+	}
+
+	if !app.TouchDevice("host-1") {
+		t.Fatal("TouchDevice returned false for known id")
+	}
+
+	if !snapshot[0].LastSeen.Equal(fixed) {
+		t.Errorf("captured LastSeen = %v; want %v", snapshot[0].LastSeen, fixed)
+	}
+
+	current := app.DeviceSnapshot()
+	if !current[0].LastSeen.After(fixed) {
+		t.Errorf("current LastSeen = %v; want after %v", current[0].LastSeen, fixed)
+	}
+}
+
+func TestDeviceListSnapshotConcurrentLastSeen(t *testing.T) {
+	app := NewWebApp()
+	app.AddDevice("shared", newRegistryDevice("shared"))
+
+	const operations = 1000
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+
+		for range operations {
+			app.TouchDevice("shared")
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		for range operations {
+			if _, err := json.Marshal(app.deviceListSnapshot()); err != nil {
+				t.Errorf("marshal device list snapshot: %v", err)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 
 func TestRemoveDevice(t *testing.T) {
