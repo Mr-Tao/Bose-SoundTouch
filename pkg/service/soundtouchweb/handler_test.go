@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -841,6 +842,151 @@ func TestHandleSourceControl_ForwardsAccount(t *testing.T) {
 				t.Errorf("XML should contain %q, got: %s", want, capturedBody)
 			}
 		})
+	}
+}
+
+func TestHandleZoneAddRejectsSelf(t *testing.T) {
+	app := NewWebApp()
+	req := httptest.NewRequest("POST", "/api/control/devices/192.0.2.10/zone/add/192.0.2.10", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "slaveId": "192.0.2.10"})
+	w := httptest.NewRecorder()
+
+	app.HandleZoneAdd(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "cannot be added to its own zone") {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+}
+
+func TestHandleZoneAddRejectsSameHardwareUnderDifferentKeys(t *testing.T) {
+	app := NewWebApp()
+	app.AddDevice("speaker.local", webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: "http://speaker.local"}),
+		&models.DeviceInfo{Name: "Speaker", DeviceID: "SAMEHW01"},
+	))
+	app.AddDevice("192.0.2.10", webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Speaker alias", DeviceID: "SAMEHW01"}))
+
+	req := httptest.NewRequest("POST", "/api/control/devices/speaker.local/zone/add/192.0.2.10", nil)
+	req = withChiParams(req, map[string]string{"id": "speaker.local", "slaveId": "192.0.2.10"})
+	w := httptest.NewRecorder()
+	app.HandleZoneAdd(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCurrentSourceAllowsMultiroom(t *testing.T) {
+	sources := &models.Sources{SourceItem: []models.SourceItem{
+		{Source: "SPOTIFY", SourceAccount: "first", MultiroomAllowed: true},
+		{Source: "BLUETOOTH", MultiroomAllowed: false},
+	}}
+
+	for _, test := range []struct {
+		name       string
+		nowPlaying *models.NowPlaying
+		allowed    bool
+	}{
+		{name: "matching account", nowPlaying: &models.NowPlaying{Source: "SPOTIFY", SourceAccount: "first"}, allowed: true},
+		{name: "different account", nowPlaying: &models.NowPlaying{Source: "SPOTIFY", SourceAccount: "second"}},
+		{name: "source disallows multiroom", nowPlaying: &models.NowPlaying{Source: "BLUETOOTH"}},
+		{name: "standby", nowPlaying: &models.NowPlaying{Source: "STANDBY"}},
+		{name: "missing state"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := currentSourceAllowsMultiroom(test.nowPlaying, sources); got != test.allowed {
+				t.Fatalf("currentSourceAllowsMultiroom() = %t, want %t", got, test.allowed)
+			}
+		})
+	}
+}
+
+func TestHandleZoneAddUsesSetZoneWithoutStartingPlayback(t *testing.T) {
+	var paths []string
+	var zoneBody string
+	masterSpeaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/now_playing":
+			_, _ = w.Write([]byte(`<nowPlaying deviceID="MASTERHW01" source="LOCAL_INTERNET_RADIO"><playStatus>PLAY_STATE</playStatus></nowPlaying>`))
+		case "/sources":
+			_, _ = w.Write([]byte(`<sources deviceID="MASTERHW01"><sourceItem source="LOCAL_INTERNET_RADIO" status="READY" isLocal="false" multiroomallowed="true" /></sources>`))
+		case "/getZone":
+			_, _ = w.Write([]byte(`<zone master="MASTERHW01"/>`))
+		case "/setZone":
+			body, _ := io.ReadAll(r.Body)
+			zoneBody = string(body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer masterSpeaker.Close()
+
+	app := NewWebApp()
+	master := webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: masterSpeaker.URL}),
+		&models.DeviceInfo{Name: "Master", DeviceID: "MASTERHW01"},
+	)
+	master.SetStatus(&webtypes.DeviceStatus{IsConnected: true, LastActivity: time.Now()})
+	app.AddDevice("192.0.2.10", master)
+	app.AddDevice("192.0.2.20", webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Slave", DeviceID: "SLAVEHW02"}))
+
+	req := httptest.NewRequest("POST", "/api/control/devices/192.0.2.10/zone/add/192.0.2.20", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "slaveId": "192.0.2.20"})
+	w := httptest.NewRecorder()
+	app.HandleZoneAdd(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	wantPaths := []string{"GET /now_playing", "GET /sources", "GET /getZone", "POST /setZone"}
+	if !reflect.DeepEqual(paths, wantPaths) {
+		t.Fatalf("requests = %v, want %v", paths, wantPaths)
+	}
+	if !strings.Contains(zoneBody, "SLAVEHW02") {
+		t.Fatalf("setZone body does not contain slave: %s", zoneBody)
+	}
+}
+
+func TestHandleZoneAddRejectsStandbyMaster(t *testing.T) {
+	var paths []string
+	masterSpeaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/now_playing":
+			_, _ = w.Write([]byte(`<nowPlaying deviceID="MASTERHW01" source="STANDBY"/>`))
+		case "/sources":
+			_, _ = w.Write([]byte(`<sources deviceID="MASTERHW01"><sourceItem source="LOCAL_INTERNET_RADIO" status="READY" multiroomallowed="true" /></sources>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer masterSpeaker.Close()
+
+	app := NewWebApp()
+	app.AddDevice("192.0.2.10", webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: masterSpeaker.URL}),
+		&models.DeviceInfo{Name: "Master", DeviceID: "MASTERHW01"},
+	))
+	app.AddDevice("192.0.2.20", webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Slave", DeviceID: "SLAVEHW02"}))
+
+	req := httptest.NewRequest("POST", "/api/control/devices/192.0.2.10/zone/add/192.0.2.20", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "slaveId": "192.0.2.20"})
+	w := httptest.NewRecorder()
+	app.HandleZoneAdd(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if want := []string{"GET /now_playing", "GET /sources"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("requests = %v, want %v", paths, want)
 	}
 }
 

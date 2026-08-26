@@ -1079,6 +1079,10 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 	masterIP := chi.URLParam(r, "id")
 	slaveIP := chi.URLParam(r, "slaveId")
+	if masterIP == slaveIP {
+		app.sendError(w, "A device cannot be added to its own zone", http.StatusBadRequest)
+		return
+	}
 
 	masterConn, ok := app.GetDevice(masterIP)
 	if !ok {
@@ -1094,6 +1098,27 @@ func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 
 	if masterConn.Client == nil || masterConn.DeviceInfo == nil || slaveConn.DeviceInfo == nil {
 		app.sendError(w, "Device not ready", http.StatusInternalServerError)
+		return
+	}
+	if masterConn.DeviceInfo.DeviceID == slaveConn.DeviceInfo.DeviceID {
+		app.sendError(w, "A device cannot be added to its own zone", http.StatusBadRequest)
+		return
+	}
+
+	nowPlaying, err := masterConn.Client.GetNowPlaying()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sources, err := masterConn.Client.GetSources()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if !currentSourceAllowsMultiroom(nowPlaying, sources) {
+		app.sendError(w, "Start a multiroom-capable source before grouping speakers", http.StatusConflict)
 		return
 	}
 
@@ -1117,6 +1142,27 @@ func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	app.sendControlResponse(w, masterConn.Client.SetZone(zoneReq), "Device added to zone")
+}
+
+func currentSourceAllowsMultiroom(nowPlaying *models.NowPlaying, sources *models.Sources) bool {
+	if nowPlaying == nil || sources == nil {
+		return false
+	}
+
+	source := strings.TrimSpace(nowPlaying.Source)
+	if source == "" || source == "STANDBY" || source == "INVALID_SOURCE" {
+		return false
+	}
+
+	for i := range sources.SourceItem {
+		item := &sources.SourceItem[i]
+		if item.Source == source && item.MultiroomAllowed &&
+			(nowPlaying.SourceAccount == "" || item.SourceAccount == nowPlaying.SourceAccount) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // HandleZoneRemove removes a slave from the zone.
