@@ -117,11 +117,12 @@ func (app *WebApp) proxyServiceURL() string {
 	return app.ServiceURL
 }
 
-// DeviceEntry pairs a device id with its connection. Used by
-// DeviceSnapshot so callers can iterate without holding the lock.
+// DeviceEntry pairs a device id with its connection and the LastSeen value
+// captured by DeviceSnapshot under the registry lock.
 type DeviceEntry struct {
-	ID     string
-	Device *webtypes.DeviceConnection
+	ID       string
+	Device   *webtypes.DeviceConnection
+	LastSeen time.Time
 }
 
 // NewWebApp creates a new WebApp instance for SPA mode
@@ -198,14 +199,16 @@ func (app *WebApp) GetDevice(id string) (*webtypes.DeviceConnection, bool) {
 // holding any registry lock. Devices added or removed after the call
 // are not reflected. A pointer captured here stays valid even if the
 // device is later removed (RemoveDevice only detaches it from the map
-// and stops its goroutines), so iterating a stale snapshot is safe.
+// and stops its goroutines), so iterating a stale snapshot is safe. LastSeen
+// is copied by value because TouchDevice can update the connection after the
+// registry lock is released.
 func (app *WebApp) DeviceSnapshot() []DeviceEntry {
 	app.devicesMu.RLock()
 	defer app.devicesMu.RUnlock()
 
 	out := make([]DeviceEntry, 0, len(app.devices))
 	for id, device := range app.devices {
-		out = append(out, DeviceEntry{ID: id, Device: device})
+		out = append(out, DeviceEntry{ID: id, Device: device, LastSeen: device.LastSeen})
 	}
 
 	return out
@@ -301,7 +304,6 @@ func (app *WebApp) removeDeviceIfMatch(id string, expected *webtypes.DeviceConne
 func (app *WebApp) HandleAPIDevices(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Return all devices as JSON
 	response := webtypes.APIResponse{
 		Success: true,
 		Data:    app.deviceViewSnapshot(),
