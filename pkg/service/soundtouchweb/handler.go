@@ -1078,6 +1078,7 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 // becomes the master.
 func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 	masterIP := chi.URLParam(r, "id")
+
 	slaveIP := chi.URLParam(r, "slaveId")
 	if masterIP == slaveIP {
 		app.sendError(w, "A device cannot be added to its own zone", http.StatusBadRequest)
@@ -1100,6 +1101,7 @@ func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 		app.sendError(w, "Device not ready", http.StatusInternalServerError)
 		return
 	}
+
 	if masterConn.DeviceInfo.DeviceID == slaveConn.DeviceInfo.DeviceID {
 		app.sendError(w, "A device cannot be added to its own zone", http.StatusBadRequest)
 		return
