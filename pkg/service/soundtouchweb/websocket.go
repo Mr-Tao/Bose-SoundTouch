@@ -21,15 +21,15 @@ type webSocketWriter interface {
 	WriteMessage(int, []byte) error
 }
 
-// webSocketWriteBatch gives every write in one critical section the same
-// absolute deadline. This bounds the section even when it emits several
-// frames, so a stalled browser cannot hold WSMutex indefinitely.
+// webSocketWriteBatch gives every write a fresh deadline. A stalled client is
+// bounded without passing an already-expired deadline to healthy clients later
+// in the same broadcast.
 type webSocketWriteBatch struct {
-	deadline time.Time
+	timeout time.Duration
 }
 
 func (batch webSocketWriteBatch) writeJSON(conn webSocketWriter, value interface{}) error {
-	if err := conn.SetWriteDeadline(batch.deadline); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(batch.timeout)); err != nil {
 		return err
 	}
 
@@ -37,7 +37,7 @@ func (batch webSocketWriteBatch) writeJSON(conn webSocketWriter, value interface
 }
 
 func (batch webSocketWriteBatch) writeMessage(conn webSocketWriter, messageType int, data []byte) error {
-	if err := conn.SetWriteDeadline(batch.deadline); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(batch.timeout)); err != nil {
 		return err
 	}
 
@@ -46,18 +46,18 @@ func (batch webSocketWriteBatch) writeMessage(conn webSocketWriter, messageType 
 
 // withGlobalWebSocketWrite is the single write seam for the application-wide
 // and per-device browser WebSocket connections. Gorilla permits one concurrent
-// writer per connection; the existing registry mutex also keeps removal ordered
-// with writes.
+// writer per connection. The client registry has a separate lock so connection
+// registration and cleanup never wait on network I/O.
 func (app *WebApp) withGlobalWebSocketWrite(write func(webSocketWriteBatch) error) error {
-	app.WSMutex.Lock()
-	defer app.WSMutex.Unlock()
+	app.webSocketWriteMu.Lock()
+	defer app.webSocketWriteMu.Unlock()
 
 	timeout := app.webSocketWriteTimeout
 	if timeout <= 0 {
 		timeout = defaultWebSocketWriteTimeout
 	}
 
-	return write(webSocketWriteBatch{deadline: time.Now().Add(timeout)})
+	return write(webSocketWriteBatch{timeout: timeout})
 }
 
 // awaitPriorGlobalWebSocketWrites is an ordering barrier. Once it returns, any
@@ -65,6 +65,26 @@ func (app *WebApp) withGlobalWebSocketWrite(write func(webSocketWriteBatch) erro
 // later writer must capture the newly projected state under the same lock.
 func (app *WebApp) awaitPriorGlobalWebSocketWrites() {
 	_ = app.withGlobalWebSocketWrite(func(webSocketWriteBatch) error { return nil })
+}
+
+func (app *WebApp) globalWebSocketClients() []*websocket.Conn {
+	app.WSMutex.RLock()
+	defer app.WSMutex.RUnlock()
+
+	clients := make([]*websocket.Conn, 0, len(app.WSClients))
+	for client := range app.WSClients {
+		clients = append(clients, client)
+	}
+
+	return clients
+}
+
+func (app *WebApp) removeGlobalWebSocketClient(client *websocket.Conn) {
+	app.WSMutex.Lock()
+	delete(app.WSClients, client)
+	app.WSMutex.Unlock()
+
+	_ = client.Close()
 }
 
 // HandleWebSocket handles WebSocket connections for real-time updates
@@ -76,21 +96,16 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer func() {
-		// Unregister client
-		app.WSMutex.Lock()
-		delete(app.WSClients, conn)
-		app.WSMutex.Unlock()
-		conn.Close()
+		app.removeGlobalWebSocketClient(conn)
 	}()
-
-	// Register client
-	app.WSMutex.Lock()
-	app.WSClients[conn] = true
-	app.WSMutex.Unlock()
 
 	// Send initial frames under the same write lock used by broadcasts and
 	// periodic updates so no Gorilla writes can overlap on this connection.
 	if err := app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		app.WSMutex.Lock()
+		app.WSClients[conn] = true
+		app.WSMutex.Unlock()
+
 		if ds, ok := app.discoveryStatus.Load().(*webtypes.DiscoveryStatus); ok {
 			if err := batch.writeJSON(conn, webtypes.WebSocketMessage{
 				Type: "discovery_status",

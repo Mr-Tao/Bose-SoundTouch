@@ -13,11 +13,18 @@ import (
 )
 
 type recordingWebSocketWriter struct {
-	mu       sync.Mutex
-	messages []interface{}
+	mu        sync.Mutex
+	deadlines []time.Time
+	messages  []interface{}
 }
 
-func (writer *recordingWebSocketWriter) SetWriteDeadline(time.Time) error { return nil }
+func (writer *recordingWebSocketWriter) SetWriteDeadline(deadline time.Time) error {
+	writer.mu.Lock()
+	writer.deadlines = append(writer.deadlines, deadline)
+	writer.mu.Unlock()
+
+	return nil
+}
 
 func (writer *recordingWebSocketWriter) WriteJSON(value interface{}) error {
 	writer.mu.Lock()
@@ -39,6 +46,16 @@ func (writer *recordingWebSocketWriter) firstMessage() (webtypes.WebSocketMessag
 	message, ok := writer.messages[0].(webtypes.WebSocketMessage)
 
 	return message, ok
+}
+
+func (writer *recordingWebSocketWriter) lastDeadline() (time.Time, bool) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if len(writer.deadlines) == 0 {
+		return time.Time{}, false
+	}
+
+	return writer.deadlines[len(writer.deadlines)-1], true
 }
 
 func TestUpdateDeviceStatusRefreshesGroup(t *testing.T) {
@@ -183,8 +200,8 @@ func TestGlobalWebSocketWriteSeamSerializesWriters(t *testing.T) {
 	}()
 
 	<-entered
-	if app.WSMutex.TryLock() {
-		app.WSMutex.Unlock()
+	if app.webSocketWriteMu.TryLock() {
+		app.webSocketWriteMu.Unlock()
 		t.Fatal("global WebSocket writer lock was not held across the write seam")
 	}
 
@@ -193,6 +210,27 @@ func TestGlobalWebSocketWriteSeamSerializesWriters(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("global WebSocket writer lock was not released")
+	}
+}
+
+func TestWebSocketWriteBatchRefreshesDeadlineForHealthyWriter(t *testing.T) {
+	timeout := 30 * time.Millisecond
+	batch := webSocketWriteBatch{timeout: timeout}
+	blocked := &deadlineBlockingWebSocketWriter{started: make(chan struct{})}
+
+	if err := batch.writeJSON(blocked, struct{}{}); err == nil {
+		t.Fatal("blocked writer unexpectedly succeeded")
+	}
+
+	healthy := &recordingWebSocketWriter{}
+	started := time.Now()
+	if err := batch.writeJSON(healthy, webtypes.WebSocketMessage{Type: "devices"}); err != nil {
+		t.Fatalf("healthy writer inherited the failed client's deadline: %v", err)
+	}
+
+	deadline, ok := healthy.lastDeadline()
+	if !ok || deadline.Before(started.Add(timeout/2)) {
+		t.Fatalf("healthy writer deadline = %v, want a fresh deadline after %v", deadline, started)
 	}
 }
 

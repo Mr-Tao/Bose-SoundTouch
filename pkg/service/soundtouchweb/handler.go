@@ -37,10 +37,12 @@ type WebApp struct {
 
 	Upgrader  websocket.Upgrader
 	WSClients map[*websocket.Conn]bool
-	WSMutex   sync.Mutex
-	// webSocketWriteTimeout bounds a complete browser WebSocket write batch.
-	// A stalled client must not indefinitely delay a lifecycle response that is
-	// waiting for all pre-mutation frames to finish.
+	WSMutex   sync.RWMutex
+	// webSocketWriteMu serializes browser WebSocket writes independently of the
+	// client registry. Gorilla permits only one concurrent writer per connection.
+	webSocketWriteMu sync.Mutex
+	// webSocketWriteTimeout bounds each browser WebSocket write. A stalled client
+	// must not indefinitely delay a lifecycle response waiting for older frames.
 	webSocketWriteTimeout time.Duration
 
 	Version    string
@@ -769,17 +771,18 @@ func (app *WebApp) HandleDevicePowerStatus(w http.ResponseWriter, r *http.Reques
 
 // BroadcastDeviceList sends updated device list to all connected WebSocket clients
 func (app *WebApp) BroadcastDeviceList() {
+	clients := app.globalWebSocketClients()
+
 	_ = app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
 		message := webtypes.WebSocketMessage{
 			Type: "devices",
 			Data: app.deviceViewSnapshot(),
 		}
 
-		for client := range app.WSClients {
+		for _, client := range clients {
 			if err := batch.writeJSON(client, message); err != nil {
 				log.Printf("Failed to send device update to WebSocket client: %v", err)
-				delete(app.WSClients, client)
-				_ = client.Close()
+				app.removeGlobalWebSocketClient(client)
 			}
 		}
 
@@ -802,6 +805,7 @@ func (app *WebApp) BroadcastDiscoveryStatus(status string, deviceCount int) {
 	}
 
 	app.discoveryStatus.Store(discoveryStatus)
+	clients := app.globalWebSocketClients()
 
 	_ = app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
 		message := webtypes.WebSocketMessage{
@@ -809,11 +813,10 @@ func (app *WebApp) BroadcastDiscoveryStatus(status string, deviceCount int) {
 			Data: discoveryStatus,
 		}
 
-		for client := range app.WSClients {
+		for _, client := range clients {
 			if err := batch.writeJSON(client, message); err != nil {
 				log.Printf("Failed to send discovery status to WebSocket client: %v", err)
-				delete(app.WSClients, client)
-				_ = client.Close()
+				app.removeGlobalWebSocketClient(client)
 			}
 		}
 
