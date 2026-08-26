@@ -100,6 +100,42 @@ func TestApplyGroupUpdatedEventReplacesGroup(t *testing.T) {
 	}
 }
 
+func TestPeriodicPlayerMessagesPreserveStatusUpdateStream(t *testing.T) {
+	app := NewWebApp()
+	group := testStereoGroup()
+	for _, entry := range []DeviceEntry{
+		projectionDevice("192.0.2.10", "left-id", "Living Room", true, group),
+		projectionDevice("192.0.2.11", "right-id", "Living Room", true, group),
+		projectionDevice("192.0.2.12", "standalone-id", "Kitchen", false, nil),
+	} {
+		app.AddDevice(entry.ID, entry.Device)
+	}
+
+	messages := app.periodicPlayerMessages()
+	if len(messages) != 3 {
+		t.Fatalf("periodic messages = %d, want one devices frame and two connected status updates: %+v", len(messages), messages)
+	}
+
+	if messages[0].Type != "devices" {
+		t.Fatalf("first periodic message type = %q, want devices", messages[0].Type)
+	}
+	devices, ok := messages[0].Data.(map[string]deviceView)
+	if !ok || len(devices) != 2 || devices["192.0.2.10"].StereoPair == nil {
+		t.Fatalf("periodic devices frame is not the logical projection: %#v", messages[0].Data)
+	}
+
+	statusUpdates := make(map[string]bool)
+	for _, message := range messages[1:] {
+		if message.Type != "status_update" {
+			t.Fatalf("periodic message type = %q, want status_update", message.Type)
+		}
+		statusUpdates[message.DeviceID] = true
+	}
+	if !statusUpdates["192.0.2.10"] || !statusUpdates["192.0.2.11"] || statusUpdates["192.0.2.12"] {
+		t.Fatalf("unexpected status_update device IDs: %+v", statusUpdates)
+	}
+}
+
 func newStatusTestServer(t *testing.T, groupStatus int, groupBody string) *httptest.Server {
 	t.Helper()
 

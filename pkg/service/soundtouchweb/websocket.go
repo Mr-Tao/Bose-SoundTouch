@@ -87,16 +87,37 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// A full projected list keeps pair topology and availability current
-		// without event handlers writing to this browser connection.
-		if err := conn.WriteJSON(webtypes.WebSocketMessage{
-			Type: "devices",
-			Data: app.deviceViewSnapshot(),
-		}); err != nil {
-			log.Printf("Failed to send device update: %v", err)
-			return
+		for _, message := range app.periodicPlayerMessages() {
+			if err := conn.WriteJSON(message); err != nil {
+				log.Printf("Failed to send device update: %v", err)
+				return
+			}
 		}
 	}
+}
+
+// periodicPlayerMessages refreshes the projected inventory while retaining
+// the established per-device status_update stream for API clients.
+func (app *WebApp) periodicPlayerMessages() []webtypes.WebSocketMessage {
+	snapshot := captureDeviceProjectionEntries(app.DeviceSnapshot())
+	messages := []webtypes.WebSocketMessage{{
+		Type: "devices",
+		Data: projectCapturedDeviceEntries(snapshot),
+	}}
+
+	for _, entry := range snapshot {
+		if entry.Status == nil || !entry.Status.IsConnected {
+			continue
+		}
+
+		messages = append(messages, webtypes.WebSocketMessage{
+			Type:     "status_update",
+			DeviceID: entry.ID,
+			Data:     entry.Status,
+		})
+	}
+
+	return messages
 }
 
 // HandleAPIDiscover triggers device discovery
