@@ -3,10 +3,21 @@ import { api } from '../api.js';
 
 const html = htm.bind(h);
 
+function currentSourceAllowsMultiroom(device) {
+    const nowPlaying = device?.status?.nowPlaying;
+    const source = nowPlaying?.Source;
+    if (!source || source === 'STANDBY' || source === 'INVALID_SOURCE') return false;
+
+    return (device?.status?.sources?.SourceItem || []).some(item =>
+        item.Source === source && item.MultiroomAllowed &&
+        (!nowPlaying.SourceAccount || item.SourceAccount === nowPlaying.SourceAccount));
+}
+
 export function Zone({ deviceId, devices }) {
     const [zone, setZone] = useState(null);
     const [loading, setLoading] = useState(true);
     const [showPicker, setShowPicker] = useState(false);
+    const canGroup = currentSourceAllowsMultiroom(devices?.[deviceId]);
 
     function refresh() {
         api.zone(deviceId).then(resp => {
@@ -15,8 +26,12 @@ export function Zone({ deviceId, devices }) {
     }
 
     useEffect(() => { refresh(); }, [deviceId]);
+    useEffect(() => {
+        if (!canGroup) setShowPicker(false);
+    }, [canGroup]);
 
     async function addDevice(slaveId) {
+        if (!canGroup) return;
         setShowPicker(false);
         await api.zoneAdd(deviceId, slaveId);
         refresh();
@@ -48,8 +63,10 @@ export function Zone({ deviceId, devices }) {
 
     // Devices not already in the zone are available to add
     const zoneIps = new Set([zone.masterIp, ...(zone.members || []).map(m => m.ip)].filter(Boolean));
-    const available = Object.entries(devices || {}).filter(([ip]) => !zoneIps.has(ip));
-
+    const selectedHardwareId = devices?.[deviceId]?.info?.device_id;
+    const available = Object.entries(devices || {}).filter(([ip, candidate]) =>
+        ip !== deviceId && candidate.info?.device_id !== selectedHardwareId &&
+        !zoneIps.has(ip) && candidate.status?.isConnected);
     const deviceName = (ip) => devices[ip]?.info?.name || ip;
 
     return html`
@@ -60,9 +77,13 @@ export function Zone({ deviceId, devices }) {
                 <div class="zone-row">
                     <span class="zone-status-label">Standalone</span>
                     ${available.length > 0 && html`
-                        <button class="btn-secondary zone-btn" onClick=${() => setShowPicker(true)}>+ Group with…</button>
+                        <button class="btn-secondary zone-btn" onClick=${() => setShowPicker(true)}
+                            disabled=${!canGroup}>+ Group with…</button>
                     `}
                 </div>
+                ${available.length > 0 && !canGroup && html`
+                    <div class="zone-status-label">Start a multiroom-capable source before grouping speakers.</div>
+                `}
             `}
 
             ${zone.isMaster && html`
@@ -81,7 +102,8 @@ export function Zone({ deviceId, devices }) {
                     `)}
                     <div class="zone-actions">
                         ${available.length > 0 && html`
-                            <button class="btn-secondary zone-btn" onClick=${() => setShowPicker(true)}>+ Add speaker</button>
+                            <button class="btn-secondary zone-btn" onClick=${() => setShowPicker(true)}
+                                disabled=${!canGroup}>+ Add speaker</button>
                         `}
                         <button class="btn-secondary zone-btn" onClick=${dissolve}>Dissolve zone</button>
                     </div>
@@ -96,7 +118,7 @@ export function Zone({ deviceId, devices }) {
                 </div>
             `}
 
-            ${showPicker && html`
+            ${showPicker && canGroup && html`
                 <div class="overlay" onClick=${() => setShowPicker(false)}>
                     <div class="device-picker" onClick=${e => e.stopPropagation()}>
                         <div class="picker-title">Add to zone</div>
