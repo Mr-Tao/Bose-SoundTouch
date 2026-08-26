@@ -46,23 +46,10 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send initial device list
-	snapshot := app.DeviceSnapshot()
-	devices := make(map[string]interface{}, len(snapshot))
-
-	for _, entry := range snapshot {
-		devices[entry.ID] = map[string]interface{}{
-			"info":     entry.Device.DeviceInfo,
-			"status":   entry.Device.Status(),
-			"lastSeen": entry.Device.LastSeen,
-		}
-	}
-
-	initialMessage := webtypes.WebSocketMessage{
+	if err := conn.WriteJSON(webtypes.WebSocketMessage{
 		Type: "devices",
-		Data: devices,
-	}
-
-	if err := conn.WriteJSON(initialMessage); err != nil {
+		Data: app.deviceViewSnapshot(),
+	}); err != nil {
 		log.Printf("Failed to send initial data: %v", err)
 		return
 	}
@@ -100,21 +87,14 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Send periodic status updates
-		for _, entry := range app.DeviceSnapshot() {
-			status := entry.Device.Status()
-			if status.IsConnected {
-				statusMessage := webtypes.WebSocketMessage{
-					Type:     "status_update",
-					DeviceID: entry.ID,
-					Data:     status,
-				}
-
-				if err := conn.WriteJSON(statusMessage); err != nil {
-					log.Printf("Failed to send status update: %v", err)
-					return
-				}
-			}
+		// A full projected list keeps pair topology and availability current
+		// without event handlers writing to this browser connection.
+		if err := conn.WriteJSON(webtypes.WebSocketMessage{
+			Type: "devices",
+			Data: app.deviceViewSnapshot(),
+		}); err != nil {
+			log.Printf("Failed to send device update: %v", err)
+			return
 		}
 	}
 }
@@ -218,6 +198,10 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			})
 		})
 
+		wsClient.OnGroupUpdated(func(event *models.GroupUpdatedEvent) {
+			applyGroupUpdatedEvent(conn, event)
+		})
+
 		if err := wsClient.Connect(); err != nil {
 			log.Printf("Failed to connect WebSocket for device %s: %v (retrying in %s)", sanitizeLog(deviceID), err, backoff)
 
@@ -298,6 +282,8 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		return
 	}
 
+	groupGeneration := conn.BeginGroupRefresh()
+
 	// Phase 1: slow network fetches. Local vars only, no shared state
 	// is touched yet. Errors are recorded so the merge below can tell
 	// "field N stayed unchanged" apart from "field N got refreshed".
@@ -306,6 +292,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	presets, presetsErr := conn.Client.GetPresets()
 	sources, sourcesErr := conn.Client.GetSources()
 	bass, bassErr := conn.Client.GetBass()
+	group, groupErr := conn.Client.GetGroup()
 
 	// Phase 2: fast merge. Only fields we successfully fetched
 	// overwrite; everything else keeps the value other goroutines may
@@ -338,11 +325,21 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 			statusUpdated = true
 		}
 
+		statusUpdated = statusUpdated || groupErr == nil
+
 		// Mark as connected if we successfully got at least one
 		// status from this round. Mirrors prior behaviour.
 		s.IsConnected = statusUpdated
 		s.LastActivity = time.Now()
 	})
+
+	if groupErr == nil {
+		conn.ApplyPolledGroup(groupGeneration, group)
+	}
+}
+
+func applyGroupUpdatedEvent(conn *webtypes.DeviceConnection, event *models.GroupUpdatedEvent) {
+	conn.ApplyGroupEvent(&event.Group, time.Now())
 }
 
 // HandleDeviceWebSocket handles individual device WebSocket connections for real-time device-specific updates
