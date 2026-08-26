@@ -68,23 +68,36 @@ func DeleteMargeGroupGeneration(httpClient *http.Client, ref GenerationRef) erro
 		return verifyMargeGroupGenerationDeleted(httpClient, ref)
 	}
 
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, 1025))
-	closeErr := response.Body.Close()
-	if readErr != nil {
-		return fmt.Errorf("read Marge generation cleanup response: %w", readErr)
+	body, err := readMargeGenerationCleanupResponse(response)
+	if err != nil {
+		return err
 	}
-	if closeErr != nil {
-		return fmt.Errorf("close Marge generation cleanup response: %w", closeErr)
-	}
-	if len(body) > 1024 {
-		return fmt.Errorf("delete Marge group generation: HTTP %d response exceeds 1024 bytes", response.StatusCode)
-	}
+
 	if response.StatusCode == http.StatusInternalServerError && margeWrappedGroupNotFound(body, ref) {
 		return verifyMargeGroupGenerationDeleted(httpClient, ref)
 	}
 
 	return fmt.Errorf("delete Marge group generation: HTTP %d: %s",
 		response.StatusCode, strings.TrimSpace(string(body)))
+}
+
+func readMargeGenerationCleanupResponse(response *http.Response) ([]byte, error) {
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 1025))
+	closeErr := response.Body.Close()
+
+	if readErr != nil {
+		return nil, fmt.Errorf("read Marge generation cleanup response: %w", readErr)
+	}
+
+	if closeErr != nil {
+		return nil, fmt.Errorf("close Marge generation cleanup response: %w", closeErr)
+	}
+
+	if len(body) > 1024 {
+		return nil, fmt.Errorf("delete Marge group generation: HTTP %d response exceeds 1024 bytes", response.StatusCode)
+	}
+
+	return body, nil
 }
 
 func verifyMargeGroupGenerationDeleted(httpClient *http.Client, ref GenerationRef) error {
@@ -105,24 +118,30 @@ func margeWrappedGroupNotFound(body []byte, ref GenerationRef) bool {
 		XMLName xml.Name
 		Message string `xml:",chardata"`
 	}
+
 	decoder := xml.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&response); err != nil || response.XMLName.Local != "error" {
 		return false
 	}
+
 	for {
 		token, err := decoder.Token()
-		if err == io.EOF {
+
+		if errors.Is(err, io.EOF) {
 			break
 		}
+
 		if err != nil {
 			return false
 		}
+
 		if data, ok := token.(xml.CharData); !ok || strings.TrimSpace(string(data)) != "" {
 			return false
 		}
 	}
 
 	want := fmt.Sprintf("Unexpected error: 404: Group %s does not exist in account %s", ref.GroupID, ref.AccountID)
+
 	return strings.TrimSpace(response.Message) == want
 }
 
