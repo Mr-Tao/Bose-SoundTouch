@@ -101,7 +101,7 @@ rename and network/firmware info.
 
 ---
 
-## 4. Render stereo pairs as a single device (shipped)
+## 4. Stereo-pair presentation and lifecycle (shipped)
 
 soundtouch-player projects a valid two-speaker stereo pair (formed via
 `/addGroup` - see [issue #252](https://github.com/gesellix/Bose-SoundTouch/issues/252))
@@ -136,12 +136,59 @@ registry.
   a member is unavailable or the group reports a non-OK state.
 - Hide the single-device remove action on a projected pair. Standalone
   speakers continue to render as before.
+- For standalone stereo-capable SoundTouch 10 speakers, offer pair creation
+  with an explicit LEFT/master and RIGHT member.
+- For an existing pair, offer rename and a separately confirmed dissolve
+  action. A dissolve changes speaker group state; it does not delete either
+  physical speaker from the player registry.
 
-**Note:** Pair lifecycle (create / rename / remove) remains available through
-the existing client and CLI group operations. The player intentionally does
-not expose a "Dissolve pair" action yet: its current remove operation deletes
-one physical registry record rather than performing an atomic pair lifecycle
-operation.
+**Lifecycle safety:**
+- A shared coordinator backs both the CLI and player. It freshly checks both
+  speakers, their L/R capability, current group, and temporary-zone state
+  before a mutation. Pair creation also requires one shared Marge account and
+  backend.
+- After both create candidates are freshly verified as physically standalone,
+  a fail-closed, read-only persistence barrier checks for a stored group before
+  either speaker is mutated. The embedded service searches every account by
+  device ID; standalone player and CLI query the speakers' current Marge
+  backend. Creation stops and reports the exact stale generation when any
+  record remains; pre-create checks never delete it.
+- Create sends the asymmetric master/slave payloads required by the speaker
+  state machines, then freshly verifies that both members agree. A partial
+  create is compensated only where the exact group generation returned by
+  that speaker can be proven.
+- Rename and dissolve update both physical speakers and report a degraded
+  result, including per-member detail, instead of claiming success after a
+  partial transition.
+- Rename and dissolve carry the group ID displayed to the user and reject a
+  stale request if either speaker now belongs to another generation.
+- A degraded dissolve retains the last exact L/R topology for a bounded retry.
+  The retry freshly verifies both physical identities and states, and stored
+  persistence must match that full topology before it can be retired.
+- Legacy Marge teardown callbacks without a group ID are acknowledged without
+  deleting persistent state. After a verified physical dissolve, the embedded
+  player retires the exact generation directly in its datastore; standalone
+  player and CLI use the generation-aware endpoint derived from fresh speaker
+  info. Physical verification and exact persistence cleanup share one
+  coordinator lock, and a cleanup failure is returned as degraded.
+- Retired group IDs leave their small XML snapshot in the datastore and
+  active/retired IDs are reserved across all accounts, so an account move or
+  stale request cannot match a later physical generation.
+- Pair mutations are rejected while either member belongs to a temporary
+  multi-room zone. The zone must be dissolved first.
+
+!!! warning "Run lifecycle operations site-locally"
+    Marge hostnames such as `unifi` are resolved from the caller's site, not
+    from the speaker's site. Create, rename, and dissolve a pair through the
+    Player/service deployment co-located with both speakers and their Marge
+    backend; a cross-site registry entry is not a backend-routing mechanism.
+
+!!! warning "Datastore downgrade boundary"
+    Once this lifecycle has written a `Group_<id>.retired` snapshot, do not run an
+    older service binary against the same datastore. Older allocators do not
+    reserve these generation IDs globally and can reuse one. Restore both the
+    binary and its pre-lifecycle datastore snapshot for a rollback, or upgrade
+    forward.
 
 ---
 

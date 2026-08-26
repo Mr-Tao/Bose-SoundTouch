@@ -198,6 +198,13 @@ func (app *WebApp) applyBassEvent(
 	})
 }
 
+// awaitPriorGlobalWebSocketWrites is an ordering barrier. Once it returns, any
+// writer that captured state before the caller's projection has completed; a
+// later writer must capture the newly projected state under the same lock.
+func (app *WebApp) awaitPriorGlobalWebSocketWrites() {
+	_ = app.withGlobalWebSocketWrite(func(webSocketWriteBatch) error { return nil })
+}
+
 // HandleWebSocket handles WebSocket connections for real-time updates
 func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := app.Upgrader.Upgrade(w, r, nil)
@@ -568,17 +575,17 @@ func (app *WebApp) HandleDeviceWebSocket(w http.ResponseWriter, r *http.Request)
 
 	log.Printf("Device WebSocket connected for %s", sanitizeLog(deviceID))
 
-	// Send initial device status
-	initialMessage := webtypes.WebSocketMessage{
-		Type:     "device_status",
-		DeviceID: deviceID,
-		Data: map[string]interface{}{
-			"info":   device.DeviceInfo,
-			"status": device.Status(),
-		},
-	}
-
-	if err := conn.WriteJSON(initialMessage); err != nil {
+	// Capture and send under the same ordering seam used by lifecycle responses.
+	if err := app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		return batch.writeJSON(conn, webtypes.WebSocketMessage{
+			Type:     "device_status",
+			DeviceID: deviceID,
+			Data: map[string]interface{}{
+				"info":   device.DeviceInfo,
+				"status": device.Status(),
+			},
+		})
+	}); err != nil {
 		log.Printf("Failed to send initial device status: %v", err)
 		return
 	}
@@ -609,45 +616,50 @@ func (app *WebApp) HandleDeviceWebSocket(w http.ResponseWriter, r *http.Request)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Send ping to check if client is still connected
-		if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-			log.Printf("Failed to send ping to device WebSocket %s: %v", sanitizeLog(deviceID), err)
+		if err := app.writeDeviceWebSocketUpdate(conn, deviceID, device); err != nil {
+			log.Printf("Failed to send device WebSocket update for %s: %v", sanitizeLog(deviceID), err)
 			return
 		}
+	}
+}
 
-		// Send device status update
+func (app *WebApp) writeDeviceWebSocketUpdate(
+	conn webSocketWriter,
+	deviceID string,
+	device *webtypes.DeviceConnection,
+) error {
+	return app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		// Capture after taking the lifecycle ordering lock. A status frame
+		// captured before a pair mutation therefore cannot follow its response.
 		status := device.Status()
-		statusMessage := webtypes.WebSocketMessage{
+
+		if err := batch.writeMessage(conn, websocket.PingMessage, []byte{}); err != nil {
+			return err
+		}
+
+		if err := batch.writeJSON(conn, webtypes.WebSocketMessage{
 			Type:     "device_status",
 			DeviceID: deviceID,
 			Data: map[string]interface{}{
 				"info":   device.DeviceInfo,
 				"status": status,
 			},
+		}); err != nil {
+			return err
 		}
 
-		if err := conn.WriteJSON(statusMessage); err != nil {
-			log.Printf("Failed to send device status update for %s: %v", sanitizeLog(deviceID), err)
-			return
+		if device.WebSocket == nil || !status.IsConnected {
+			return nil
 		}
 
-		// If device has active WebSocket connection to SoundTouch device,
-		// also send any real-time updates from that connection
-		if device.WebSocket != nil && status.IsConnected {
-			realtimeMessage := webtypes.WebSocketMessage{
-				Type:     "device_realtime",
-				DeviceID: deviceID,
-				Data: map[string]interface{}{
-					"nowPlaying": status.NowPlaying,
-					"volume":     status.Volume,
-					"timestamp":  time.Now(),
-				},
-			}
-
-			if err := conn.WriteJSON(realtimeMessage); err != nil {
-				log.Printf("Failed to send realtime update for %s: %v", sanitizeLog(deviceID), err)
-				return
-			}
-		}
-	}
+		return batch.writeJSON(conn, webtypes.WebSocketMessage{
+			Type:     "device_realtime",
+			DeviceID: deviceID,
+			Data: map[string]interface{}{
+				"nowPlaying": status.NowPlaying,
+				"volume":     status.Volume,
+				"timestamp":  time.Now(),
+			},
+		})
+	})
 }

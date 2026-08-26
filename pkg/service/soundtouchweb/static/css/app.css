@@ -701,6 +701,46 @@ img { display: block; max-width: 100%; }
 .zone-actions { display: flex; gap: .5rem; margin-top: .25rem; flex-wrap: wrap; }
 .zone-btn { font-size: .8rem; padding: .3rem .7rem; }
 
+/* ── Stereo pairs ─────────────────────────────────────────────────────────── */
+.stereo-pair-section { margin-top: 1.25rem; }
+.stereo-pair-members { display: flex; flex-direction: column; gap: .3rem; }
+.stereo-pair-member {
+    display: flex; align-items: center; gap: .6rem;
+    min-height: 2.25rem; padding: .4rem .6rem;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+.stereo-role {
+    min-width: 3rem; padding: .15rem .4rem; border-radius: 3px;
+    background: var(--border); color: var(--text-dim);
+    font-size: .65rem; font-weight: 700; text-align: center; letter-spacing: 0;
+}
+.stereo-member-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: .875rem; }
+.stereo-pair-actions { display: flex; align-items: end; gap: .5rem; margin-top: .6rem; flex-wrap: wrap; }
+.stereo-name-field { display: flex; flex: 1 1 14rem; flex-direction: column; gap: .2rem; }
+.stereo-name-field span, .picker-label { font-size: .75rem; color: var(--text-dim); letter-spacing: 0; }
+.stereo-name-field input {
+    min-width: 0; padding: .4rem .55rem; border: 1px solid var(--border);
+    border-radius: var(--radius); background: var(--surface); color: var(--text);
+    font: inherit; font-size: .875rem;
+}
+.stereo-name-field input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.stereo-action { min-height: 2.2rem; font-size: .8rem; padding: .35rem .7rem; }
+.stereo-action.danger { color: #b42318; border-color: #d92d20; }
+.stereo-pair-standalone { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; color: var(--text-dim); }
+.stereo-pair-error { margin-bottom: .6rem; color: #b42318; font-size: .8rem; }
+.stereo-picker { width: min(22rem, calc(100vw - 2rem)); max-width: 22rem; }
+.picker-name-field { margin: .75rem 0; }
+.picker-label { margin-bottom: .4rem; }
+.picker-device-btn.selected { border-color: var(--accent); background: var(--bg); }
+.stereo-picker-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+
+@media (max-width: 520px) {
+    .stereo-pair-actions { align-items: stretch; }
+    .stereo-name-field { flex-basis: 100%; }
+    .stereo-action { flex: 1; }
+}
+
 /* ── Recents ─────────────────────────────────────────────────────────────── */
 .recents-section { margin-top: 1.25rem; }
 
