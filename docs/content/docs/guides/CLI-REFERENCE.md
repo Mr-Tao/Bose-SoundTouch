@@ -855,6 +855,48 @@ soundtouch-cli --host 192.0.2.10 zone remove --member 192.0.2.12
 soundtouch-cli --host 192.0.2.10 zone dissolve
 ```
 
+### Stereo Pair Management
+
+Create and manage a persistent LEFT/RIGHT pair of two SoundTouch 10 speakers.
+This is distinct from a temporary multi-room zone. Both speakers must be
+online, stereo-capable, standalone, and outside any zone before a lifecycle
+operation. Pair creation also requires both speakers to use the same Marge
+account and backend. Run lifecycle commands from the site containing both
+speakers; site-relative Marge names such as `unifi` do not identify a remote
+site when resolved by the CLI host.
+
+```bash
+# Inspect a standalone speaker or either member of a pair
+soundtouch-cli --host 192.0.2.10 group status
+
+# Create a pair; the LEFT speaker becomes the master
+soundtouch-cli group create \
+  --left 192.0.2.10 \
+  --right 192.0.2.11 \
+  --name "Living Room"
+
+# Rename through either member
+soundtouch-cli --host 192.0.2.10 group rename --name "Living Room Pair"
+
+# Dissolve the pair without removing either speaker from AfterTouch
+soundtouch-cli --host 192.0.2.10 group remove
+```
+
+Create, rename, and remove verify fresh state on both speakers. Rename and
+remove first inspect the current group and carry its ID as a generation guard;
+if the pair changes before mutation, the operation fails without touching the
+newer pair. A partial transition is reported as degraded with per-speaker
+details rather than as a successful operation. A remove attempt carries the
+last exact L/R topology, freshly verifies both speakers, and retires
+persistence only if the stored generation still matches it. Before create,
+the CLI verifies
+both speakers as standalone, queries their current Marge backend for stale
+group records, and refuses to mutate either speaker while any record remains.
+After verified physical cleanup, the CLI removes the exact group ID through the
+Marge URL and account freshly read from the speaker. A backend cleanup failure
+is therefore visible as a degraded result instead of leaving an apparently
+successful stale generation.
+
 ### Browse and Navigation
 
 Browse and navigate content sources on your device.

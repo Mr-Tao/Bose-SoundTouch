@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -34,6 +35,7 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/service/spotify"
 	"github.com/gesellix/bose-soundtouch/pkg/service/stockholm"
 	"github.com/gesellix/bose-soundtouch/pkg/service/updatecheck"
+	"github.com/gesellix/bose-soundtouch/pkg/stereopair"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/urfave/cli/v2"
@@ -1476,6 +1478,19 @@ func newEmbeddedWebApp(server *handlers.Server, serverURL, internalURL string, d
 		return err
 	}
 
+	// Preserve the datastore's atomic, all-account guarantees for speakers that
+	// point at this service, while following fresh /info to an external Marge
+	// backend for speakers still managed by SoundCork or another service.
+	cleanup, preflight, rename := embeddedStereoPairGenerationPersistence(
+		ds,
+		func() []string {
+			localServerURL, localHTTPSServerURL := server.GetSettings()
+			return []string{localServerURL, localHTTPSServerURL}
+		},
+		&http.Client{Timeout: stereopair.RequestTimeout},
+	)
+	webApp.SetStereoPairGenerationPersistence(cleanup, preflight, rename)
+
 	// Keep the UI registry live as the service discovers or devices are added.
 	server.SetDevicesChangedHook(func() {
 		webApp.SeedExtraDevices()
@@ -1494,6 +1509,71 @@ func newEmbeddedWebApp(server *handlers.Server, serverURL, internalURL string, d
 	}()
 
 	return webApp
+}
+
+func embeddedStereoPairGenerationPersistence(
+	ds *datastore.DataStore,
+	localMargeURLs func() []string,
+	httpClient *http.Client,
+) (stereopair.GenerationCleanup, stereopair.GenerationPreflight, stereopair.GenerationRename) {
+	isLocal := func(margeURL string, localURLs []string) bool {
+		for _, localURL := range localURLs {
+			if stereopair.SameMargeBackend(margeURL, localURL) {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	cleanup := func(ref stereopair.GenerationRef) error {
+		if isLocal(ref.MargeURL, localMargeURLs()) {
+			return ds.DeleteGroupGenerationForDevice(ref.DeviceID, ref.GroupID, ref.ExpectedGroup)
+		}
+
+		return stereopair.DeleteMargeGroupGeneration(httpClient, ref)
+	}
+
+	preflight := func(refs []stereopair.GenerationRef) error {
+		localURLs := localMargeURLs()
+		localDeviceIDs := make([]string, 0, len(refs))
+		externalRefs := make([]stereopair.GenerationRef, 0, len(refs))
+
+		for i := range refs {
+			if isLocal(refs[i].MargeURL, localURLs) {
+				localDeviceIDs = append(localDeviceIDs, refs[i].DeviceID)
+			} else {
+				externalRefs = append(externalRefs, refs[i])
+			}
+		}
+
+		if len(localDeviceIDs) > 0 {
+			if err := ds.EnsureNoGroupsForDevices(localDeviceIDs); err != nil {
+				return err
+			}
+		}
+
+		if len(externalRefs) > 0 {
+			return stereopair.EnsureMargeNoGroupGenerations(httpClient, externalRefs)
+		}
+
+		return nil
+	}
+
+	rename := func(ref stereopair.GenerationRef, name string) error {
+		if isLocal(ref.MargeURL, localMargeURLs()) {
+			_, err := ds.RenameGroupGenerationForDevice(ref.DeviceID, ref.GroupID, ref.ExpectedGroup, name)
+			if errors.Is(err, datastore.ErrGroupNotFound) || errors.Is(err, datastore.ErrGroupDeleteAmbiguous) {
+				return fmt.Errorf("%w: %w", stereopair.ErrConflict, err)
+			}
+
+			return err
+		}
+
+		return stereopair.RenameMargeGroupGeneration(httpClient, ref, name)
+	}
+
+	return cleanup, preflight, rename
 }
 
 func setupRouter(server *handlers.Server, stockholmHandler *stockholm.Handler, webApp *soundtouchweb.WebApp) *chi.Mux {

@@ -62,6 +62,23 @@ func TestNewWebApp(t *testing.T) {
 	}
 }
 
+func TestStereoPairPersistenceClientHasBoundedLifecycleTimeout(t *testing.T) {
+	app := NewWebApp()
+	transport := &http.Transport{}
+	app.ServiceClient = &http.Client{Transport: transport, Timeout: 10 * time.Second}
+
+	configured := app.stereoPairPersistenceClient()
+	if configured.Timeout != 45*time.Second {
+		t.Fatalf("timeout = %s, want 45s", configured.Timeout)
+	}
+	if configured.Transport != transport {
+		t.Fatal("custom service transport was not preserved")
+	}
+	if app.ServiceClient.Timeout != 10*time.Second {
+		t.Fatalf("source client timeout was mutated to %s", app.ServiceClient.Timeout)
+	}
+}
+
 func TestHandleAPIDevices(t *testing.T) {
 	app := createTestApp()
 

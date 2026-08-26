@@ -5,6 +5,7 @@ import { Controls } from './components/Controls.js';
 import { Presets } from './components/Presets.js';
 import { Sources } from './components/Sources.js';
 import { Zone } from './components/Zone.js';
+import { StereoPair } from './components/StereoPair.js';
 import { Recents } from './components/Recents.js';
 import { TuneInBrowser } from './components/TuneInBrowser.js';
 import { RadioBrowser } from './components/RadioBrowser.js';
@@ -16,7 +17,7 @@ import { api } from './api.js';
 
 const html = htm.bind(h);
 
-function DeviceDetail({ deviceId, devices, onBack }) {
+function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify }) {
     const device = devices[deviceId];
 
     if (!device) {
@@ -43,6 +44,13 @@ function DeviceDetail({ deviceId, devices, onBack }) {
             <${Controls} deviceId=${deviceId} status=${device.status} />
             <${Presets} deviceId=${deviceId} status=${device.status} />
             <${Sources} deviceId=${deviceId} status=${device.status} />
+            <${StereoPair}
+                deviceId=${deviceId}
+                device=${device}
+                devices=${devices}
+                onChanged=${onDevicesChanged}
+                notify=${notify}
+            />
             <${Zone} deviceId=${deviceId} devices=${devices} />
             <${Recents} deviceId=${deviceId} />
         </div>
@@ -156,6 +164,11 @@ function App() {
         await api.discover();
     }
 
+    async function refreshDevices() {
+        const resp = await api.devices();
+        if (resp?.success) setDevices(resp.data || {});
+    }
+
     async function removeDevice(id) {
         const name = devices[id]?.info?.name || id;
         if (!confirm(`Remove "${name}"?\n\nThis clears it from AfterTouch. A device still online may reappear after the next discovery scan.`)) {
@@ -257,6 +270,8 @@ function App() {
                         deviceId=${selectedId}
                         devices=${devices}
                         onBack=${() => navigate('devices')}
+                        onDevicesChanged=${refreshDevices}
+                        notify=${showToast}
                     />
                 ` : page === 'tunein' ? html`
                     <${TuneInBrowser} key="tunein-browser" devices=${devices} />

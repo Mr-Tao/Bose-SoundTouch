@@ -13,6 +13,60 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const defaultWebSocketWriteTimeout = 2 * time.Second
+
+type webSocketWriter interface {
+	SetWriteDeadline(time.Time) error
+	WriteJSON(interface{}) error
+	WriteMessage(int, []byte) error
+}
+
+// webSocketWriteBatch gives every write in one critical section the same
+// absolute deadline. This bounds the section even when it emits several
+// frames, so a stalled browser cannot hold WSMutex indefinitely.
+type webSocketWriteBatch struct {
+	deadline time.Time
+}
+
+func (batch webSocketWriteBatch) writeJSON(conn webSocketWriter, value interface{}) error {
+	if err := conn.SetWriteDeadline(batch.deadline); err != nil {
+		return err
+	}
+
+	return conn.WriteJSON(value)
+}
+
+func (batch webSocketWriteBatch) writeMessage(conn webSocketWriter, messageType int, data []byte) error {
+	if err := conn.SetWriteDeadline(batch.deadline); err != nil {
+		return err
+	}
+
+	return conn.WriteMessage(messageType, data)
+}
+
+// withGlobalWebSocketWrite is the single write seam for the application-wide
+// and per-device browser WebSocket connections. Gorilla permits one concurrent
+// writer per connection; the existing registry mutex also keeps removal ordered
+// with writes.
+func (app *WebApp) withGlobalWebSocketWrite(write func(webSocketWriteBatch) error) error {
+	app.WSMutex.Lock()
+	defer app.WSMutex.Unlock()
+
+	timeout := app.webSocketWriteTimeout
+	if timeout <= 0 {
+		timeout = defaultWebSocketWriteTimeout
+	}
+
+	return write(webSocketWriteBatch{deadline: time.Now().Add(timeout)})
+}
+
+// awaitPriorGlobalWebSocketWrites is an ordering barrier. Once it returns, any
+// writer that captured state before the caller's projection has completed; a
+// later writer must capture the newly projected state under the same lock.
+func (app *WebApp) awaitPriorGlobalWebSocketWrites() {
+	_ = app.withGlobalWebSocketWrite(func(webSocketWriteBatch) error { return nil })
+}
+
 // HandleWebSocket handles WebSocket connections for real-time updates
 func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := app.Upgrader.Upgrade(w, r, nil)
@@ -34,21 +88,22 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	app.WSClients[conn] = true
 	app.WSMutex.Unlock()
 
-	// Send current discovery status
-	if ds, ok := app.discoveryStatus.Load().(*webtypes.DiscoveryStatus); ok {
-		if err := conn.WriteJSON(webtypes.WebSocketMessage{
-			Type: "discovery_status",
-			Data: ds,
-		}); err != nil {
-			log.Printf("Failed to send initial discovery status: %v", err)
-			return
+	// Send initial frames under the same write lock used by broadcasts and
+	// periodic updates so no Gorilla writes can overlap on this connection.
+	if err := app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		if ds, ok := app.discoveryStatus.Load().(*webtypes.DiscoveryStatus); ok {
+			if err := batch.writeJSON(conn, webtypes.WebSocketMessage{
+				Type: "discovery_status",
+				Data: ds,
+			}); err != nil {
+				return err
+			}
 		}
-	}
 
-	// Send initial device list
-	if err := conn.WriteJSON(webtypes.WebSocketMessage{
-		Type: "devices",
-		Data: app.deviceViewSnapshot(),
+		return batch.writeJSON(conn, webtypes.WebSocketMessage{
+			Type: "devices",
+			Data: app.deviceViewSnapshot(),
+		})
 	}); err != nil {
 		log.Printf("Failed to send initial data: %v", err)
 		return
@@ -81,17 +136,25 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Main loop for sending periodic updates
 	for range ticker.C {
-		// Send ping to check if client is still connected
-		if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-			log.Printf("Failed to send ping: %v", err)
-			return
-		}
+		if err := app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+			// Capture after taking the writer lock. A lifecycle broadcast that
+			// already completed cannot be followed by an older periodic snapshot.
+			messages := app.periodicPlayerMessages()
 
-		for _, message := range app.periodicPlayerMessages() {
-			if err := conn.WriteJSON(message); err != nil {
-				log.Printf("Failed to send device update: %v", err)
-				return
+			if err := batch.writeMessage(conn, websocket.PingMessage, []byte{}); err != nil {
+				return err
 			}
+
+			for _, message := range messages {
+				if err := batch.writeJSON(conn, message); err != nil {
+					return err
+				}
+			}
+
+			return nil
+		}); err != nil {
+			log.Printf("Failed to send periodic WebSocket update: %v", err)
+			return
 		}
 	}
 }
@@ -386,17 +449,17 @@ func (app *WebApp) HandleDeviceWebSocket(w http.ResponseWriter, r *http.Request)
 
 	log.Printf("Device WebSocket connected for %s", sanitizeLog(deviceID))
 
-	// Send initial device status
-	initialMessage := webtypes.WebSocketMessage{
-		Type:     "device_status",
-		DeviceID: deviceID,
-		Data: map[string]interface{}{
-			"info":   device.DeviceInfo,
-			"status": device.Status(),
-		},
-	}
-
-	if err := conn.WriteJSON(initialMessage); err != nil {
+	// Capture and send under the same ordering seam used by lifecycle responses.
+	if err := app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		return batch.writeJSON(conn, webtypes.WebSocketMessage{
+			Type:     "device_status",
+			DeviceID: deviceID,
+			Data: map[string]interface{}{
+				"info":   device.DeviceInfo,
+				"status": device.Status(),
+			},
+		})
+	}); err != nil {
 		log.Printf("Failed to send initial device status: %v", err)
 		return
 	}
@@ -427,45 +490,50 @@ func (app *WebApp) HandleDeviceWebSocket(w http.ResponseWriter, r *http.Request)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Send ping to check if client is still connected
-		if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-			log.Printf("Failed to send ping to device WebSocket %s: %v", sanitizeLog(deviceID), err)
+		if err := app.writeDeviceWebSocketUpdate(conn, deviceID, device); err != nil {
+			log.Printf("Failed to send device WebSocket update for %s: %v", sanitizeLog(deviceID), err)
 			return
 		}
+	}
+}
 
-		// Send device status update
+func (app *WebApp) writeDeviceWebSocketUpdate(
+	conn webSocketWriter,
+	deviceID string,
+	device *webtypes.DeviceConnection,
+) error {
+	return app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		// Capture after taking the lifecycle ordering lock. A status frame
+		// captured before a pair mutation therefore cannot follow its response.
 		status := device.Status()
-		statusMessage := webtypes.WebSocketMessage{
+
+		if err := batch.writeMessage(conn, websocket.PingMessage, []byte{}); err != nil {
+			return err
+		}
+
+		if err := batch.writeJSON(conn, webtypes.WebSocketMessage{
 			Type:     "device_status",
 			DeviceID: deviceID,
 			Data: map[string]interface{}{
 				"info":   device.DeviceInfo,
 				"status": status,
 			},
+		}); err != nil {
+			return err
 		}
 
-		if err := conn.WriteJSON(statusMessage); err != nil {
-			log.Printf("Failed to send device status update for %s: %v", sanitizeLog(deviceID), err)
-			return
+		if device.WebSocket == nil || !status.IsConnected {
+			return nil
 		}
 
-		// If device has active WebSocket connection to SoundTouch device,
-		// also send any real-time updates from that connection
-		if device.WebSocket != nil && status.IsConnected {
-			realtimeMessage := webtypes.WebSocketMessage{
-				Type:     "device_realtime",
-				DeviceID: deviceID,
-				Data: map[string]interface{}{
-					"nowPlaying": status.NowPlaying,
-					"volume":     status.Volume,
-					"timestamp":  time.Now(),
-				},
-			}
-
-			if err := conn.WriteJSON(realtimeMessage); err != nil {
-				log.Printf("Failed to send realtime update for %s: %v", sanitizeLog(deviceID), err)
-				return
-			}
-		}
-	}
+		return batch.writeJSON(conn, webtypes.WebSocketMessage{
+			Type:     "device_realtime",
+			DeviceID: deviceID,
+			Data: map[string]interface{}{
+				"nowPlaying": status.NowPlaying,
+				"volume":     status.Volume,
+				"timestamp":  time.Now(),
+			},
+		})
+	})
 }
