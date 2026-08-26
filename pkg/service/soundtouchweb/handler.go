@@ -13,10 +13,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	bmxpkg "github.com/gesellix/bose-soundtouch/pkg/service/bmx"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
 	"github.com/gesellix/bose-soundtouch/pkg/service/stations"
+	"github.com/gesellix/bose-soundtouch/pkg/stereopair"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 )
@@ -98,6 +100,11 @@ type WebApp struct {
 	// SeedExtraDevices never probe the same still-offline host concurrently.
 	seedMu sync.Mutex
 
+	// StereoPairs coordinates persistent ST10 stereo-pair mutations across
+	// both physical speakers. It is shared for the lifetime of WebApp so its
+	// mutation lock covers concurrent CLI-like requests from every browser.
+	StereoPairs StereoPairLifecycle
+
 	discoveryStatus atomic.Value // stores *webtypes.DiscoveryStatus
 }
 
@@ -134,13 +141,61 @@ type DeviceEntry struct {
 
 // NewWebApp creates a new WebApp instance for SPA mode
 func NewWebApp() *WebApp {
-	return &WebApp{
-		devices:   make(map[string]*webtypes.DeviceConnection),
-		WSClients: make(map[*websocket.Conn]bool),
+	app := &WebApp{
+		devices:               make(map[string]*webtypes.DeviceConnection),
+		WSClients:             make(map[*websocket.Conn]bool),
+		webSocketWriteTimeout: defaultWebSocketWriteTimeout,
 		Upgrader: websocket.Upgrader{
 			CheckOrigin: func(_ *http.Request) bool { return true },
 		},
 	}
+	app.StereoPairs = stereopair.NewWithGenerationLifecyclePersistence(
+		app.stereoPairClient,
+		func(ref stereopair.GenerationRef) error {
+			return stereopair.DeleteMargeGroupGeneration(app.stereoPairPersistenceClient(), ref)
+		},
+		func(refs []stereopair.GenerationRef) error {
+			return stereopair.EnsureMargeNoGroupGenerations(app.stereoPairPersistenceClient(), refs)
+		},
+		func(ref stereopair.GenerationRef, name string) error {
+			return stereopair.RenameMargeGroupGeneration(app.stereoPairPersistenceClient(), ref, name)
+		},
+	)
+
+	return app
+}
+
+func (app *WebApp) stereoPairPersistenceClient() *http.Client {
+	base := app.serviceHTTPClient()
+	if base.Timeout >= stereopair.RequestTimeout {
+		return base
+	}
+
+	configured := *base
+	configured.Timeout = stereopair.RequestTimeout
+
+	return &configured
+}
+
+// SetStereoPairGenerationPersistence overrides both exact post-teardown
+// retirement and the read-only pre-create generation barrier.
+func (app *WebApp) SetStereoPairGenerationPersistence(
+	cleanup stereopair.GenerationCleanup,
+	preflight stereopair.GenerationPreflight,
+	rename stereopair.GenerationRename,
+) {
+	app.StereoPairs = stereopair.NewWithGenerationLifecyclePersistence(app.stereoPairClient, cleanup, preflight, rename)
+}
+
+// stereoPairClient uses a dedicated long-timeout client. Pair creation can
+// legitimately span multiple 15-second speaker/Marge retry cycles, while the
+// ordinary status clients intentionally use a shorter timeout.
+func (app *WebApp) stereoPairClient(host string) (stereopair.Client, error) {
+	if strings.TrimSpace(host) == "" {
+		return nil, fmt.Errorf("speaker host is empty")
+	}
+
+	return client.NewClient(&client.Config{Host: host, Timeout: stereopair.RequestTimeout}), nil
 }
 
 // GetDevice returns the device for id and whether it exists.

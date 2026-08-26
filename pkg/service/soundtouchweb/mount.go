@@ -93,6 +93,13 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 					r.Post("/leave", app.HandleZoneLeave)
 				})
 
+				r.Route("/stereo-pair", func(r chi.Router) {
+					r.Get("/", app.HandleGetStereoPair)
+					r.Post("/", app.HandleCreateStereoPair)
+					r.Patch("/", app.HandleRenameStereoPair)
+					r.Delete("/", app.HandleDissolveStereoPair)
+				})
+
 				// Play a result from a content provider on this device.
 				// Browsable providers (tunein, radiobrowser) take a catalog item;
 				// input providers (url, tts) take the raw input.
