@@ -21,6 +21,7 @@ function sortEntries(entries, mode) {
 
 function DeviceCard({ id, device, onSelect, onRemove }) {
     const { info, status } = device;
+    const stereoPair = device.stereoPair;
     const np = status?.nowPlaying;
     const isPlaying = np?.PlayStatus === 'PLAY_STATE';
     const isStandby = !np || np.Source === 'STANDBY';
@@ -31,14 +32,19 @@ function DeviceCard({ id, device, onSelect, onRemove }) {
                 <span class="device-name">${info?.name || id}</span>
                 <span class="device-header-right">
                     <span class="device-indicator ${status?.isConnected ? 'online' : 'offline'}"></span>
-                    <button class="device-remove" title="Remove this device"
+                    ${!stereoPair ? html`<button class="device-remove" title="Remove this device"
                             aria-label="Remove this device"
-                            onClick=${(e) => { e.stopPropagation(); onRemove(id); }}>✕</button>
+                            onClick=${(e) => { e.stopPropagation(); onRemove(id); }}>✕</button>` : null}
                 </span>
             </div>
             <div class="device-type">
                 ${info?.type || ''}
                 ${info?.ip_address ? html`<span class="device-ip">(${info.ip_address})</span>` : null}
+                ${stereoPair ? html`
+                    <span class="stereo-pair-state ${stereoPair.degraded ? 'degraded' : ''}">
+                        Stereo pair ${stereoPair.availableMemberCount}/${stereoPair.memberCount}
+                    </span>
+                ` : null}
             </div>
             ${!isStandby ? html`
                 <div class="now-playing-mini">

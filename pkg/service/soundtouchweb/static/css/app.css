@@ -399,6 +399,8 @@ img { display: block; max-width: 100%; }
 }
 .device-type { font-size: .8rem; color: var(--text-dim); margin-bottom: .5rem; display: flex; gap: .4rem; flex-wrap: wrap; }
 .device-ip { color: var(--text); font-family: monospace; font-weight: 500; }
+.stereo-pair-state { color: var(--accent); font-weight: 600; }
+.stereo-pair-state.degraded { color: var(--offline); }
 
 .device-indicator {
     width: 8px; height: 8px; border-radius: 50%;

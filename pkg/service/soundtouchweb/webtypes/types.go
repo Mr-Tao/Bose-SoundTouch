@@ -2,6 +2,7 @@
 package webtypes
 
 import (
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ type SoundTouchClient interface {
 	GetPresets() (*models.Presets, error)
 	GetSources() (*models.Sources, error)
 	GetBass() (*models.Bass, error)
+	GetGroup() (*models.Group, error)
 	NewWebSocketClient(config interface{}) *client.WebSocketClient
 }
 
@@ -47,6 +49,12 @@ type DeviceConnection struct {
 
 	status atomic.Pointer[DeviceStatus]
 
+	// groupMu orders polled /getGroup responses against real-time
+	// groupUpdated events. Starting a newer refresh or receiving an event
+	// invalidates any older in-flight poll.
+	groupMu         sync.Mutex
+	groupGeneration uint64
+
 	// done is closed by Close when the device is removed from the
 	// registry, signalling its background goroutines (the status poller
 	// and the WebSocket reconnect loop) to exit. closeOnce keeps Close
@@ -62,6 +70,7 @@ type DeviceStatus struct {
 	Presets      *models.Presets    `json:"presets,omitempty"`
 	Sources      *models.Sources    `json:"sources,omitempty"`
 	Bass         *models.Bass       `json:"bass,omitempty"`
+	Group        *models.Group      `json:"group,omitempty"`
 	IsConnected  bool               `json:"isConnected"`
 	LastActivity time.Time          `json:"lastActivity"`
 }
@@ -85,10 +94,9 @@ func NewDeviceConnection(c *client.Client, info *models.DeviceInfo) *DeviceConne
 }
 
 // Status returns a snapshot of the current device status. The returned
-// pointer is read-only from the caller's perspective; mutating the
-// pointed-to struct has no effect on the stored status. Use
-// UpdateStatus or SetStatus to apply changes. Never returns nil for
-// connections built via NewDeviceConnection.
+// pointer is read-only from the caller's perspective and must not be
+// mutated. Use UpdateStatus or SetStatus to apply changes. Never returns
+// nil for connections built via NewDeviceConnection.
 func (c *DeviceConnection) Status() *DeviceStatus {
 	return c.status.Load()
 }
@@ -128,7 +136,7 @@ func (c *DeviceConnection) SetStatus(s *DeviceStatus) {
 // writers cannot silently lose each other's changes.
 //
 // The copy mut receives is a shallow value copy of the previous status.
-// Nested pointer fields (NowPlaying, Volume, Presets, Sources, Bass)
+// Nested pointer fields (NowPlaying, Volume, Presets, Sources, Bass, Group)
 // share their backing struct with the previous version: callers MUST
 // REPLACE these pointers (s.Volume = &models.Volume{...}) rather than
 // mutate through them (s.Volume.ActualVolume++ would race with any
@@ -145,6 +153,61 @@ func (c *DeviceConnection) UpdateStatus(mut func(*DeviceStatus)) {
 			return
 		}
 	}
+}
+
+// BeginGroupRefresh starts a new generation for an asynchronous /getGroup
+// request. Only the latest started request may later update Group.
+func (c *DeviceConnection) BeginGroupRefresh() uint64 {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	c.groupGeneration++
+
+	return c.groupGeneration
+}
+
+// ApplyPolledGroup stores a /getGroup result only when no newer poll or
+// groupUpdated event superseded it. Empty groups clear the current claim.
+func (c *DeviceConnection) ApplyPolledGroup(generation uint64, group *models.Group) bool {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	if generation != c.groupGeneration {
+		return false
+	}
+
+	return c.replaceGroup(normalizeGroup(group), time.Time{})
+}
+
+// ApplyGroupEvent stores the newest groupUpdated event and invalidates all
+// in-flight /getGroup requests. Empty teardown events clear the current claim.
+func (c *DeviceConnection) ApplyGroupEvent(group *models.Group, activity time.Time) bool {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	c.groupGeneration++
+
+	return c.replaceGroup(normalizeGroup(group), activity)
+}
+
+func (c *DeviceConnection) replaceGroup(group *models.Group, activity time.Time) bool {
+	changed := !reflect.DeepEqual(c.Status().Group, group)
+	c.UpdateStatus(func(s *DeviceStatus) {
+		s.Group = group
+		if !activity.IsZero() {
+			s.LastActivity = activity
+		}
+	})
+
+	return changed
+}
+
+func normalizeGroup(group *models.Group) *models.Group {
+	if group == nil || group.IsEmpty() {
+		return nil
+	}
+
+	return group
 }
 
 // APIResponse is a standard JSON response wrapper

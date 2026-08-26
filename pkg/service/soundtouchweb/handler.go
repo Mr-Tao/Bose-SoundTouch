@@ -241,20 +241,9 @@ func (app *WebApp) HandleAPIDevices(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// Return all devices as JSON
-	snapshot := app.DeviceSnapshot()
-	devices := make(map[string]interface{}, len(snapshot))
-
-	for _, entry := range snapshot {
-		devices[entry.ID] = map[string]interface{}{
-			"info":     entry.Device.DeviceInfo,
-			"status":   entry.Device.Status(),
-			"lastSeen": entry.Device.LastSeen,
-		}
-	}
-
 	response := webtypes.APIResponse{
 		Success: true,
-		Data:    devices,
+		Data:    app.deviceViewSnapshot(),
 	}
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
@@ -724,20 +713,9 @@ func (app *WebApp) BroadcastDeviceList() {
 	app.WSMutex.RLock()
 	defer app.WSMutex.RUnlock()
 
-	snapshot := app.DeviceSnapshot()
-	devices := make(map[string]interface{}, len(snapshot))
-
-	for _, entry := range snapshot {
-		devices[entry.ID] = map[string]interface{}{
-			"info":     entry.Device.DeviceInfo,
-			"status":   entry.Device.Status(),
-			"lastSeen": entry.Device.LastSeen,
-		}
-	}
-
 	message := webtypes.WebSocketMessage{
 		Type: "devices",
-		Data: devices,
+		Data: app.deviceViewSnapshot(),
 	}
 
 	// Send to all connected clients
