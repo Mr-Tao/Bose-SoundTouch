@@ -135,6 +135,13 @@ function App() {
         };
     }, []);
 
+    useEffect(() => {
+        if (selectedId && !devices[selectedId]) {
+            setSelectedId(null);
+            if (page === 'device') setPage('devices');
+        }
+    }, [devices, selectedId, page]);
+
     function showToast(msg) {
         setToast(null);
         setTimeout(() => setToast(msg), 10);

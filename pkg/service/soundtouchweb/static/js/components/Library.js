@@ -23,10 +23,12 @@ export function Library({ devices }) {
     // invalidate the current selection.
     useEffect(() => {
         const entries = Object.entries(devices);
-        if (!deviceId && entries.length > 0) {
+        if ((!deviceId || !devices[deviceId]) && entries.length > 0) {
             setDeviceId(entries[0][0]);
+        } else if (deviceId && entries.length === 0) {
+            setDeviceId(null);
         }
-    }, [devices]);
+    }, [devices, deviceId]);
 
     // Reload registered servers whenever deviceId changes.
     useEffect(() => {
