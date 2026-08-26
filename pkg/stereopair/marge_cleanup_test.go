@@ -2,6 +2,8 @@ package stereopair
 
 import (
 	"encoding/xml"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -173,6 +175,138 @@ func TestDeleteMargeGroupGenerationAcceptsVerifiedAbsenceAfter404(t *testing.T) 
 	})
 	if err != nil {
 		t.Fatalf("DeleteMargeGroupGeneration: %v", err)
+	}
+}
+
+func TestDeleteMargeGroupGenerationAcceptsVerifiedAbsenceAfterWrapped404(t *testing.T) {
+	deleteSeen := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deleteSeen = true
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`<error>Unexpected error: 404: Group PAIR1 does not exist in account ACCOUNT1</error>`))
+			return
+		}
+
+		if deleteSeen {
+			_, _ = w.Write([]byte(`<group/>`))
+			return
+		}
+
+		_, _ = w.Write([]byte(`<group id="PAIR1"><masterDeviceId>LEFT-ID</masterDeviceId><roles><groupRole><deviceId>LEFT-ID</deviceId><role>LEFT</role><ipAddress>192.0.2.10</ipAddress></groupRole><groupRole><deviceId>RIGHT-ID</deviceId><role>RIGHT</role><ipAddress>192.0.2.11</ipAddress></groupRole></roles></group>`))
+	}))
+	defer server.Close()
+
+	err := DeleteMargeGroupGeneration(server.Client(), GenerationRef{
+		MargeURL: server.URL, AccountID: "ACCOUNT1", GroupID: "PAIR1", DeviceID: "LEFT-ID",
+		ExpectedGroup: margeTestGroup("PAIR1"),
+	})
+	if err != nil {
+		t.Fatalf("DeleteMargeGroupGeneration: %v", err)
+	}
+}
+
+func TestDeleteMargeGroupGenerationRejectsWrapped404WhileGenerationRemains(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`<error>Unexpected error: 404: Group PAIR1 does not exist in account ACCOUNT1</error>`))
+			return
+		}
+
+		_, _ = w.Write([]byte(`<group id="PAIR1"><masterDeviceId>LEFT-ID</masterDeviceId><roles><groupRole><deviceId>LEFT-ID</deviceId><role>LEFT</role><ipAddress>192.0.2.10</ipAddress></groupRole><groupRole><deviceId>RIGHT-ID</deviceId><role>RIGHT</role><ipAddress>192.0.2.11</ipAddress></groupRole></roles></group>`))
+	}))
+	defer server.Close()
+
+	err := DeleteMargeGroupGeneration(server.Client(), GenerationRef{
+		MargeURL: server.URL, AccountID: "ACCOUNT1", GroupID: "PAIR1", DeviceID: "LEFT-ID",
+		ExpectedGroup: margeTestGroup("PAIR1"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "still active") {
+		t.Fatalf("error = %v, want failed postcondition", err)
+	}
+}
+
+func TestMargeWrappedGroupNotFoundRequiresExactError(t *testing.T) {
+	ref := GenerationRef{AccountID: "ACCOUNT1", GroupID: "PAIR1"}
+	for _, test := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "exact", body: `<error>Unexpected error: 404: Group PAIR1 does not exist in account ACCOUNT1</error>`, want: true},
+		{name: "xml declaration and whitespace", body: xml.Header + ` <error> Unexpected error: 404: Group PAIR1 does not exist in account ACCOUNT1 </error> `, want: true},
+		{name: "wrong group", body: `<error>Unexpected error: 404: Group OTHER does not exist in account ACCOUNT1</error>`},
+		{name: "wrong account", body: `<error>Unexpected error: 404: Group PAIR1 does not exist in account OTHER</error>`},
+		{name: "wrong inner status", body: `<error>Unexpected error: 500: Group PAIR1 does not exist in account ACCOUNT1</error>`},
+		{name: "wrong root", body: `<status>Unexpected error: 404: Group PAIR1 does not exist in account ACCOUNT1</status>`},
+		{name: "trailing element", body: `<error>Unexpected error: 404: Group PAIR1 does not exist in account ACCOUNT1</error><ignored/>`},
+		{name: "malformed", body: `<error>Unexpected error: 404: Group PAIR1 does not exist in account ACCOUNT1`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := margeWrappedGroupNotFound([]byte(test.body), ref); got != test.want {
+				t.Fatalf("margeWrappedGroupNotFound() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+func (failingReadCloser) Close() error             { return nil }
+
+type cleanupRoundTripper struct {
+	responses []*http.Response
+}
+
+func (r *cleanupRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	response := r.responses[0]
+	r.responses = r.responses[1:]
+	return response, nil
+}
+
+func TestDeleteMargeGroupGenerationRejectsUnreadableWrappedResponse(t *testing.T) {
+	initial := `<group id="PAIR1"><masterDeviceId>LEFT-ID</masterDeviceId><roles><groupRole><deviceId>LEFT-ID</deviceId><role>LEFT</role><ipAddress>192.0.2.10</ipAddress></groupRole><groupRole><deviceId>RIGHT-ID</deviceId><role>RIGHT</role><ipAddress>192.0.2.11</ipAddress></groupRole></roles></group>`
+	httpClient := &http.Client{Transport: &cleanupRoundTripper{responses: []*http.Response{
+		{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(initial))},
+		{StatusCode: http.StatusInternalServerError, Body: failingReadCloser{}},
+	}}}
+
+	err := DeleteMargeGroupGeneration(httpClient, GenerationRef{
+		MargeURL: "http://example.test", AccountID: "ACCOUNT1", GroupID: "PAIR1", DeviceID: "LEFT-ID",
+		ExpectedGroup: margeTestGroup("PAIR1"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "read failed") {
+		t.Fatalf("error = %v, want read failure", err)
+	}
+}
+
+func TestDeleteMargeGroupGenerationRejectsOversizedWrappedResponse(t *testing.T) {
+	deleteSeen := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deleteSeen = true
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`<error>Unexpected error: 404: Group PAIR1 does not exist in account ACCOUNT1</error>` + strings.Repeat(" ", 1024)))
+			return
+		}
+
+		if deleteSeen {
+			_, _ = w.Write([]byte(`<group/>`))
+			return
+		}
+
+		_, _ = w.Write([]byte(`<group id="PAIR1"><masterDeviceId>LEFT-ID</masterDeviceId><roles><groupRole><deviceId>LEFT-ID</deviceId><role>LEFT</role><ipAddress>192.0.2.10</ipAddress></groupRole><groupRole><deviceId>RIGHT-ID</deviceId><role>RIGHT</role><ipAddress>192.0.2.11</ipAddress></groupRole></roles></group>`))
+	}))
+	defer server.Close()
+
+	err := DeleteMargeGroupGeneration(server.Client(), GenerationRef{
+		MargeURL: server.URL, AccountID: "ACCOUNT1", GroupID: "PAIR1", DeviceID: "LEFT-ID",
+		ExpectedGroup: margeTestGroup("PAIR1"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds 1024 bytes") {
+		t.Fatalf("error = %v, want oversized response rejection", err)
 	}
 }
 
