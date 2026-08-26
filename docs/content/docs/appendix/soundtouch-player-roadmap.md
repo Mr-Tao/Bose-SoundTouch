@@ -101,13 +101,13 @@ rename and network/firmware info.
 
 ---
 
-## 4. Render stereo pairs as a single device
+## 4. Render stereo pairs as a single device (shipped)
 
-Today soundtouch-player shows the two halves of a stereo pair (formed via
-`/addGroup` — see issue #252) as independent entries in the device list. The
-Bose app collapsed a paired ST10 set into one "L+R" entry; restoring that
-presentation closes the perception gap BirdyBA flagged at
-<https://github.com/gesellix/Bose-SoundTouch/issues/252#issuecomment-4458140305>.
+soundtouch-player projects a valid two-speaker stereo pair (formed via
+`/addGroup` - see [issue #252](https://github.com/gesellix/Bose-SoundTouch/issues/252))
+as one logical control target. This restores the single-entry presentation
+expected by users while preserving both physical speakers in the service
+registry.
 
 **Device API:**
 - `GET /getGroup` on each speaker — returns the current `<group>` with
@@ -118,28 +118,30 @@ presentation closes the perception gap BirdyBA flagged at
   side is sufficient to detect the pair
 
 **Backend:**
-- During device-list assembly, call `GET /getGroup` for each discovered device
-  in parallel (matches the propagation pattern already used by
-  `soundtouch-cli group create` in `cmd/soundtouch-cli/cmd_group.go`)
-- Bucket devices by `<masterDeviceId>` — each bucket emits one entry in the
-  list response. Standalone devices stay as their own bucket-of-one
-- Expose pair metadata on the list entry so the UI can render role chips
-  (`L`/`R`) and resolve role → physical device for actions
+- Poll `GET /getGroup` together with the other device status and consume
+  `groupUpdated` events. A generation check prevents an older poll from
+  overwriting a newer event.
+- Collapse only an exact two-member `LEFT`/`RIGHT` group whose registered
+  members agree on the group claim. Malformed, conflicting, or ambiguous data
+  fails open and leaves the physical entries visible.
+- Use the master speaker's existing registry key for the logical target, so
+  controls continue to route through the master without changing the raw
+  physical-device registry.
+- Use the same projection for the REST device list and the global player
+  WebSocket snapshot.
 
 **Frontend:**
-- Device list collapses paired devices into one card titled with both names
-  (e.g. `"Wohnzimmer L+R"`) and role chips
-- Clicking the card opens a device-detail page that exposes both per-role
-  status and a "Dissolve pair" action (DELETE flow, already wired in
-  `soundtouch-cli group remove` and in fakespeaker's `/removeGroup` GET)
-- Standalone speakers continue to render as today
+- Render one card using the shared member name or the group's name.
+- Show pair availability as `Stereo pair n/2` and mark the card degraded when
+  a member is unavailable or the group reports a non-OK state.
+- Hide the single-device remove action on a projected pair. Standalone
+  speakers continue to render as before.
 
-**Note:** Pair lifecycle (create / rename / remove) already works
-end-to-end — `pkg/client` group endpoints + `cmd/soundtouch-cli/cmd_group.go`,
-covered by tests in `cmd/soundtouch-cli/cmd_group_test.go` and exercisable
-against the fake speaker's group routes
-(`pkg/service/testing/fakespeaker/fakespeaker.go`). This task is purely about
-presentation in soundtouch-player's device list — no protocol work required.
+**Note:** Pair lifecycle (create / rename / remove) remains available through
+the existing client and CLI group operations. The player intentionally does
+not expose a "Dissolve pair" action yet: its current remove operation deletes
+one physical registry record rather than performing an atomic pair lifecycle
+operation.
 
 ---
 
