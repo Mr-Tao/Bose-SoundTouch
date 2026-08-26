@@ -306,6 +306,70 @@ func (app *WebApp) applyBassEvent(
 	})
 }
 
+// registerDeviceWebSocketClient gives conn its own write-serialization lock,
+// mirroring registerGlobalWebSocket's role for the browser-wide pool. Unlike
+// registerGlobalWebSocket, there are no initial frames to send under it --
+// callers install the lock before their first write.
+func (app *WebApp) registerDeviceWebSocketClient(conn webSocketWriter) {
+	app.DeviceWSMutex.Lock()
+	app.DeviceWSClients[conn] = &sync.Mutex{}
+	app.DeviceWSMutex.Unlock()
+}
+
+// removeDeviceWebSocketClient unregisters conn. Unlike
+// removeGlobalWebSocketClient, callers close the underlying connection
+// themselves (HandleDeviceWebSocket already does via its own defer), so this
+// only needs to drop the registry entry.
+func (app *WebApp) removeDeviceWebSocketClient(conn webSocketWriter) {
+	app.DeviceWSMutex.Lock()
+	delete(app.DeviceWSClients, conn)
+	app.DeviceWSMutex.Unlock()
+}
+
+// withDeviceConnWrite is withConnWrite for the per-device status pool.
+func (app *WebApp) withDeviceConnWrite(conn webSocketWriter, write func(webSocketWriteBatch) error) error {
+	app.DeviceWSMutex.RLock()
+	mu := app.DeviceWSClients[conn]
+	app.DeviceWSMutex.RUnlock()
+
+	if mu == nil {
+		return errConnUnregistered
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	return write(webSocketWriteBatch{timeout: app.writeTimeout()})
+}
+
+func (app *WebApp) deviceWebSocketClients() []webSocketWriter {
+	app.DeviceWSMutex.RLock()
+	defer app.DeviceWSMutex.RUnlock()
+
+	clients := make([]webSocketWriter, 0, len(app.DeviceWSClients))
+	for client := range app.DeviceWSClients {
+		clients = append(clients, client)
+	}
+
+	return clients
+}
+
+// awaitPriorGlobalWebSocketWrites is an ordering barrier across both browser
+// WebSocket connection pools (the global device-list feed and per-device
+// status feeds). Once it returns, any write already in flight on any
+// currently-registered connection in either pool has completed, so a caller
+// that just applied a fresh projection is guaranteed a later write captures
+// it rather than racing a stale one still being sent.
+func (app *WebApp) awaitPriorGlobalWebSocketWrites() {
+	for _, client := range app.globalWebSocketClients() {
+		_ = app.withConnWrite(client, func(webSocketWriteBatch) error { return nil })
+	}
+
+	for _, client := range app.deviceWebSocketClients() {
+		_ = app.withDeviceConnWrite(client, func(webSocketWriteBatch) error { return nil })
+	}
+}
+
 // HandleWebSocket handles WebSocket connections for real-time updates
 func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := app.Upgrader.Upgrade(w, r, nil)
@@ -703,19 +767,22 @@ func (app *WebApp) HandleDeviceWebSocket(w http.ResponseWriter, r *http.Request)
 	}
 	defer conn.Close()
 
+	app.registerDeviceWebSocketClient(conn)
+	defer app.removeDeviceWebSocketClient(conn)
+
 	log.Printf("Device WebSocket connected for %s", sanitizeLog(deviceID))
 
-	// Send initial device status
-	initialMessage := webtypes.WebSocketMessage{
-		Type:     "device_status",
-		DeviceID: deviceID,
-		Data: map[string]interface{}{
-			"info":   device.DeviceInfo,
-			"status": device.Status(),
-		},
-	}
-
-	if err := conn.WriteJSON(initialMessage); err != nil {
+	// Capture and send under the same ordering seam used by lifecycle responses.
+	if err := app.withDeviceConnWrite(conn, func(batch webSocketWriteBatch) error {
+		return batch.writeJSON(conn, webtypes.WebSocketMessage{
+			Type:     "device_status",
+			DeviceID: deviceID,
+			Data: map[string]interface{}{
+				"info":   device.DeviceInfo,
+				"status": device.Status(),
+			},
+		})
+	}); err != nil {
 		log.Printf("Failed to send initial device status: %v", err)
 		return
 	}
@@ -746,45 +813,50 @@ func (app *WebApp) HandleDeviceWebSocket(w http.ResponseWriter, r *http.Request)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Send ping to check if client is still connected
-		if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-			log.Printf("Failed to send ping to device WebSocket %s: %v", sanitizeLog(deviceID), err)
+		if err := app.writeDeviceWebSocketUpdate(conn, deviceID, device); err != nil {
+			log.Printf("Failed to send device WebSocket update for %s: %v", sanitizeLog(deviceID), err)
 			return
 		}
+	}
+}
 
-		// Send device status update
+func (app *WebApp) writeDeviceWebSocketUpdate(
+	conn webSocketWriter,
+	deviceID string,
+	device *webtypes.DeviceConnection,
+) error {
+	return app.withDeviceConnWrite(conn, func(batch webSocketWriteBatch) error {
+		// Capture after taking the lifecycle ordering lock. A status frame
+		// captured before a pair mutation therefore cannot follow its response.
 		status := device.Status()
-		statusMessage := webtypes.WebSocketMessage{
+
+		if err := batch.writeMessage(conn, websocket.PingMessage, []byte{}); err != nil {
+			return err
+		}
+
+		if err := batch.writeJSON(conn, webtypes.WebSocketMessage{
 			Type:     "device_status",
 			DeviceID: deviceID,
 			Data: map[string]interface{}{
 				"info":   device.DeviceInfo,
 				"status": status,
 			},
+		}); err != nil {
+			return err
 		}
 
-		if err := conn.WriteJSON(statusMessage); err != nil {
-			log.Printf("Failed to send device status update for %s: %v", sanitizeLog(deviceID), err)
-			return
+		if device.WebSocket == nil || !status.IsConnected {
+			return nil
 		}
 
-		// If device has active WebSocket connection to SoundTouch device,
-		// also send any real-time updates from that connection
-		if device.WebSocket != nil && status.IsConnected {
-			realtimeMessage := webtypes.WebSocketMessage{
-				Type:     "device_realtime",
-				DeviceID: deviceID,
-				Data: map[string]interface{}{
-					"nowPlaying": status.NowPlaying,
-					"volume":     status.Volume,
-					"timestamp":  time.Now(),
-				},
-			}
-
-			if err := conn.WriteJSON(realtimeMessage); err != nil {
-				log.Printf("Failed to send realtime update for %s: %v", sanitizeLog(deviceID), err)
-				return
-			}
-		}
-	}
+		return batch.writeJSON(conn, webtypes.WebSocketMessage{
+			Type:     "device_realtime",
+			DeviceID: deviceID,
+			Data: map[string]interface{}{
+				"nowPlaying": status.NowPlaying,
+				"volume":     status.Volume,
+				"timestamp":  time.Now(),
+			},
+		})
+	})
 }

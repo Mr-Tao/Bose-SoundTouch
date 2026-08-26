@@ -72,6 +72,7 @@ func TestMountWebControlAPIShape(t *testing.T) {
 		"/api/control/devices/{id}/providers/radiobrowser/play",
 		"/api/control/devices/{id}/providers/url/play",
 		"/api/control/devices/{id}/providers/tts/play",
+		"/api/control/devices/{id}/stereo-pair/",
 	}
 	for _, want := range mustExist {
 		if !registered[want] {
