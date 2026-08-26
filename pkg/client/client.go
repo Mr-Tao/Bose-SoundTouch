@@ -144,6 +144,7 @@ package client
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1105,6 +1106,10 @@ func (c *Client) Host() string {
 
 // get performs a GET request and unmarshals the XML response
 func (c *Client) get(endpoint string, result interface{}) error {
+	return c.getWithHTTPClient(c.httpClient, endpoint, result)
+}
+
+func (c *Client) getWithHTTPClient(httpClient *http.Client, endpoint string, result interface{}) error {
 	url := c.baseURL + endpoint
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -1115,7 +1120,7 @@ func (c *Client) get(endpoint string, result interface{}) error {
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "application/xml")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to execute request: %w", err)
 	}
@@ -1149,6 +1154,37 @@ func (c *Client) get(endpoint string, result interface{}) error {
 	}
 
 	return nil
+}
+
+// mutatingGet performs a firmware-required state-changing GET exactly once at
+// the HTTP transport layer. A fresh connection prevents net/http from
+// automatically replaying the request after an ambiguous failure on a reused
+// connection.
+func (c *Client) mutatingGet(endpoint string, result interface{}) error {
+	baseTransport := c.httpClient.Transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+
+	transport, ok := baseTransport.(*http.Transport)
+	if !ok {
+		return errors.New("state-changing GET requires a cloneable HTTP transport")
+	}
+
+	oneShotTransport := transport.Clone()
+
+	oneShotTransport.DisableKeepAlives = true
+	defer oneShotTransport.CloseIdleConnections()
+
+	oneShotClient := &http.Client{
+		Transport: oneShotTransport,
+		Timeout:   c.httpClient.Timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	return c.getWithHTTPClient(oneShotClient, endpoint, result)
 }
 
 // post performs a POST request with XML body
@@ -1448,10 +1484,11 @@ func (c *Client) GetGroup() (*models.Group, error) {
 	return &g, err
 }
 
-// AddGroup creates a new stereo pair on the device addressed by this client,
-// which becomes the master. The supplied group must contain both LEFT and
-// RIGHT roles; the device assigns the group ID and echoes the full state
-// in the response.
+// AddGroup applies one side of stereo-pair creation to the addressed device.
+// The supplied group must contain both LEFT and RIGHT roles. A master-bound
+// request omits SenderIPAddress; a slave-bound request sets it to the master's
+// IP address. Firmware may acknowledge the request without returning the
+// assigned group ID, so callers must verify the resulting state with GetGroup.
 func (c *Client) AddGroup(group *models.Group) (*models.Group, error) {
 	var result models.Group
 	if err := c.postWithResponse("/addGroup", group, &result); err != nil {
@@ -1481,7 +1518,7 @@ func (c *Client) UpdateGroup(group *models.Group) (*models.Group, error) {
 func (c *Client) RemoveGroup() error {
 	var g models.Group
 
-	return c.get("/removeGroup", &g)
+	return c.mutatingGet("/removeGroup", &g)
 }
 
 // SetName sets the device name

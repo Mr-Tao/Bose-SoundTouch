@@ -3,11 +3,10 @@ package main
 import (
 	"fmt"
 	"net"
-	"sync"
+	"net/http"
 
-	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
-	"github.com/gesellix/bose-soundtouch/pkg/speaker"
+	"github.com/gesellix/bose-soundtouch/pkg/stereopair"
 	"github.com/urfave/cli/v2"
 )
 
@@ -16,32 +15,26 @@ func getGroupStatus(c *cli.Context) error {
 	clientConfig := GetClientConfig(c)
 	PrintDeviceHeader("Getting group information", clientConfig.Host, clientConfig.Port)
 
-	client, err := CreateSoundTouchClient(clientConfig)
-	if err != nil {
-		PrintError(fmt.Sprintf("Failed to create client: %v", err))
-		return err
-	}
-
-	group, err := client.GetGroup()
+	result, err := newGroupCoordinator(clientConfig).Inspect(clientConfig.Host)
 	if err != nil {
 		PrintError(fmt.Sprintf("Failed to get group: %v", err))
+		printGroupResultDetails(result)
+
 		return err
 	}
 
-	if group.IsEmpty() {
+	if result.Group == nil || result.Group.IsEmpty() {
 		fmt.Println("Device is not in a stereo pair")
+
 		return nil
 	}
 
-	printGroup(group)
+	printGroup(result.Group)
 
 	return nil
 }
 
-// createGroup forms a stereo pair by POSTing /addGroup to both speakers in
-// parallel. LEFT is the master. Addressing each speaker directly (instead of
-// only the master and letting it propagate via marge) sidesteps the
-// inter-device round-trip that surfaced as client timeouts in #252.
+// createGroup forms and verifies a stereo pair. LEFT is always the master.
 func createGroup(c *cli.Context) error {
 	leftIP := c.String("left")
 	rightIP := c.String("right")
@@ -49,283 +42,117 @@ func createGroup(c *cli.Context) error {
 
 	if net.ParseIP(leftIP) == nil {
 		PrintError(fmt.Sprintf("Invalid left IP address: %s", leftIP))
+
 		return fmt.Errorf("invalid left IP: %s", leftIP)
 	}
 
 	if net.ParseIP(rightIP) == nil {
 		PrintError(fmt.Sprintf("Invalid right IP address: %s", rightIP))
+
 		return fmt.Errorf("invalid right IP: %s", rightIP)
 	}
 
-	PrintDeviceHeader(fmt.Sprintf("Creating stereo pair: LEFT=%s RIGHT=%s", leftIP, rightIP), leftIP, speaker.HTTPPort)
+	clientConfig := GetClientConfig(c)
+	PrintDeviceHeader(fmt.Sprintf("Creating stereo pair: LEFT=%s RIGHT=%s", leftIP, rightIP), leftIP, clientConfig.Port)
 
-	leftInfo, err := fetchDeviceInfo(c, leftIP)
-	if err != nil {
-		PrintError(fmt.Sprintf("Failed to read LEFT device info: %v", err))
-		return err
-	}
-
-	rightInfo, err := fetchDeviceInfo(c, rightIP)
-	if err != nil {
-		PrintError(fmt.Sprintf("Failed to read RIGHT device info: %v", err))
-		return err
-	}
-
-	if name == "" {
-		name = fmt.Sprintf("%s + %s", leftInfo.Name, rightInfo.Name)
-	}
-
-	req := &models.Group{
+	result, err := newGroupCoordinator(clientConfig).Create(stereopair.CreateRequest{
+		LeftIPAddress:  leftIP,
+		RightIPAddress: rightIP,
 		Name:           name,
-		MasterDeviceID: leftInfo.DeviceID,
-		Roles: models.GroupRoles{
-			Roles: []models.GroupRole{
-				{DeviceID: leftInfo.DeviceID, Role: "LEFT", IPAddress: leftIP},
-				{DeviceID: rightInfo.DeviceID, Role: "RIGHT", IPAddress: rightIP},
-			},
-		},
-		// SenderIPAddress is intentionally omitted on the base request.
-		// propagateAddGroup adds it to the slave's copy only — see comment there.
-	}
-
-	leftClient, err := clientForHost(c, leftIP)
+	})
 	if err != nil {
-		PrintError(fmt.Sprintf("Failed to create client for LEFT: %v", err))
+		PrintError(fmt.Sprintf("Failed to create stereo pair: %v", err))
+		printGroupResultDetails(result)
+
 		return err
 	}
 
-	rightClient, err := clientForHost(c, rightIP)
-	if err != nil {
-		PrintError(fmt.Sprintf("Failed to create client for RIGHT: %v", err))
-		return err
-	}
-
-	leftOut, rightOut := propagateAddGroup(leftClient, rightClient, leftIP, rightIP, req)
-
-	if leftOut.err != nil {
-		PrintError(fmt.Sprintf("LEFT (%s) /addGroup failed: %v", leftIP, leftOut.err))
-	}
-
-	if rightOut.err != nil {
-		PrintError(fmt.Sprintf("RIGHT (%s) /addGroup failed: %v", rightIP, rightOut.err))
-	}
-
-	if leftOut.err != nil || rightOut.err != nil {
-		if (leftOut.err == nil) != (rightOut.err == nil) {
-			succeeded := leftIP
-			if leftOut.err != nil {
-				succeeded = rightIP
-			}
-
-			PrintError(fmt.Sprintf("Partial group state on %s — clean up with `soundtouch-cli --host %s group remove`", succeeded, succeeded))
-		}
-
-		return fmt.Errorf("/addGroup propagation failed")
-	}
-
-	// The LEFT (master) response carries the assigned group ID; use it for display.
-	PrintSuccess(fmt.Sprintf("Stereo pair created (id=%s)", leftOut.group.ID))
-	printGroup(leftOut.group)
+	PrintSuccess(fmt.Sprintf("Stereo pair created (id=%s)", result.Group.ID))
+	printGroup(result.Group)
 
 	return nil
 }
 
-// addGroupOutcome is the per-speaker result of a parallel /addGroup call.
-type addGroupOutcome struct {
-	host  string
-	group *models.Group
-	err   error
-}
-
-// propagateAddGroup POSTs /addGroup to both speakers concurrently and returns
-// the (LEFT, RIGHT) outcomes. A non-GROUP_OK Status in the response is
-// reported as an error so callers don't have to re-inspect the body.
-//
-// The two POSTs carry different payloads: the master (LEFT) receives the base
-// request with no senderIPAddress so its state machine forms the group as the
-// master, while the slave (RIGHT) receives a copy with senderIPAddress set to
-// the master's IP so its state machine joins as the slave. Sending the same
-// payload to both makes both speakers think they're the slave — they enter
-// AddingSlave, wait for a master that never confirms, time out after 5 s, and
-// revert (issue #252).
-func propagateAddGroup(left, right *client.Client, leftIP, rightIP string, req *models.Group) (addGroupOutcome, addGroupOutcome) {
-	masterReq := *req
-	masterReq.SenderIPAddress = ""
-
-	slaveReq := *req
-	slaveReq.SenderIPAddress = leftIP
-
-	var (
-		wg                sync.WaitGroup
-		leftOut, rightOut addGroupOutcome
-	)
-
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-
-		leftOut = postAddGroup(left, leftIP, &masterReq)
-	}()
-
-	go func() {
-		defer wg.Done()
-
-		rightOut = postAddGroup(right, rightIP, &slaveReq)
-	}()
-
-	wg.Wait()
-
-	return leftOut, rightOut
-}
-
-func postAddGroup(cli *client.Client, host string, req *models.Group) addGroupOutcome {
-	out := addGroupOutcome{host: host}
-
-	g, err := cli.AddGroup(req)
-	if err != nil {
-		out.err = err
-		return out
-	}
-
-	out.group = g
-
-	if g != nil && g.Status != "" && g.Status != "GROUP_OK" {
-		out.err = fmt.Errorf("device returned status %q (want GROUP_OK)", g.Status)
-	}
-
-	return out
-}
-
-// renameGroup updates the name of the existing stereo pair. The device
-// requires the full structure on every update, so we fetch the current
-// state first.
+// renameGroup updates and verifies the name on both stereo-pair members.
 func renameGroup(c *cli.Context) error {
 	clientConfig := GetClientConfig(c)
 	newName := c.String("name")
 
 	if newName == "" {
 		PrintError("--name is required")
+
 		return fmt.Errorf("name is required")
 	}
 
 	PrintDeviceHeader(fmt.Sprintf("Renaming stereo pair to %q", newName), clientConfig.Host, clientConfig.Port)
 
-	stClient, err := CreateSoundTouchClient(clientConfig)
+	coordinator := newGroupCoordinator(clientConfig)
+
+	current, err := coordinator.Inspect(clientConfig.Host)
 	if err != nil {
-		PrintError(fmt.Sprintf("Failed to create client: %v", err))
+		PrintError(fmt.Sprintf("Failed to inspect stereo pair before rename: %v", err))
+		printGroupResultDetails(current)
+
 		return err
 	}
 
-	current, err := stClient.GetGroup()
-	if err != nil {
-		PrintError(fmt.Sprintf("Failed to read current group: %v", err))
-		return err
+	if current.Group == nil || current.Group.IsEmpty() {
+		return fmt.Errorf("device is not in a stereo pair")
 	}
 
-	if current.IsEmpty() {
-		PrintError("Device is not in a stereo pair — nothing to rename")
-		return fmt.Errorf("no group configured")
-	}
-
-	// Status is read-only on the device side; don't echo it back.
-	current.Status = ""
-	current.Name = newName
-
-	result, err := stClient.UpdateGroup(current)
+	result, err := coordinator.Rename(stereopair.RenameRequest{
+		MemberIPAddress: clientConfig.Host,
+		ExpectedGroupID: current.Group.ID,
+		Name:            newName,
+	})
 	if err != nil {
 		PrintError(fmt.Sprintf("Failed to rename group: %v", err))
+		printGroupResultDetails(result)
+
 		return err
 	}
 
-	PrintSuccess(fmt.Sprintf("Stereo pair renamed to %q", result.Name))
-	printGroup(result)
+	PrintSuccess(fmt.Sprintf("Stereo pair renamed to %q", result.Group.Name))
+	printGroup(result.Group)
 
 	return nil
 }
 
-// removeGroup tears down the device's stereo pair by sending /removeGroup to
-// every member in parallel. Sending it only to the master (as the old code
-// did) leaves the slave stuck in GroupSlave state indefinitely — mirrors the
-// same symmetry as createGroup (see issue #252 comment there).
+// removeGroup dissolves and verifies the stereo pair on every member.
 func removeGroup(c *cli.Context) error {
 	clientConfig := GetClientConfig(c)
 	PrintDeviceHeader("Removing stereo pair", clientConfig.Host, clientConfig.Port)
 
-	stClient, err := CreateSoundTouchClient(clientConfig)
+	coordinator := newGroupCoordinator(clientConfig)
+
+	current, err := coordinator.Inspect(clientConfig.Host)
 	if err != nil {
-		PrintError(fmt.Sprintf("Failed to create client: %v", err))
-		return err
+		PrintWarning(fmt.Sprintf("Stereo pair is degraded before removal: %v", err))
+		printGroupResultDetails(current)
+
+		if current.Group == nil || current.Group.IsEmpty() {
+			return err
+		}
 	}
 
-	// Fetch current group to learn every member's IP before tearing down.
-	group, err := stClient.GetGroup()
-	if err != nil {
-		PrintError(fmt.Sprintf("Failed to read current group: %v", err))
-		return err
-	}
-
-	if group.IsEmpty() {
+	if current.Group == nil || current.Group.IsEmpty() {
 		fmt.Println("Device is not in a stereo pair — nothing to remove")
+
 		return nil
 	}
 
-	// Collect the unique set of member IPs. The master is always reachable
-	// via clientConfig.Host; the roles carry all members including slaves.
-	type memberResult struct {
-		ip  string
-		err error
-	}
+	dissolveHost := dissolveRecoveryHost(current, clientConfig.Host)
 
-	members := make([]string, 0, len(group.Roles.Roles))
-	seen := map[string]bool{}
+	result, err := coordinator.Dissolve(stereopair.DissolveRequest{
+		MemberIPAddress: dissolveHost,
+		ExpectedGroupID: current.Group.ID,
+		ExpectedGroup:   current.Group,
+	})
+	if err != nil {
+		PrintError(fmt.Sprintf("Failed to remove stereo pair: %v", err))
+		printGroupResultDetails(result)
 
-	for _, role := range group.Roles.Roles {
-		if role.IPAddress != "" && !seen[role.IPAddress] {
-			seen[role.IPAddress] = true
-			members = append(members, role.IPAddress)
-		}
-	}
-
-	// Always include the addressed host even if the group response omitted IPs.
-	if !seen[clientConfig.Host] {
-		members = append(members, clientConfig.Host)
-	}
-
-	results := make([]memberResult, len(members))
-
-	var wg sync.WaitGroup
-
-	for i, ip := range members {
-		wg.Add(1)
-
-		go func(idx int, host string) {
-			defer wg.Done()
-
-			mc, mcErr := clientForHost(c, host)
-			if mcErr != nil {
-				results[idx] = memberResult{ip: host, err: mcErr}
-				return
-			}
-
-			results[idx] = memberResult{ip: host, err: mc.RemoveGroup()}
-		}(i, ip)
-	}
-
-	wg.Wait()
-
-	anyErr := false
-
-	for _, r := range results {
-		if r.err != nil {
-			PrintError(fmt.Sprintf("%s /removeGroup failed: %v", r.ip, r.err))
-
-			anyErr = true
-		}
-	}
-
-	if anyErr {
-		return fmt.Errorf("/removeGroup propagation failed")
+		return err
 	}
 
 	PrintSuccess("Stereo pair removed")
@@ -333,32 +160,111 @@ func removeGroup(c *cli.Context) error {
 	return nil
 }
 
-// fetchDeviceInfo builds a one-off client for the given IP and reads /info.
-// Reused for both halves of a `create` invocation so the caller doesn't have
-// to babysit two host/port pairs.
-func fetchDeviceInfo(c *cli.Context, host string) (*models.DeviceInfo, error) {
-	stClient, err := clientForHost(c, host)
-	if err != nil {
-		return nil, err
+func dissolveRecoveryHost(result stereopair.Result, fallback string) string {
+	if result.Group == nil || result.Group.ID == "" {
+		return fallback
 	}
 
-	return stClient.GetDeviceInfo()
+	for i := range result.Members {
+		member := &result.Members[i]
+		if member.Group != nil && member.Group.ID == result.Group.ID && net.ParseIP(member.IPAddress) != nil {
+			return member.IPAddress
+		}
+	}
+
+	return fallback
 }
 
-// clientForHost mirrors CreateSoundTouchClient but overrides the host so we
-// can talk to a speaker other than the one named in --host.
-func clientForHost(c *cli.Context, host string) (*client.Client, error) {
-	cfg, err := loadConfig(c.Duration("timeout"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to load config: %w", err)
+func newGroupCoordinator(config *ClientConfig) *stereopair.Coordinator {
+	lifecycleConfig := *config
+	if lifecycleConfig.Timeout < stereopair.RequestTimeout {
+		lifecycleConfig.Timeout = stereopair.RequestTimeout
 	}
 
-	return client.NewClient(&client.Config{
-		Host:      host,
-		Port:      speaker.HTTPPort,
-		Timeout:   cfg.HTTPTimeout,
-		UserAgent: cfg.UserAgent,
-	}), nil
+	cleanupClient := &http.Client{Timeout: lifecycleConfig.Timeout}
+
+	return stereopair.NewWithGenerationLifecyclePersistence(
+		groupClientFactory(&lifecycleConfig),
+		func(ref stereopair.GenerationRef) error {
+			return stereopair.DeleteMargeGroupGeneration(cleanupClient, ref)
+		},
+		func(refs []stereopair.GenerationRef) error {
+			return stereopair.EnsureMargeNoGroupGenerations(cleanupClient, refs)
+		},
+		func(ref stereopair.GenerationRef, name string) error {
+			return stereopair.RenameMargeGroupGeneration(cleanupClient, ref, name)
+		},
+	)
+}
+
+// groupClientFactory addresses every member directly while retaining the
+// effective CLI port and timeout.
+func groupClientFactory(config *ClientConfig) stereopair.ClientFactory {
+	baseConfig := *config
+
+	return func(ipAddress string) (stereopair.Client, error) {
+		memberConfig := baseConfig
+		memberConfig.Host = ipAddress
+
+		return CreateSoundTouchClient(&memberConfig)
+	}
+}
+
+func printGroupResultDetails(result stereopair.Result) {
+	if result.Status == stereopair.StatusDegraded {
+		PrintWarning(fmt.Sprintf("Stereo-pair %s result is degraded", result.Operation))
+	}
+
+	for i := range result.Members {
+		member := &result.Members[i]
+		label := groupMemberLabel(i, member)
+
+		if member.PreflightError != nil {
+			PrintError(fmt.Sprintf("%s preflight failed: %v", label, member.PreflightError))
+		}
+
+		if member.MutationError != nil {
+			PrintError(fmt.Sprintf("%s mutation failed: %v", label, member.MutationError))
+		}
+
+		if member.VerificationError != nil {
+			PrintError(fmt.Sprintf("%s verification failed: %v", label, member.VerificationError))
+		}
+
+		if member.CompensationError != nil {
+			PrintError(fmt.Sprintf("%s cleanup failed: %v", label, member.CompensationError))
+		} else if member.CompensationAttempted && !member.CompensationVerified {
+			PrintWarning(fmt.Sprintf("%s cleanup could not be verified", label))
+		}
+	}
+
+	if result.CompensationAttempted {
+		if result.CompensationComplete {
+			PrintWarning("Partial stereo-pair state was cleaned up and verified")
+		} else {
+			PrintError("Partial stereo-pair state cleanup is incomplete")
+		}
+	}
+
+	if result.PersistenceError != nil {
+		PrintError(fmt.Sprintf("Persistent group generation update failed: %v", result.PersistenceError))
+	}
+}
+
+func groupMemberLabel(index int, member *stereopair.MemberResult) string {
+	if member.IPAddress != "" && member.DeviceID != "" {
+		return fmt.Sprintf("%s (%s)", member.IPAddress, member.DeviceID)
+	}
+
+	if member.IPAddress != "" {
+		return member.IPAddress
+	}
+
+	if member.DeviceID != "" {
+		return member.DeviceID
+	}
+
+	return fmt.Sprintf("member %d", index+1)
 }
 
 func printGroup(g *models.Group) {

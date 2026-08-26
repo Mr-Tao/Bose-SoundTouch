@@ -25,6 +25,22 @@ export const api = {
     zoneRemove: (masterId, slaveId) => req(`/api/control/devices/${masterId}/zone/remove/${slaveId}`, { method: 'POST' }),
     zoneDissolve: (id) => req(`/api/control/devices/${id}/zone/dissolve`, { method: 'POST' }),
     zoneLeave: (id) => req(`/api/control/devices/${id}/zone/leave`, { method: 'POST' }),
+    stereoPair: (id) => req(`/api/control/devices/${id}/stereo-pair/`),
+    stereoPairCreate: (leftId, rightId, name) => req(`/api/control/devices/${leftId}/stereo-pair/`, {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ rightId, name }),
+    }),
+    stereoPairRename: (id, groupId, name) => req(`/api/control/devices/${id}/stereo-pair/`, {
+        method: 'PATCH',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ groupId, name }),
+    }),
+    stereoPairDissolve: (id, groupId, group) => req(`/api/control/devices/${id}/stereo-pair/`, {
+        method: 'DELETE',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ groupId, group }),
+    }),
     play: (id, item) => req(`/api/control/devices/${id}/play`, {
         method: 'POST',
         headers: JSON_HEADERS,
