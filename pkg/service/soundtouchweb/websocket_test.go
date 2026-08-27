@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,7 +71,7 @@ func TestUpdateDeviceStatusRefreshesGroup(t *testing.T) {
 	</group>`)
 	defer server.Close()
 
-	conn := webtypes.NewDeviceConnection(client.NewClientFromHost(server.URL), nil)
+	conn := webtypes.NewDeviceConnection(client.NewClientFromHost(server.URL), &models.DeviceInfo{Type: "SoundTouch 10"})
 	NewWebApp().UpdateDeviceStatus("device-1", conn)
 
 	status := conn.Status()
@@ -95,7 +96,7 @@ func TestUpdateDeviceStatusPreservesGroupOnError(t *testing.T) {
 	server := newStatusTestServer(t, http.StatusInternalServerError, "group unavailable")
 	defer server.Close()
 
-	conn := webtypes.NewDeviceConnection(client.NewClientFromHost(server.URL), nil)
+	conn := webtypes.NewDeviceConnection(client.NewClientFromHost(server.URL), &models.DeviceInfo{Type: "SoundTouch 10"})
 	existing := &models.Group{ID: "pair-old", Name: "Existing Pair"}
 	conn.SetStatus(&webtypes.DeviceStatus{Group: existing})
 
@@ -187,6 +188,52 @@ func TestUpdateDeviceStatusDoesNotOverwriteNewerNameEvent(t *testing.T) {
 
 	if info := conn.Info(); info == nil || info.Name != "New Event Name" {
 		t.Fatalf("device info after stale poll = %+v, want newer event name", info)
+	}
+}
+
+func TestUpdateDeviceStatusSkipsGroupForNonStereoModel(t *testing.T) {
+	var groupRequested atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/getGroup" {
+			groupRequested.Store(true)
+			http.Error(w, "unsupported endpoint", http.StatusInternalServerError)
+
+			return
+		}
+
+		responses := map[string]string{
+			"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+			"/name":        `<name>Living Room</name>`,
+			"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
+			"/presets":     `<presets/>`,
+			"/sources":     `<sources/>`,
+			"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
+		}
+		body, ok := responses[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	for _, model := range []string{"SoundTouch 20", "SoundTouch 30"} {
+		t.Run(model, func(t *testing.T) {
+			conn := webtypes.NewDeviceConnection(client.NewClientFromHost(server.URL), &models.DeviceInfo{Type: model})
+			NewWebApp().UpdateDeviceStatus("device-1", conn)
+
+			if !conn.Status().IsConnected {
+				t.Fatal("successful ordinary status requests should mark a non-stereo model connected")
+			}
+		})
+	}
+
+	if groupRequested.Load() {
+		t.Fatal("UpdateDeviceStatus requested /getGroup for a non-stereo model")
 	}
 }
 

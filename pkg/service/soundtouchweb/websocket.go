@@ -385,7 +385,14 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		return
 	}
 
-	groupGeneration := conn.BeginGroupRefresh()
+	// /getGroup is ST10-only; ST20/ST30 may accept the request but never reply.
+	stereoCapable := stereoPairCapable(conn.DeviceInfo)
+
+	var groupGeneration uint64
+	if stereoCapable {
+		groupGeneration = conn.BeginGroupRefresh()
+	}
+
 	nameGeneration := conn.BeginNameRefresh()
 
 	// Phase 1: slow network fetches. Local vars only, no shared state
@@ -397,7 +404,15 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	presets, presetsErr := conn.Client.GetPresets()
 	sources, sourcesErr := conn.Client.GetSources()
 	bass, bassErr := conn.Client.GetBass()
-	group, groupErr := conn.Client.GetGroup()
+
+	var (
+		group    *models.Group
+		groupErr error
+	)
+
+	if stereoCapable {
+		group, groupErr = conn.Client.GetGroup()
+	}
 
 	// Phase 2: fast merge. Only fields we successfully fetched
 	// overwrite; everything else keeps the value other goroutines may
@@ -430,7 +445,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 			statusUpdated = true
 		}
 
-		statusUpdated = statusUpdated || nameErr == nil || groupErr == nil
+		statusUpdated = statusUpdated || nameErr == nil || (stereoCapable && groupErr == nil)
 
 		// Mark as connected if we successfully got at least one
 		// status from this round. Mirrors prior behaviour.
@@ -442,7 +457,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		conn.ApplyPolledName(nameGeneration, name.Value)
 	}
 
-	if groupErr == nil {
+	if stereoCapable && groupErr == nil {
 		conn.ApplyPolledGroup(groupGeneration, group)
 	}
 }
