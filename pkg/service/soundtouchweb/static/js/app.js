@@ -17,7 +17,7 @@ import { api } from './api.js';
 
 const html = htm.bind(h);
 
-function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify }) {
+function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify, onRemove }) {
     const device = devices[deviceId];
 
     if (!device) {
@@ -53,6 +53,24 @@ function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify }) {
             />
             <${Zone} deviceId=${deviceId} devices=${devices} />
             <${Recents} deviceId=${deviceId} />
+            ${!device.stereoPair ? html`
+                <div class="device-management-section">
+                    <div class="section-title">Device management</div>
+                    <button class="btn-secondary device-remove-action"
+                            onClick=${() => onRemove(deviceId)}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                             stroke-linejoin="round" aria-hidden="true">
+                            <path d="M3 6h18" />
+                            <path d="M8 6V4h8v2" />
+                            <path d="M19 6l-1 14H6L5 6" />
+                            <path d="M10 11v5" />
+                            <path d="M14 11v5" />
+                        </svg>
+                        <span>Remove from AfterTouch</span>
+                    </button>
+                </div>
+            ` : null}
         </div>
     `;
 }
@@ -171,18 +189,22 @@ function App() {
 
     async function removeDevice(id) {
         const name = devices[id]?.info?.name || id;
-        if (!confirm(`Remove "${name}"?\n\nThis clears it from AfterTouch. A device still online may reappear after the next discovery scan.`)) {
+        if (!confirm(`Remove "${name}" from AfterTouch?\n\nThis does not reset the speaker. A device still online may reappear after the next discovery scan.`)) {
             return;
         }
-        // Optimistically drop it; the server's devices broadcast reconciles.
-        setDevices(prev => {
-            const next = { ...prev };
-            delete next[id];
-            return next;
-        });
         try {
             const resp = await api.removeDevice(id);
-            showToast(resp?.success ? `Removed "${name}"` : (resp?.error || 'Failed to remove device'));
+            if (!resp?.success) {
+                showToast(resp?.error || 'Failed to remove device');
+                return;
+            }
+            setDevices(prev => {
+                const next = { ...prev };
+                delete next[id];
+                return next;
+            });
+            navigate('devices');
+            showToast(`Removed "${name}"`);
         } catch (err) {
             showToast('Failed to remove device');
         }
@@ -262,7 +284,6 @@ function App() {
                         isDiscovering=${isDiscovering}
                         onSelect=${(id) => navigate('device', id)}
                         onDiscover=${discover}
-                        onRemove=${removeDevice}
                     />
                 ` : page === 'device' ? html`
                     <${DeviceDetail}
@@ -272,6 +293,7 @@ function App() {
                         onBack=${() => navigate('devices')}
                         onDevicesChanged=${refreshDevices}
                         notify=${showToast}
+                        onRemove=${removeDevice}
                     />
                 ` : page === 'tunein' ? html`
                     <${TuneInBrowser} key="tunein-browser" devices=${devices} />

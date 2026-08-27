@@ -19,7 +19,7 @@ function sortEntries(entries, mode) {
     return copy;
 }
 
-function DeviceCard({ id, device, onSelect, onRemove }) {
+function DeviceCard({ id, device, onSelect }) {
     const { info, status } = device;
     const stereoPair = device.stereoPair;
     const np = status?.nowPlaying;
@@ -27,15 +27,10 @@ function DeviceCard({ id, device, onSelect, onRemove }) {
     const isStandby = !np || np.Source === 'STANDBY';
 
     return html`
-        <div class="device-card" onClick=${() => onSelect(id)}>
+        <button type="button" class="device-card" onClick=${() => onSelect(id)}>
             <div class="device-header">
                 <span class="device-name">${info?.name || id}</span>
-                <span class="device-header-right">
-                    <span class="device-indicator ${status?.isConnected ? 'online' : 'offline'}"></span>
-                    ${!stereoPair ? html`<button class="device-remove" title="Remove this device"
-                            aria-label="Remove this device"
-                            onClick=${(e) => { e.stopPropagation(); onRemove(id); }}>✕</button>` : null}
-                </span>
+                <span class="device-indicator ${status?.isConnected ? 'online' : 'offline'}"></span>
             </div>
             <div class="device-type">
                 ${info?.type || ''}
@@ -54,11 +49,11 @@ function DeviceCard({ id, device, onSelect, onRemove }) {
                 </div>
             ` : null}
             ${isStandby ? html`<div class="standby-label">Standby</div>` : null}
-        </div>
+        </button>
     `;
 }
 
-export function DeviceList({ devices, isDiscovering, onSelect, onDiscover, onRemove }) {
+export function DeviceList({ devices, isDiscovering, onSelect, onDiscover }) {
     const [sortMode, setSortMode] = useState(() => localStorage.getItem(SORT_LS_KEY) || 'ip');
 
     function changeSort(mode) {
@@ -89,13 +84,9 @@ export function DeviceList({ devices, isDiscovering, onSelect, onDiscover, onRem
                 </div>
                 <div class="device-grid" key="grid">
                     ${entries.map(([id, device]) => html`
-                        <${DeviceCard} key=${id} id=${id} device=${device} onSelect=${onSelect} onRemove=${onRemove} />
+                        <${DeviceCard} key=${id} id=${id} device=${device} onSelect=${onSelect} />
                     `)}
-                </div>
-                <p class="device-list-note" key="note">
-                    Removing a device clears it here. One that is still online may
-                    reappear after the next discovery scan.
-                </p>`
+                </div>`
         }
         </div>
     `;
