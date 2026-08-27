@@ -52,6 +52,16 @@ type stereoPairMemberView struct {
 	Available bool   `json:"available"`
 }
 
+func stereoPairCapable(info *models.DeviceInfo) bool {
+	if info == nil {
+		return false
+	}
+
+	typeName := strings.ToLower(strings.TrimSpace(info.Type))
+
+	return typeName == "st10" || typeName == "soundtouch 10"
+}
+
 // deviceViewSnapshot projects the physical registry into logical control
 // targets for the HTTP API and the global player WebSocket.
 func (app *WebApp) deviceViewSnapshot() map[string]deviceView {
