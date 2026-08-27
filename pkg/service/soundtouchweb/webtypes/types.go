@@ -41,12 +41,17 @@ type SoundTouchClient interface {
 // / UpdateStatus rather than the private field; construct connections
 // via NewDeviceConnection to guarantee the status is initialised.
 type DeviceConnection struct {
-	Client     *client.Client
-	WebSocket  *client.WebSocketClient
+	Client    *client.Client
+	WebSocket *client.WebSocketClient
+	// DeviceInfo is the immutable discovery snapshot. Use Info for player-facing
+	// output so later nameUpdated events are reflected without racing readers.
 	DeviceInfo *models.DeviceInfo
 	LastSeen   time.Time
 
-	status atomic.Pointer[DeviceStatus]
+	deviceName atomic.Pointer[string]
+	status     atomic.Pointer[DeviceStatus]
+	nameMu     sync.Mutex
+	nameGen    uint64
 
 	// groupMu orders polled /getGroup responses against real-time
 	// groupUpdated events. Starting a newer refresh or receiving an event
@@ -88,8 +93,68 @@ func NewDeviceConnection(c *client.Client, info *models.DeviceInfo) *DeviceConne
 		IsConnected:  false,
 		LastActivity: time.Now(),
 	})
+	if info != nil {
+		conn.storeDeviceName(info.Name)
+	}
 
 	return conn
+}
+
+func (c *DeviceConnection) storeDeviceName(name string) {
+	c.deviceName.Store(&name)
+}
+
+// BeginNameRefresh starts a new generation for an asynchronous /name request.
+// Only the latest poll may later update the display name.
+func (c *DeviceConnection) BeginNameRefresh() uint64 {
+	c.nameMu.Lock()
+	defer c.nameMu.Unlock()
+
+	c.nameGen++
+
+	return c.nameGen
+}
+
+// ApplyPolledName stores a /name result unless a newer poll or nameUpdated
+// event superseded it.
+func (c *DeviceConnection) ApplyPolledName(generation uint64, name string) bool {
+	c.nameMu.Lock()
+	defer c.nameMu.Unlock()
+
+	if generation != c.nameGen {
+		return false
+	}
+
+	c.storeDeviceName(name)
+
+	return true
+}
+
+// ApplyNameEvent stores the newest nameUpdated event and invalidates all
+// in-flight /name requests.
+func (c *DeviceConnection) ApplyNameEvent(name string) {
+	c.nameMu.Lock()
+	defer c.nameMu.Unlock()
+
+	c.nameGen++
+	c.storeDeviceName(name)
+}
+
+// Info returns a read-only metadata snapshot with the latest device name.
+func (c *DeviceConnection) Info() *models.DeviceInfo {
+	if c.DeviceInfo == nil {
+		return nil
+	}
+
+	name := c.deviceName.Load()
+	if name == nil || *name == c.DeviceInfo.Name {
+		return c.DeviceInfo
+	}
+
+	info := *c.DeviceInfo
+	info.Name = *name
+
+	return &info
 }
 
 // Status returns a snapshot of the current device status. The returned

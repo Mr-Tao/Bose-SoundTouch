@@ -278,6 +278,7 @@ func TestWebSocketClient_HandleMessage(t *testing.T) {
 	var (
 		nowPlayingEvent *models.NowPlayingUpdatedEvent
 		volumeEvent     *models.VolumeUpdatedEvent
+		nameEvent       *models.NameUpdatedEvent
 	)
 
 	wsClient.OnNowPlaying(func(event *models.NowPlayingUpdatedEvent) {
@@ -286,6 +287,10 @@ func TestWebSocketClient_HandleMessage(t *testing.T) {
 
 	wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
 		volumeEvent = event
+	})
+
+	wsClient.OnNameUpdated(func(event *models.NameUpdatedEvent) {
+		nameEvent = event
 	})
 
 	t.Run("HandleNowPlayingEvent", func(t *testing.T) {
@@ -340,6 +345,20 @@ func TestWebSocketClient_HandleMessage(t *testing.T) {
 
 		if volumeEvent.Volume.TargetVolume != 25 {
 			t.Errorf("Expected TargetVolume 25, got %d", volumeEvent.Volume.TargetVolume)
+		}
+	})
+
+	t.Run("HandleNameEvent", func(t *testing.T) {
+		xmlData := []byte(`<updates deviceID="689E19B8BB8A"><nameUpdated deviceID="689E19B8BB8A"><name>Living Room Left</name></nameUpdated></updates>`)
+
+		wsClient.handleMessage(xmlData)
+
+		if nameEvent == nil {
+			t.Fatal("Name event handler was not called")
+		}
+
+		if nameEvent.DeviceID != "689E19B8BB8A" || nameEvent.Name.Value != "Living Room Left" {
+			t.Errorf("Unexpected name event: %+v", nameEvent)
 		}
 	})
 

@@ -29,6 +29,22 @@ func TestNewDeviceConnection_InitialStatus(t *testing.T) {
 	}
 }
 
+func TestDeviceConnectionInfoReflectsUpdatedName(t *testing.T) {
+	discovered := &models.DeviceInfo{Name: "Living Room", DeviceID: "DEVICE01"}
+	conn := NewDeviceConnection(nil, discovered)
+
+	conn.ApplyNameEvent("Living Room Left")
+	info := conn.Info()
+
+	if info == nil || info.Name != "Living Room Left" || info.DeviceID != "DEVICE01" {
+		t.Fatalf("Info() = %+v, want updated name with original metadata", info)
+	}
+
+	if discovered.Name != "Living Room" {
+		t.Fatalf("discovery snapshot was mutated: %+v", discovered)
+	}
+}
+
 func TestSetStatus_ReplacesEntireStatus(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
 	conn.SetStatus(&DeviceStatus{

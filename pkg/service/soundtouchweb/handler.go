@@ -341,7 +341,7 @@ func (app *WebApp) HandleAPIDevice(w http.ResponseWriter, r *http.Request) {
 	response := webtypes.APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"info":   device.DeviceInfo,
+			"info":   device.Info(),
 			"status": device.Status(),
 		},
 	}
@@ -896,7 +896,7 @@ func (app *WebApp) HandleTuneInNavigate(w http.ResponseWriter, r *http.Request) 
 // Returns "" when no match is found.
 func (app *WebApp) findIPByHwID(hwID string) string {
 	for _, entry := range app.DeviceSnapshot() {
-		if entry.Device.DeviceInfo != nil && entry.Device.DeviceInfo.DeviceID == hwID {
+		if info := entry.Device.Info(); info != nil && info.DeviceID == hwID {
 			return entry.ID
 		}
 	}
@@ -935,8 +935,10 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 	masterIP := app.findIPByHwID(zone.Master)
 
 	masterName := ""
-	if conn, ok := app.GetDevice(masterIP); ok && conn.DeviceInfo != nil {
-		masterName = conn.DeviceInfo.Name
+	if conn, ok := app.GetDevice(masterIP); ok {
+		if info := conn.Info(); info != nil {
+			masterName = info.Name
+		}
 	}
 
 	type memberInfo struct {
@@ -956,8 +958,10 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 		}
 
 		name := ""
-		if conn, ok := app.GetDevice(m.IP); ok && conn.DeviceInfo != nil {
-			name = conn.DeviceInfo.Name
+		if conn, ok := app.GetDevice(m.IP); ok {
+			if info := conn.Info(); info != nil {
+				name = info.Name
+			}
 		}
 
 		members = append(members, memberInfo{IP: m.IP, HwID: m.DeviceID, Name: name})

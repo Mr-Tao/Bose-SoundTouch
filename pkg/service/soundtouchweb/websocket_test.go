@@ -111,6 +111,85 @@ func TestUpdateDeviceStatusPreservesGroupOnError(t *testing.T) {
 	}
 }
 
+func TestUpdateDeviceStatusRefreshesDeviceName(t *testing.T) {
+	server := newStatusTestServer(t, http.StatusOK, `<group/>`)
+	defer server.Close()
+
+	conn := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(server.URL),
+		&models.DeviceInfo{Name: "Old Name", DeviceID: "device-1"},
+	)
+	NewWebApp().UpdateDeviceStatus("device-1", conn)
+
+	if info := conn.Info(); info == nil || info.Name != "Living Room Left" {
+		t.Fatalf("refreshed device info = %+v, want Living Room Left", info)
+	}
+}
+
+func TestUpdateDeviceStatusDoesNotOverwriteNewerNameEvent(t *testing.T) {
+	nameRequestStarted := make(chan struct{})
+	releaseNameResponse := make(chan struct{})
+	responses := map[string]string{
+		"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+		"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
+		"/presets":     `<presets/>`,
+		"/sources":     `<sources/>`,
+		"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
+		"/getGroup":    `<group/>`,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Path == "/name" {
+			close(nameRequestStarted)
+			<-releaseNameResponse
+			_, _ = w.Write([]byte(`<name>Old Poll Result</name>`))
+
+			return
+		}
+
+		body, ok := responses[r.URL.Path]
+		if !ok {
+			t.Errorf("unexpected status endpoint %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	conn := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(server.URL),
+		&models.DeviceInfo{Name: "Initial Name", DeviceID: "device-1"},
+	)
+	refreshDone := make(chan struct{})
+	go func() {
+		NewWebApp().UpdateDeviceStatus("device-1", conn)
+		close(refreshDone)
+	}()
+
+	select {
+	case <-nameRequestStarted:
+	case <-time.After(time.Second):
+		close(releaseNameResponse)
+		t.Fatal("name poll did not start")
+	}
+
+	conn.ApplyNameEvent("New Event Name")
+	close(releaseNameResponse)
+
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("status refresh did not finish")
+	}
+
+	if info := conn.Info(); info == nil || info.Name != "New Event Name" {
+		t.Fatalf("device info after stale poll = %+v, want newer event name", info)
+	}
+}
+
 func TestApplyGroupUpdatedEventReplacesGroup(t *testing.T) {
 	conn := webtypes.NewDeviceConnection(nil, nil)
 	previousActivity := time.Unix(1, 0)
@@ -291,6 +370,7 @@ func newStatusTestServer(t *testing.T, groupStatus int, groupBody string) *httpt
 
 	responses := map[string]string{
 		"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+		"/name":        `<name>Living Room Left</name>`,
 		"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
 		"/presets":     `<presets/>`,
 		"/sources":     `<sources/>`,

@@ -301,6 +301,10 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			applyGroupUpdatedEvent(conn, event)
 		})
 
+		wsClient.OnNameUpdated(func(event *models.NameUpdatedEvent) {
+			conn.ApplyNameEvent(event.Name.Value)
+		})
+
 		if err := wsClient.Connect(); err != nil {
 			log.Printf("Failed to connect WebSocket for device %s: %v (retrying in %s)", sanitizeLog(deviceID), err, backoff)
 
@@ -382,11 +386,13 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	}
 
 	groupGeneration := conn.BeginGroupRefresh()
+	nameGeneration := conn.BeginNameRefresh()
 
 	// Phase 1: slow network fetches. Local vars only, no shared state
 	// is touched yet. Errors are recorded so the merge below can tell
 	// "field N stayed unchanged" apart from "field N got refreshed".
 	nowPlaying, nowPlayingErr := conn.Client.GetNowPlaying()
+	name, nameErr := conn.Client.GetName()
 	volume, volumeErr := conn.Client.GetVolume()
 	presets, presetsErr := conn.Client.GetPresets()
 	sources, sourcesErr := conn.Client.GetSources()
@@ -424,13 +430,17 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 			statusUpdated = true
 		}
 
-		statusUpdated = statusUpdated || groupErr == nil
+		statusUpdated = statusUpdated || nameErr == nil || groupErr == nil
 
 		// Mark as connected if we successfully got at least one
 		// status from this round. Mirrors prior behaviour.
 		s.IsConnected = statusUpdated
 		s.LastActivity = time.Now()
 	})
+
+	if nameErr == nil {
+		conn.ApplyPolledName(nameGeneration, name.Value)
+	}
 
 	if groupErr == nil {
 		conn.ApplyPolledGroup(groupGeneration, group)
@@ -470,7 +480,7 @@ func (app *WebApp) HandleDeviceWebSocket(w http.ResponseWriter, r *http.Request)
 			Type:     "device_status",
 			DeviceID: deviceID,
 			Data: map[string]interface{}{
-				"info":   device.DeviceInfo,
+				"info":   device.Info(),
 				"status": device.Status(),
 			},
 		})
@@ -530,7 +540,7 @@ func (app *WebApp) writeDeviceWebSocketUpdate(
 			Type:     "device_status",
 			DeviceID: deviceID,
 			Data: map[string]interface{}{
-				"info":   device.DeviceInfo,
+				"info":   device.Info(),
 				"status": status,
 			},
 		}); err != nil {

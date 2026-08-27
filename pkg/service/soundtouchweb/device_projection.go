@@ -71,7 +71,7 @@ func captureDeviceProjectionEntries(snapshot []DeviceEntry) []deviceProjectionEn
 
 		captured = append(captured, deviceProjectionEntry{
 			ID:       entry.ID,
-			Info:     entry.Device.DeviceInfo,
+			Info:     entry.Device.Info(),
 			Status:   entry.Device.Status(),
 			LastSeen: entry.LastSeen,
 		})

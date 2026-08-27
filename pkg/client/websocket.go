@@ -159,6 +159,14 @@ func (ws *WebSocketClient) OnBassUpdated(handler models.TypedEventHandler[*model
 	ws.handlers.OnBassUpdated = handler
 }
 
+// OnNameUpdated sets a handler for device name update events.
+func (ws *WebSocketClient) OnNameUpdated(handler models.TypedEventHandler[*models.NameUpdatedEvent]) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	ws.handlers.OnNameUpdated = handler
+}
+
 // OnUnknownEvent sets a handler for unknown events
 func (ws *WebSocketClient) OnUnknownEvent(handler models.EventHandler) {
 	ws.mu.Lock()
@@ -529,6 +537,13 @@ func (ws *WebSocketClient) dispatchTypedEventContinued(handlers *models.WebSocke
 	case models.EventTypeBassUpdated:
 		if handlers.OnBassUpdated != nil && event.BassUpdated != nil {
 			handlers.OnBassUpdated(event.BassUpdated)
+		}
+
+		return true
+
+	case models.EventTypeNameUpdated:
+		if handlers.OnNameUpdated != nil && event.NameUpdated != nil {
+			handlers.OnNameUpdated(event.NameUpdated)
 		}
 
 		return true
