@@ -17,6 +17,7 @@ import (
 )
 
 type fakeStereoPairLifecycle struct {
+	inspectCalls   int
 	inspectResult  stereopair.Result
 	inspectErr     error
 	createResult   stereopair.Result
@@ -32,6 +33,7 @@ type fakeStereoPairLifecycle struct {
 }
 
 func (f *fakeStereoPairLifecycle) Inspect(string) (stereopair.Result, error) {
+	f.inspectCalls++
 	return f.inspectResult, f.inspectErr
 }
 
@@ -106,6 +108,31 @@ func TestHandleGetStereoPairReportsStandaloneCapableSpeaker(t *testing.T) {
 	payload := decodeStereoPairAPIResponse(t, response)
 	if response.Code != http.StatusOK || !payload.Success || !payload.Data.Capable || payload.Data.Paired {
 		t.Fatalf("unexpected standalone response: status=%d payload=%+v", response.Code, payload)
+	}
+}
+
+func TestHandleGetStereoPairSkipsUnsupportedModel(t *testing.T) {
+	fake := &fakeStereoPairLifecycle{}
+	app := NewWebApp()
+	app.StereoPairs = fake
+	app.AddDevice("192.0.2.30", webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
+		DeviceID:  "st30-id",
+		Name:      "Living Room",
+		Type:      "SoundTouch 30",
+		IPAddress: "192.0.2.30",
+	}))
+
+	request := withChiParams(httptest.NewRequest(http.MethodGet,
+		"/api/control/devices/192.0.2.30/stereo-pair", nil), map[string]string{"id": "192.0.2.30"})
+	response := httptest.NewRecorder()
+	app.HandleGetStereoPair(response, request)
+
+	payload := decodeStereoPairAPIResponse(t, response)
+	if response.Code != http.StatusOK || !payload.Success || payload.Data.Capable || payload.Data.Paired {
+		t.Fatalf("unexpected unsupported-model response: status=%d payload=%+v", response.Code, payload)
+	}
+	if fake.inspectCalls != 0 {
+		t.Fatalf("stereo lifecycle Inspect calls = %d, want 0", fake.inspectCalls)
 	}
 }
 

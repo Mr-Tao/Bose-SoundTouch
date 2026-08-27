@@ -65,6 +65,15 @@ func (app *WebApp) HandleGetStereoPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !stereoPairCapable(conn.DeviceInfo) {
+		app.writeStereoPairResult(w, conn.DeviceInfo, stereopair.Result{
+			Operation: stereopair.OperationInspect,
+			Status:    stereopair.StatusSucceeded,
+		}, nil)
+
+		return
+	}
+
 	result, err := app.StereoPairs.Inspect(host)
 	app.writeStereoPairResult(w, conn.DeviceInfo, result, err)
 }
