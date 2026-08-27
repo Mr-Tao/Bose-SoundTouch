@@ -1,6 +1,8 @@
 package client
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -266,6 +268,211 @@ func TestWebSocketClient_Disconnect(t *testing.T) {
 
 	if wsClient.IsConnected() {
 		t.Error("WebSocket client should not be connected after disconnect")
+	}
+}
+
+func TestWebSocketClient_CloseStopsDisconnectedReconnect(t *testing.T) {
+	client := NewClientFromHost("192.0.2.10")
+	wsClient := client.NewWebSocketClient(nil)
+
+	if err := wsClient.Close(); err != nil {
+		t.Fatalf("Close() on a disconnected client failed: %v", err)
+	}
+
+	wsClient.mu.RLock()
+	reconnect := wsClient.reconnect
+	wsClient.mu.RUnlock()
+
+	if reconnect {
+		t.Fatal("Close() left reconnect enabled")
+	}
+
+	select {
+	case <-wsClient.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not cancel the WebSocket context")
+	}
+
+	if err := wsClient.Close(); err != nil {
+		t.Fatalf("second Close() was not idempotent: %v", err)
+	}
+}
+
+func TestWebSocketClient_CloseCancelsInProgressDial(t *testing.T) {
+	client := NewClientFromHost("192.0.2.10")
+	wsClient := client.NewWebSocketClient(nil)
+	dialStarted := make(chan struct{})
+	wsClient.dialContext = func(ctx context.Context, _ string, _ http.Header) (*websocket.Conn, *http.Response, error) {
+		close(dialStarted)
+		<-ctx.Done()
+
+		return nil, nil, ctx.Err()
+	}
+
+	connectDone := make(chan error, 1)
+	go func() {
+		connectDone <- wsClient.Connect()
+	}()
+
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket dial did not start")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- wsClient.Close()
+	}()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() failed: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Close() waited for the WebSocket handshake timeout")
+	}
+
+	select {
+	case err := <-connectDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Connect() error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled WebSocket dial did not return")
+	}
+}
+
+func TestWebSocketClient_ReconnectCyclesKeepSinglePingOwner(t *testing.T) {
+	client := NewClientFromHost("192.0.2.10")
+	wsClient := client.NewWebSocketClient(&WebSocketConfig{Logger: &mockLogger{}})
+	config := &WebSocketConfig{
+		PingInterval: time.Hour,
+		Logger:       &mockLogger{},
+	}
+
+	var previous *webSocketConnection
+	for cycle := 0; cycle < 3; cycle++ {
+		conn, pings := newPingTrackingWebSocket(t)
+
+		wsClient.mu.Lock()
+		wsClient.activateConnectionLocked(conn, config)
+		current := wsClient.connection
+		wsClient.mu.Unlock()
+
+		if previous != nil {
+			waitForPingOwnerExit(t, previous)
+
+			active, err := wsClient.writePing(previous)
+			if err != nil {
+				t.Fatalf("replaced generation write returned an error: %v", err)
+			}
+			if active {
+				t.Fatal("replaced generation retained ping ownership")
+			}
+		}
+
+		active, err := wsClient.writePing(current)
+		if err != nil {
+			t.Fatalf("active generation ping failed: %v", err)
+		}
+		if !active {
+			t.Fatal("current generation did not own ping writes")
+		}
+
+		select {
+		case <-pings:
+		case <-time.After(time.Second):
+			t.Fatal("server did not receive ping from current generation")
+		}
+
+		select {
+		case <-current.pingDone:
+			t.Fatal("current generation's ping owner exited early")
+		default:
+		}
+
+		previous = current
+	}
+
+	if err := wsClient.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	waitForPingOwnerExit(t, previous)
+
+	active, err := wsClient.writePing(previous)
+	if err != nil {
+		t.Fatalf("closed generation write returned an error: %v", err)
+	}
+	if active {
+		t.Fatal("closed generation retained ping ownership")
+	}
+
+	if err := wsClient.Close(); err != nil {
+		t.Fatalf("second Close() was not idempotent: %v", err)
+	}
+}
+
+func newPingTrackingWebSocket(t *testing.T) (*websocket.Conn, <-chan struct{}) {
+	t.Helper()
+
+	pings := make(chan struct{}, 1)
+	serverConn := make(chan *websocket.Conn, 1)
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(_ *http.Request) bool { return true },
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+
+		conn.SetPingHandler(func(string) error {
+			select {
+			case pings <- struct{}{}:
+			default:
+			}
+
+			return nil
+		})
+		serverConn <- conn
+
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if err != nil {
+		server.Close()
+		t.Fatalf("failed to create WebSocket test connection: %v", err)
+	}
+
+	peer := <-serverConn
+	t.Cleanup(func() {
+		_ = conn.Close()
+		_ = peer.Close()
+		server.Close()
+	})
+
+	return conn, pings
+}
+
+func waitForPingOwnerExit(t *testing.T, connection *webSocketConnection) {
+	t.Helper()
+
+	select {
+	case <-connection.pingDone:
+	case <-time.After(time.Second):
+		t.Fatal("ping owner did not exit after its connection generation ended")
 	}
 }
 

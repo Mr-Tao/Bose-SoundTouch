@@ -91,7 +91,12 @@ type WebApp struct {
 	// mutation lock covers concurrent CLI-like requests from every browser.
 	StereoPairs StereoPairLifecycle
 
-	discoveryStatus atomic.Value // stores *webtypes.DiscoveryStatus
+	// zoneVolumeLocks serialize proportional volume batches per authoritative
+	// zone master while allowing unrelated zones to move independently.
+	zoneVolumeLocks sync.Map
+
+	discoveryStatus     atomic.Value // stores *webtypes.DiscoveryStatus
+	discoveryGeneration atomic.Uint64
 }
 
 // serviceHTTPClient returns the client used for outbound calls to the
@@ -331,11 +336,6 @@ func (app *WebApp) HandleAPIDevice(w http.ResponseWriter, r *http.Request) {
 	// Update device status to get fresh power state
 	app.UpdateDeviceStatus(deviceID, device)
 
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 
 	response := webtypes.APIResponse{
@@ -411,11 +411,6 @@ func (app *WebApp) HandleAPIControl(w http.ResponseWriter, r *http.Request) {
 	if !exists {
 		app.sendError(w, "Device not found", http.StatusNotFound)
 		return
-	}
-
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -656,11 +651,6 @@ func (app *WebApp) HandleDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
-	}
-
 	if device.Client == nil {
 		app.sendError(w, "Device client not available", http.StatusInternalServerError)
 		return
@@ -688,11 +678,6 @@ func (app *WebApp) HandleDirectVolumeControl(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
-	}
-
 	if device.Client == nil {
 		app.sendError(w, "Device client not available", http.StatusInternalServerError)
 		return
@@ -712,11 +697,6 @@ func (app *WebApp) HandleDevicePower(w http.ResponseWriter, r *http.Request) {
 	if !exists {
 		app.sendError(w, "Device not found", http.StatusNotFound)
 		return
-	}
-
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
 	if device.Client == nil {
@@ -792,30 +772,63 @@ func (app *WebApp) BroadcastDeviceList() {
 	})
 }
 
-// BroadcastDiscoveryStatus sends discovery progress updates to all connected WebSocket clients
+// BeginDiscovery reserves a monotonically increasing generation before a
+// discovery goroutine starts. Reservation shares the browser writer lock with
+// status publication: either an older frame is fully published first, or the
+// newer reservation wins and the older frame is rejected.
+func (app *WebApp) BeginDiscovery() uint64 {
+	app.webSocketWriteMu.Lock()
+	defer app.webSocketWriteMu.Unlock()
+
+	return app.discoveryGeneration.Add(1)
+}
+
+// BroadcastDiscoveryStatus preserves the original exported API for callers
+// that do not run overlapping discovery jobs. Internal asynchronous paths use
+// BroadcastDiscoveryStatusFor with an explicitly reserved generation.
 func (app *WebApp) BroadcastDiscoveryStatus(status string, deviceCount int) {
-	discoveryStatus := &webtypes.DiscoveryStatus{
-		Status:      status,
-		DeviceCount: deviceCount,
+	generation := app.discoveryGeneration.Load()
+	if generation == 0 {
+		generation = app.BeginDiscovery()
 	}
 
-	switch status {
-	case "starting":
-		discoveryStatus.IsDiscovering = true
-	case "completed", "failed":
-		discoveryStatus.IsDiscovering = false
-	}
+	app.BroadcastDiscoveryStatusFor(generation, status, deviceCount)
+}
 
-	app.discoveryStatus.Store(discoveryStatus)
-	clients := app.globalWebSocketClients()
+// BroadcastDiscoveryStatusFor sends discovery progress only when generation
+// is still current. The generation check, persisted status, client snapshot,
+// and writes share the global browser writer lock, so a stale transition can
+// neither overwrite state nor follow a newer frame.
+func (app *WebApp) BroadcastDiscoveryStatusFor(generation uint64, status string, deviceCount int) bool {
+	accepted := false
 
 	_ = app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		if generation != app.discoveryGeneration.Load() {
+			return nil
+		}
+
+		discoveryStatus := &webtypes.DiscoveryStatus{
+			Status:      status,
+			DeviceCount: deviceCount,
+		}
+
+		switch status {
+		case "starting":
+			discoveryStatus.IsDiscovering = true
+		case "completed", "failed":
+			discoveryStatus.IsDiscovering = false
+		}
+
+		app.discoveryStatus.Store(discoveryStatus)
+
+		accepted = true
+
 		message := webtypes.WebSocketMessage{
 			Type: "discovery_status",
 			Data: discoveryStatus,
 		}
 
-		for _, client := range clients {
+		for _, client := range app.globalWebSocketClients() {
 			if err := batch.writeJSON(client, message); err != nil {
 				log.Printf("Failed to send discovery status to WebSocket client: %v", err)
 				app.removeGlobalWebSocketClient(client)
@@ -824,6 +837,8 @@ func (app *WebApp) BroadcastDiscoveryStatus(status string, deviceCount int) {
 
 		return nil
 	})
+
+	return accepted
 }
 
 // HandleTuneInSearch handles TuneIn search requests, proxying directly to the bmx package.

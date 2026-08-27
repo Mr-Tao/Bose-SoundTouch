@@ -184,7 +184,7 @@ func (app *WebApp) periodicPlayerMessages() []webtypes.WebSocketMessage {
 	}}
 
 	for _, entry := range snapshot {
-		if entry.Status == nil || !entry.Status.IsConnected {
+		if entry.Status == nil {
 			continue
 		}
 
@@ -217,26 +217,32 @@ func (app *WebApp) HandleAPIDiscover(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ConnectDeviceWebSocket establishes a WebSocket connection to a device
-// and keeps it alive: on disconnect or connect failure, it reconnects
-// with exponential backoff (1 s → 30 s cap, reset after each successful
-// connect). The goroutine runs for the lifetime of the device entry,
-// so status flows from the speaker keep streaming through transient
-// network blips, speaker reboots, and idle timeouts.
-//
-// conn.WebSocket is only updated on a successful (re)connect, never
-// cleared, so the duplicate-spawn guards at the callsites (which check
-// `if device.WebSocket == nil`) stay correct — once this goroutine is
-// running for a device, no second one is needed.
+// ConnectDeviceWebSocket starts the single event-transport supervisor for a
+// device. Initial connection failures are retried here; after the first
+// success WebSocketClient owns transport reconnects and this supervisor only
+// observes their state until the device is removed.
 func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.DeviceConnection) {
 	// Skip WebSocket connection if client is not available (e.g., in tests)
 	if conn.Client == nil {
 		return
 	}
 
+	if !conn.TryStartWebSocketLoop() {
+		return
+	}
+
+	defer func() {
+		conn.SetWebSocket(nil)
+		conn.UpdateStatus(func(status *webtypes.DeviceStatus) {
+			status.WebSocketConnected = false
+		})
+		conn.FinishWebSocketLoop()
+	}()
+
 	const (
-		initialBackoff = 1 * time.Second
-		maxBackoff     = 30 * time.Second
+		initialBackoff        = 1 * time.Second
+		maxBackoff            = 30 * time.Second
+		transportPollInterval = 1 * time.Second
 	)
 
 	backoff := initialBackoff
@@ -270,28 +276,28 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 			prevSource = np.Source
 
-			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
+			conn.ApplySpeakerEvent(func(s *webtypes.DeviceStatus) {
 				s.NowPlaying = np
 				s.LastActivity = time.Now()
 			})
 		})
 
 		wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
-			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.Volume = &event.Volume
-				s.LastActivity = time.Now()
-			})
+			conn.ApplyVolumeEvent(&event.Volume, time.Now())
 		})
 
 		wsClient.OnConnectionState(func(event *models.ConnectionStateUpdatedEvent) {
-			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.IsConnected = event.ConnectionState.IsConnected()
+			conn.ApplySpeakerEvent(func(s *webtypes.DeviceStatus) {
+				s.SpeakerConnectionState = &webtypes.SpeakerConnectionState{
+					State:  event.ConnectionState.State,
+					Signal: event.ConnectionState.Signal,
+				}
 				s.LastActivity = time.Now()
 			})
 		})
 
 		wsClient.OnPresetUpdated(func(event *models.PresetUpdatedEvent) {
-			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
+			conn.ApplySpeakerEvent(func(s *webtypes.DeviceStatus) {
 				s.Presets = &event.Presets
 				s.LastActivity = time.Now()
 			})
@@ -299,6 +305,10 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 		wsClient.OnGroupUpdated(func(event *models.GroupUpdatedEvent) {
 			applyGroupUpdatedEvent(conn, event)
+		})
+
+		wsClient.OnZoneUpdated(func(event *models.ZoneUpdatedEvent) {
+			go app.refreshZonesAfterEvent(event.DeviceID, event.Zone.Master)
 		})
 
 		wsClient.OnNameUpdated(func(event *models.NameUpdatedEvent) {
@@ -320,10 +330,10 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			continue
 		}
 
-		conn.WebSocket = wsClient
+		conn.SetWebSocket(wsClient)
 
 		conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-			s.IsConnected = true
+			s.WebSocketConnected = true
 		})
 
 		log.Printf("WebSocket connected for device %s", sanitizeLog(deviceID))
@@ -333,26 +343,36 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		// disconnected would otherwise stay stale until the next WS event.
 		go app.UpdateDeviceStatus(deviceID, conn)
 
-		// Reset backoff after a successful connect so the next failure
-		// starts at the lowest cadence again.
-		backoff = initialBackoff
+		transportTicker := time.NewTicker(transportPollInterval)
+		defer transportTicker.Stop()
 
-		// Block until the device-side WebSocket disconnects.
-		wsClient.Wait()
+		transportConnected := true
 
-		conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-			s.IsConnected = false
-		})
+		for {
+			select {
+			case <-conn.Done():
+				_ = wsClient.Close()
 
-		log.Printf("WebSocket disconnected for device %s — reconnecting in %s", sanitizeLog(deviceID), backoff)
+				return
+			case <-transportTicker.C:
+				connected := wsClient.IsConnected()
+				if connected == transportConnected {
+					continue
+				}
 
-		if sleepOrDone(conn, backoff) {
-			return
-		}
+				transportConnected = connected
 
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
+				conn.UpdateStatus(func(status *webtypes.DeviceStatus) {
+					status.WebSocketConnected = connected
+				})
+
+				if connected {
+					log.Printf("WebSocket reconnected for device %s", sanitizeLog(deviceID))
+					go app.UpdateDeviceStatus(deviceID, conn)
+				} else {
+					log.Printf("WebSocket transport disconnected for device %s", sanitizeLog(deviceID))
+				}
+			}
 		}
 	}
 }
@@ -374,16 +394,17 @@ func sleepOrDone(conn *webtypes.DeviceConnection, d time.Duration) bool {
 
 // UpdateDeviceStatus fetches current status from the device.
 //
-// Network calls run outside the atomic merge so the CAS loop in
-// UpdateStatus stays fast and doesn't retry slow IO. WebSocket event
-// handlers running concurrently are not lost: their UpdateStatus
-// runs against whichever snapshot they observe, and the merge below
-// sees their changes when it CAS-loops onto the latest status.
+// Network calls run outside the atomic merge so the CAS loop in UpdateStatus
+// stays fast and never retries slow IO. A speaker event that arrives after the
+// poll starts prevents the older payload from merging, while the poll may still
+// update connectivity health.
 func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection) {
 	// Skip status update if client is not available (e.g., in tests)
 	if conn.Client == nil {
 		return
 	}
+
+	pollGeneration := conn.BeginHTTPPoll()
 
 	// /getGroup is ST10-only; ST20/ST30 may accept the request but never reply.
 	stereoCapable := stereoPairCapable(conn.DeviceInfo)
@@ -394,16 +415,19 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	}
 
 	nameGeneration := conn.BeginNameRefresh()
+	zoneGeneration := conn.BeginZoneRefresh()
 
 	// Phase 1: slow network fetches. Local vars only, no shared state
 	// is touched yet. Errors are recorded so the merge below can tell
 	// "field N stayed unchanged" apart from "field N got refreshed".
 	nowPlaying, nowPlayingErr := conn.Client.GetNowPlaying()
 	name, nameErr := conn.Client.GetName()
+	volumeGeneration := conn.BeginVolumeRefresh()
 	volume, volumeErr := conn.Client.GetVolume()
 	presets, presetsErr := conn.Client.GetPresets()
 	sources, sourcesErr := conn.Client.GetSources()
 	bass, bassErr := conn.Client.GetBass()
+	zone, zoneErr := conn.Client.GetZone()
 
 	var (
 		group    *models.Group
@@ -417,40 +441,39 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	// Phase 2: fast merge. Only fields we successfully fetched
 	// overwrite; everything else keeps the value other goroutines may
 	// have just written.
-	conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-		statusUpdated := false
+	statusUpdated := anyStatusFetchSucceeded(
+		nowPlayingErr,
+		nameErr,
+		volumeErr,
+		presetsErr,
+		sourcesErr,
+		bassErr,
+		zoneErr,
+	)
+	if stereoCapable && groupErr == nil {
+		statusUpdated = true
+	}
 
+	if volumeErr == nil {
+		conn.ApplyPolledVolume(volumeGeneration, volume)
+	}
+
+	conn.CompleteHTTPPoll(pollGeneration, statusUpdated, time.Now(), func(s *webtypes.DeviceStatus) {
 		if nowPlayingErr == nil {
 			s.NowPlaying = nowPlaying
-			statusUpdated = true
-		}
-
-		if volumeErr == nil {
-			s.Volume = volume
-			statusUpdated = true
 		}
 
 		if presetsErr == nil {
 			s.Presets = presets
-			statusUpdated = true
 		}
 
 		if sourcesErr == nil {
 			s.Sources = sources
-			statusUpdated = true
 		}
 
 		if bassErr == nil {
 			s.Bass = bass
-			statusUpdated = true
 		}
-
-		statusUpdated = statusUpdated || nameErr == nil || (stereoCapable && groupErr == nil)
-
-		// Mark as connected if we successfully got at least one
-		// status from this round. Mirrors prior behaviour.
-		s.IsConnected = statusUpdated
-		s.LastActivity = time.Now()
 	})
 
 	if nameErr == nil {
@@ -460,10 +483,75 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	if stereoCapable && groupErr == nil {
 		conn.ApplyPolledGroup(groupGeneration, group)
 	}
+
+	if zoneErr == nil {
+		if info := conn.Info(); info != nil {
+			conn.ApplyPolledZone(zoneGeneration, info.DeviceID, zone)
+		}
+	}
+}
+
+func anyStatusFetchSucceeded(errors ...error) bool {
+	for _, err := range errors {
+		if err == nil {
+			return true
+		}
+	}
+
+	return false
 }
 
 func applyGroupUpdatedEvent(conn *webtypes.DeviceConnection, event *models.GroupUpdatedEvent) {
 	conn.ApplyGroupEvent(&event.Group, time.Now())
+}
+
+// refreshZonesAfterEvent treats zoneUpdated as an invalidation hint. The raw
+// event is not authoritative: the current master is queried through /getZone
+// before cached topology changes. Cached masters containing the event source
+// are included so a dissolve event with no new master can clear the old zone.
+func (app *WebApp) refreshZonesAfterEvent(eventDeviceID, eventMasterID string) {
+	candidates := map[string]struct{}{}
+	if eventDeviceID != "" {
+		candidates[eventDeviceID] = struct{}{}
+	}
+
+	if eventMasterID != "" {
+		candidates[eventMasterID] = struct{}{}
+	}
+
+	for _, entry := range app.DeviceSnapshot() {
+		status := entry.Device.Status()
+		if status == nil || status.Zone == nil || !status.Zone.IsInZone(eventDeviceID) {
+			continue
+		}
+
+		candidates[status.Zone.Master] = struct{}{}
+	}
+
+	for masterID := range candidates {
+		app.refreshAuthoritativeZone(masterID)
+	}
+}
+
+func (app *WebApp) refreshAuthoritativeZone(masterDeviceID string) {
+	masterIP := app.findIPByHwID(masterDeviceID)
+
+	master, ok := app.GetDevice(masterIP)
+	if !ok || master.Client == nil {
+		return
+	}
+
+	generation := master.BeginZoneRefresh()
+
+	zone, err := master.Client.GetZone()
+	if err != nil {
+		log.Printf("Failed to refresh zone master %s: %v", sanitizeLog(masterDeviceID), err)
+		return
+	}
+
+	if master.ApplyPolledZone(generation, masterDeviceID, zone) {
+		app.BroadcastDeviceList()
+	}
 }
 
 // HandleDeviceWebSocket handles individual device WebSocket connections for real-time device-specific updates
@@ -562,7 +650,7 @@ func (app *WebApp) writeDeviceWebSocketUpdate(
 			return err
 		}
 
-		if device.WebSocket == nil || !status.IsConnected {
+		if device.CurrentWebSocket() == nil || !status.WebSocketConnected {
 			return nil
 		}
 

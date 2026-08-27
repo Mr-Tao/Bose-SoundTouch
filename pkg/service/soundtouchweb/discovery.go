@@ -91,6 +91,8 @@ func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtyp
 	}
 
 	conn := webtypes.NewDeviceConnection(c, info)
+	conn.MarkHTTPSuccess(time.Now())
+
 	if !app.AddDevice(host, conn) {
 		// Lost a race — another goroutine inserted the same host
 		// between TouchDevice and AddDevice. AddDevice bumped LastSeen
@@ -99,6 +101,7 @@ func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtyp
 	}
 
 	go app.UpdateDeviceStatus(host, conn)
+	go app.ConnectDeviceWebSocket(host, conn)
 
 	// Poll via HTTP every 30 s as a fallback for WebSocket events that the
 	// speaker does not emit (e.g. Spotify Connect track changes) and for the
@@ -278,6 +281,13 @@ func retryUntilReady(ctx context.Context, retryInterval time.Duration, attempt f
 // Used by the startup goroutine in main and by the /api/control/discover route
 // inside MountWeb.
 func (app *WebApp) DiscoverDevices(ctx context.Context, discoveryService *discovery.UnifiedDiscoveryService) {
+	_ = app.DiscoverDevicesWithResult(ctx, discoveryService)
+}
+
+// DiscoverDevicesWithResult performs the same refresh as DiscoverDevices and
+// additionally lets asynchronous UI callers publish a matching failed or
+// completed transition without changing the established DiscoverDevices API.
+func (app *WebApp) DiscoverDevicesWithResult(ctx context.Context, discoveryService *discovery.UnifiedDiscoveryService) error {
 	// External discovery (embedded build): run the host service's sweep so the
 	// shared datastore is refreshed.
 	if app.TriggerDiscovery != nil {
@@ -291,7 +301,7 @@ func (app *WebApp) DiscoverDevices(ctx context.Context, discoveryService *discov
 	// Own mDNS/UPnP sweep — standalone only. The embedded build passes a nil
 	// discovery service and relies entirely on the host service's discovery.
 	if discoveryService == nil {
-		return
+		return nil
 	}
 
 	log.Println("Starting device discovery...")
@@ -299,9 +309,7 @@ func (app *WebApp) DiscoverDevices(ctx context.Context, discoveryService *discov
 	devices, err := discoveryService.DiscoverDevices(ctx)
 	if err != nil {
 		log.Printf("Discovery failed: %v", err)
-		app.BroadcastDiscoveryStatus("failed", app.DeviceCount())
-
-		return
+		return err
 	}
 
 	log.Printf("Found %d devices", len(devices))
@@ -309,6 +317,8 @@ func (app *WebApp) DiscoverDevices(ctx context.Context, discoveryService *discov
 	for _, device := range devices {
 		app.AddDeviceByHost(device.Host, device.Port, classifySource(device.DiscoveryMethod))
 	}
+
+	return nil
 }
 
 // classifySource labels a discovered device "manual" if it came from (at

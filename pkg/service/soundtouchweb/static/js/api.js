@@ -12,6 +12,7 @@ export const api = {
     discover: () => req('/api/control/discover', { method: 'POST' }),
     key: (id, key) => req(`/api/control/devices/${id}/key/${key}`, { method: 'POST' }),
     volume: (id, level) => req(`/api/control/devices/${id}/volume/${level}`, { method: 'POST' }),
+    zoneVolume: (id, level) => req(`/api/control/devices/${id}/zone/volume/${level}`, { method: 'POST' }),
     bass: (id, level) => req(`/api/control/devices/${id}/action/bass`, {
         method: 'POST',
         headers: JSON_HEADERS,

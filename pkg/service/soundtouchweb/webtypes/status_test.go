@@ -9,8 +9,24 @@ import (
 	"testing"
 	"time"
 
+	soundtouchclient "github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 )
+
+func TestDeviceConnectionWebSocketCompatibilityField(t *testing.T) {
+	apiClient := soundtouchclient.NewClientFromHost("192.0.2.10")
+	webSocket := apiClient.NewWebSocketClient(nil)
+	conn := &DeviceConnection{WebSocket: webSocket}
+
+	if got := conn.CurrentWebSocket(); got != webSocket {
+		t.Fatalf("CurrentWebSocket() = %p, want compatibility field value %p", got, webSocket)
+	}
+
+	conn.SetWebSocket(nil)
+	if conn.WebSocket != nil || conn.CurrentWebSocket() != nil {
+		t.Fatal("SetWebSocket(nil) did not clear the compatibility field")
+	}
+}
 
 func TestNewDeviceConnection_InitialStatus(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
@@ -24,8 +40,252 @@ func TestNewDeviceConnection_InitialStatus(t *testing.T) {
 		t.Error("IsConnected should default to false")
 	}
 
+	if status.Connectivity != ConnectivityOffline {
+		t.Errorf("Connectivity = %q, want %q", status.Connectivity, ConnectivityOffline)
+	}
+
 	if status.LastActivity.IsZero() {
 		t.Error("LastActivity should be initialised, got zero time")
+	}
+}
+
+func TestHTTPPollConnectivityTransitions(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.IsConnected {
+		t.Fatalf("after success: connectivity=%q isConnected=%v", status.Connectivity, status.IsConnected)
+	}
+
+	firstFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(firstFailure, false, started.Add(30*time.Second), nil)
+
+	status = conn.Status()
+	if status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("after first failure: connectivity=%q isConnected=%v", status.Connectivity, status.IsConnected)
+	}
+
+	if !status.LastActivity.Equal(started) {
+		t.Fatalf("failed poll changed LastActivity: got %v, want %v", status.LastActivity, started)
+	}
+
+	secondFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(secondFailure, false, started.Add(60*time.Second), nil)
+
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOffline || status.IsConnected {
+		t.Fatalf("after sustained failure: connectivity=%q isConnected=%v", status.Connectivity, status.IsConnected)
+	}
+}
+
+func TestHTTPPollStaysStaleBeforeGracePeriod(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	firstFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(firstFailure, false, started.Add(30*time.Second), nil)
+	secondFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(secondFailure, false, started.Add(60*time.Second-time.Nanosecond), nil)
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("connectivity=%q isConnected=%v before grace period", status.Connectivity, status.IsConnected)
+	}
+
+	recovery := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(recovery, true, started.Add(61*time.Second), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.HTTPReachable || !status.IsConnected {
+		t.Fatalf("after recovery: connectivity=%q httpReachable=%v isConnected=%v",
+			status.Connectivity, status.HTTPReachable, status.IsConnected)
+	}
+}
+
+func TestHTTPPollOlderFailureCannotOverwriteNewerSuccess(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	older := conn.BeginHTTPPoll()
+	newer := conn.BeginHTTPPoll()
+	accepted := conn.CompleteHTTPPoll(newer, true, started.Add(time.Second), func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 42}
+	})
+	if !accepted {
+		t.Fatal("newer successful poll was unexpectedly discarded")
+	}
+
+	accepted = conn.CompleteHTTPPoll(older, false, started.Add(2*time.Second), nil)
+	if accepted {
+		t.Fatal("older failed poll was unexpectedly accepted")
+	}
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.IsConnected {
+		t.Fatalf("connectivity=%q isConnected=%v, want online", status.Connectivity, status.IsConnected)
+	}
+
+	if status.Volume == nil || status.Volume.ActualVolume != 42 {
+		t.Fatalf("newer status payload was lost: %+v", status.Volume)
+	}
+
+	if conn.CompleteHTTPPoll(newer, false, started.Add(3*time.Second), nil) {
+		t.Fatal("duplicate poll completion was unexpectedly accepted")
+	}
+}
+
+func TestHTTPPollCannotOverwriteNewerSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	poll := conn.BeginHTTPPoll()
+	conn.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 99}
+	})
+	conn.CompleteHTTPPoll(poll, true, started.Add(time.Second), func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 42}
+	})
+
+	status := conn.Status()
+	if status.Volume == nil || status.Volume.ActualVolume != 99 {
+		t.Fatalf("speaker event was overwritten by older poll data: %+v", status.Volume)
+	}
+
+	if status.Connectivity != ConnectivityOnline || !status.IsConnected {
+		t.Fatalf("poll health was not applied: connectivity=%q isConnected=%v",
+			status.Connectivity, status.IsConnected)
+	}
+}
+
+func TestZoneCacheRequiresAuthoritativeMaster(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	refresh := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(refresh, "MASTER", zone) {
+		t.Fatal("master-confirmed zone was not stored")
+	}
+
+	memberRefresh := conn.BeginZoneRefresh()
+	if conn.ApplyPolledZone(memberRefresh, "MEMBER", zone) {
+		t.Fatal("member response was accepted as authoritative")
+	}
+	if conn.Status().Zone == nil || conn.Status().Zone.Master != "MASTER" {
+		t.Fatalf("member response cleared cached topology: %+v", conn.Status().Zone)
+	}
+}
+
+func TestZoneCacheRejectsStaleRefreshAndClearsOnMasterStandalone(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	stale := conn.BeginZoneRefresh()
+	standalone := conn.BeginZoneRefresh()
+	if conn.ApplyPolledZone(stale, "MASTER", &models.ZoneInfo{Master: "MASTER"}) {
+		t.Fatal("stale standalone response was accepted")
+	}
+	if conn.Status().Zone == nil {
+		t.Fatal("stale response cleared cached topology")
+	}
+
+	if !conn.ApplyPolledZone(standalone, "MASTER", &models.ZoneInfo{
+		Master:  "MASTER",
+		Members: []models.Member{{DeviceID: "MASTER", IP: "192.0.2.10"}},
+	}) {
+		t.Fatal("master-confirmed standalone response did not clear the zone")
+	}
+	if conn.Status().Zone != nil {
+		t.Fatalf("standalone topology remained cached: %+v", conn.Status().Zone)
+	}
+}
+
+func TestConnectivityJSONCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		connectivity Connectivity
+		connected    bool
+	}{
+		{connectivity: ConnectivityOnline, connected: true},
+		{connectivity: ConnectivityStale, connected: true},
+		{connectivity: ConnectivityOffline, connected: false},
+	} {
+		payload, err := json.Marshal(DeviceStatus{
+			Connectivity: test.connectivity,
+			IsConnected:  test.connected,
+		})
+		if err != nil {
+			t.Fatalf("marshal %q: %v", test.connectivity, err)
+		}
+
+		var decoded map[string]interface{}
+		if err := json.Unmarshal(payload, &decoded); err != nil {
+			t.Fatalf("unmarshal %q: %v", test.connectivity, err)
+		}
+
+		if decoded["connectivity"] != string(test.connectivity) {
+			t.Errorf("connectivity = %v, want %q", decoded["connectivity"], test.connectivity)
+		}
+
+		if decoded["isConnected"] != test.connected {
+			t.Errorf("isConnected = %v, want %v", decoded["isConnected"], test.connected)
+		}
+	}
+}
+
+func TestWebSocketLoopHasSingleOwner(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+
+	const contenders = 64
+
+	var owners int
+
+	var mu sync.Mutex
+
+	var wg sync.WaitGroup
+	wg.Add(contenders)
+
+	for range contenders {
+		go func() {
+			defer wg.Done()
+			if !conn.TryStartWebSocketLoop() {
+				return
+			}
+
+			mu.Lock()
+			owners++
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	if owners != 1 {
+		t.Fatalf("WebSocket loop owners = %d, want 1", owners)
+	}
+
+	conn.FinishWebSocketLoop()
+	if !conn.TryStartWebSocketLoop() {
+		t.Fatal("loop ownership was not released")
 	}
 }
 
@@ -117,6 +377,40 @@ func TestUpdateStatus_PreservesUnchangedFields(t *testing.T) {
 
 	if !got.IsConnected {
 		t.Error("IsConnected not preserved")
+	}
+}
+
+func TestApplyPolledVolumeSurvivesUnrelatedSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{
+		Volume:     &models.Volume{ActualVolume: 10},
+		NowPlaying: &models.NowPlaying{Source: "INITIAL"},
+	})
+
+	generation := conn.BeginVolumeRefresh()
+	conn.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.NowPlaying = &models.NowPlaying{Source: "RADIO"}
+	})
+
+	if !conn.ApplyPolledVolume(generation, &models.Volume{ActualVolume: 40}) {
+		t.Fatal("unrelated speaker event invalidated volume readback")
+	}
+	if got := conn.Status(); got.Volume == nil || got.Volume.ActualVolume != 40 ||
+		got.NowPlaying == nil || got.NowPlaying.Source != "RADIO" {
+		t.Fatalf("status = %+v, want volume readback and speaker event", got)
+	}
+}
+
+func TestApplyVolumeEventSupersedesPolledVolume(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	generation := conn.BeginVolumeRefresh()
+	conn.ApplyVolumeEvent(&models.Volume{ActualVolume: 55}, time.Now())
+
+	if conn.ApplyPolledVolume(generation, &models.Volume{ActualVolume: 40}) {
+		t.Fatal("older volume readback superseded volume event")
+	}
+	if got := conn.Status().Volume; got == nil || got.ActualVolume != 55 {
+		t.Fatalf("volume = %+v, want event value 55", got)
 	}
 }
 

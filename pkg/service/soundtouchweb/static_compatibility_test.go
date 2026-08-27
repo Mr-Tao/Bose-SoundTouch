@@ -43,7 +43,7 @@ func TestStaticModulesDoNotRequireImportMaps(t *testing.T) {
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || !strings.HasSuffix(path, ".js") {
+		if entry.IsDir() || (!strings.HasSuffix(path, ".js") && !strings.HasSuffix(path, ".mjs")) {
 			return nil
 		}
 

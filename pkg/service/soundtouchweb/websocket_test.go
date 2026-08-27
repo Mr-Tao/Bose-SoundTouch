@@ -137,6 +137,7 @@ func TestUpdateDeviceStatusDoesNotOverwriteNewerNameEvent(t *testing.T) {
 		"/sources":     `<sources/>`,
 		"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
 		"/getGroup":    `<group/>`,
+		"/getZone":     `<zone master="device-1"><member>device-1</member></zone>`,
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
@@ -191,6 +192,116 @@ func TestUpdateDeviceStatusDoesNotOverwriteNewerNameEvent(t *testing.T) {
 	}
 }
 
+func TestUpdateDeviceStatusCannotOverwriteNewerVolumeReadback(t *testing.T) {
+	presetsRequestStarted := make(chan struct{})
+	releasePresetsResponse := make(chan struct{})
+	responses := map[string]string{
+		"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+		"/name":        `<name>Living Room</name>`,
+		"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
+		"/presets":     `<presets/>`,
+		"/sources":     `<sources/>`,
+		"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
+		"/getZone":     `<zone master="device-1"><member>device-1</member></zone>`,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Path == "/presets" {
+			close(presetsRequestStarted)
+			<-releasePresetsResponse
+		}
+
+		body, ok := responses[r.URL.Path]
+		if !ok {
+			t.Errorf("unexpected status endpoint %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	conn := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(server.URL),
+		&models.DeviceInfo{Name: "Living Room", DeviceID: "device-1", Type: "SoundTouch 20"},
+	)
+	refreshDone := make(chan struct{})
+	go func() {
+		NewWebApp().UpdateDeviceStatus("device-1", conn)
+		close(refreshDone)
+	}()
+
+	select {
+	case <-presetsRequestStarted:
+	case <-time.After(time.Second):
+		close(releasePresetsResponse)
+		t.Fatal("status poll did not read volume before blocking")
+	}
+
+	zoneReadback := conn.BeginVolumeRefresh()
+	if !conn.ApplyPolledVolume(zoneReadback, &models.Volume{ActualVolume: 40, TargetVolume: 40}) {
+		t.Fatal("newer zone readback was rejected")
+	}
+	close(releasePresetsResponse)
+
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("status refresh did not finish")
+	}
+
+	if got := conn.Status().Volume; got == nil || got.ActualVolume != 40 {
+		t.Fatalf("volume = %+v, want newer zone readback 40", got)
+	}
+}
+
+func TestRefreshZonesAfterEventClearsCachedOldMaster(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+	master := newVolumeSpeaker(t, 20, `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member></zone>`)
+	member := newVolumeSpeaker(t, 20, `<zone master="MEMBER"><member ipaddress="192.0.2.20">MEMBER</member></zone>`)
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Member", member, 20, nil)
+
+	app.refreshZonesAfterEvent("MEMBER", "")
+
+	masterConn, _ := app.GetDevice("192.0.2.10")
+	if masterConn.Status().Zone != nil {
+		t.Fatalf("old master topology survived confirmed dissolve: %+v", masterConn.Status().Zone)
+	}
+}
+
+func TestRefreshZonesAfterEventPreservesCacheOnMasterError(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+	master := newVolumeSpeaker(t, 20, "not XML")
+	member := newVolumeSpeaker(t, 20, "")
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Member", member, 20, nil)
+
+	app.refreshZonesAfterEvent("MEMBER", "")
+
+	masterConn, _ := app.GetDevice("192.0.2.10")
+	if masterConn.Status().Zone == nil || masterConn.Status().Zone.Master != "MASTER" {
+		t.Fatalf("failed refresh discarded cached topology: %+v", masterConn.Status().Zone)
+	}
+}
+
 func TestUpdateDeviceStatusSkipsGroupForNonStereoModel(t *testing.T) {
 	var groupRequested atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +319,7 @@ func TestUpdateDeviceStatusSkipsGroupForNonStereoModel(t *testing.T) {
 			"/presets":     `<presets/>`,
 			"/sources":     `<sources/>`,
 			"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
+			"/getZone":     `<zone master="device-1"><member>device-1</member></zone>`,
 		}
 		body, ok := responses[r.URL.Path]
 		if !ok {
@@ -285,8 +397,8 @@ func TestPeriodicPlayerMessagesPreserveStatusUpdateStream(t *testing.T) {
 	}
 
 	messages := app.periodicPlayerMessages()
-	if len(messages) != 3 {
-		t.Fatalf("periodic messages = %d, want one devices frame and two connected status updates: %+v", len(messages), messages)
+	if len(messages) != 4 {
+		t.Fatalf("periodic messages = %d, want one devices frame and three status updates: %+v", len(messages), messages)
 	}
 
 	if messages[0].Type != "devices" {
@@ -304,7 +416,7 @@ func TestPeriodicPlayerMessagesPreserveStatusUpdateStream(t *testing.T) {
 		}
 		statusUpdates[message.DeviceID] = true
 	}
-	if !statusUpdates["192.0.2.10"] || !statusUpdates["192.0.2.11"] || statusUpdates["192.0.2.12"] {
+	if !statusUpdates["192.0.2.10"] || !statusUpdates["192.0.2.11"] || !statusUpdates["192.0.2.12"] {
 		t.Fatalf("unexpected status_update device IDs: %+v", statusUpdates)
 	}
 }
@@ -336,6 +448,71 @@ func TestGlobalWebSocketWriteSeamSerializesWriters(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("global WebSocket writer lock was not released")
+	}
+}
+
+func TestDiscoveryStatusRejectsOlderGeneration(t *testing.T) {
+	app := NewWebApp()
+	older := app.BeginDiscovery()
+	newer := app.BeginDiscovery()
+
+	if !app.BroadcastDiscoveryStatusFor(newer, "completed", 4) {
+		t.Fatal("current discovery status was rejected")
+	}
+	if app.BroadcastDiscoveryStatusFor(older, "starting", 1) {
+		t.Fatal("older discovery status was accepted")
+	}
+
+	stored, ok := app.discoveryStatus.Load().(*webtypes.DiscoveryStatus)
+	if !ok {
+		t.Fatal("discovery status was not stored")
+	}
+	if stored.Status != "completed" || stored.IsDiscovering || stored.DeviceCount != 4 {
+		t.Fatalf("stale discovery overwrote current state: %+v", stored)
+	}
+}
+
+func TestBeginDiscoverySerializesWithStatusPublication(t *testing.T) {
+	app := NewWebApp()
+	_ = app.BeginDiscovery()
+
+	writerEntered := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		_ = app.withGlobalWebSocketWrite(func(webSocketWriteBatch) error {
+			close(writerEntered)
+			<-releaseWriter
+
+			return nil
+		})
+	}()
+
+	<-writerEntered
+	reserved := make(chan uint64, 1)
+	go func() {
+		reserved <- app.BeginDiscovery()
+	}()
+
+	select {
+	case generation := <-reserved:
+		close(releaseWriter)
+		<-writerDone
+		t.Fatalf("generation %d was reserved during an active status publication", generation)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(releaseWriter)
+	<-writerDone
+
+	select {
+	case generation := <-reserved:
+		if generation != 2 {
+			t.Fatalf("generation = %d, want 2", generation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("discovery reservation did not proceed after publication")
 	}
 }
 
@@ -422,6 +599,7 @@ func newStatusTestServer(t *testing.T, groupStatus int, groupBody string) *httpt
 		"/presets":     `<presets/>`,
 		"/sources":     `<sources/>`,
 		"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
+		"/getZone":     `<zone master="device-1"><member>device-1</member></zone>`,
 	}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

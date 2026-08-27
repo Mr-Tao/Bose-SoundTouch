@@ -38,6 +38,7 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 		r.Get("/ws", app.HandleWebSocket)
 
 		r.Post("/discover", func(w http.ResponseWriter, r *http.Request) {
+			generation := app.BeginDiscovery()
 			app.HandleAPIDiscover(w, r)
 
 			// Trigger discovery
@@ -46,11 +47,16 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 
-				app.BroadcastDiscoveryStatus("starting", app.DeviceCount())
+				app.BroadcastDiscoveryStatusFor(generation, "starting", app.DeviceCount())
 
-				app.DiscoverDevices(ctx, discoveryService)
+				err := app.DiscoverDevicesWithResult(ctx, discoveryService)
 
-				app.BroadcastDiscoveryStatus("completed", app.DeviceCount())
+				status := "completed"
+				if err != nil {
+					status = "failed"
+				}
+
+				app.BroadcastDiscoveryStatusFor(generation, status, app.DeviceCount())
 				app.BroadcastDeviceList()
 			}()
 		})
@@ -86,6 +92,7 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 
 				r.Route("/zone", func(r chi.Router) {
 					r.Get("/", app.HandleGetZone)
+					r.Post("/volume/{volume}", app.HandleZoneVolume)
 					r.Post("/add/{slaveId}", app.HandleZoneAdd)
 					r.Post("/remove/{slaveId}", app.HandleZoneRemove)
 					r.Post("/dissolve", app.HandleZoneDissolve)

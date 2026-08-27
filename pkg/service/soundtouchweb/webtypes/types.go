@@ -3,6 +3,7 @@ package webtypes
 
 import (
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,7 +42,10 @@ type SoundTouchClient interface {
 // / UpdateStatus rather than the private field; construct connections
 // via NewDeviceConnection to guarantee the status is initialised.
 type DeviceConnection struct {
-	Client    *client.Client
+	Client *client.Client
+	// WebSocket is retained for source compatibility with callers that build
+	// DeviceConnection values directly. New concurrent code should use
+	// CurrentWebSocket and SetWebSocket.
 	WebSocket *client.WebSocketClient
 	// DeviceInfo is the immutable discovery snapshot. Use Info for player-facing
 	// output so later nameUpdated events are reflected without racing readers.
@@ -50,14 +54,34 @@ type DeviceConnection struct {
 
 	deviceName atomic.Pointer[string]
 	status     atomic.Pointer[DeviceStatus]
-	nameMu     sync.Mutex
-	nameGen    uint64
+
+	webSocketMu sync.RWMutex
+
+	webSocketLoopRunning atomic.Bool
+
+	nameMu    sync.Mutex
+	nameGen   uint64
+	volumeMu  sync.Mutex
+	volumeGen uint64
+	healthMu  sync.Mutex
+
+	nextPollGeneration  uint64
+	lastPollGeneration  uint64
+	lastHTTPSuccess     time.Time
+	consecutiveFailures int
+	speakerEventGen     uint64
+	pollEventGen        map[uint64]uint64
 
 	// groupMu orders polled /getGroup responses against real-time
 	// groupUpdated events. Starting a newer refresh or receiving an event
 	// invalidates any older in-flight poll.
 	groupMu         sync.Mutex
 	groupGeneration uint64
+
+	// zoneMu protects the last topology confirmed by a zone master. Member
+	// responses and failed refreshes must not dissolve a logical zone.
+	zoneMu         sync.Mutex
+	zoneGeneration uint64
 
 	// done is closed by Close when the device is removed from the
 	// registry, signalling its background goroutines (the status poller
@@ -69,14 +93,46 @@ type DeviceConnection struct {
 
 // DeviceStatus represents the current device state
 type DeviceStatus struct {
-	NowPlaying   *models.NowPlaying `json:"nowPlaying,omitempty"`
-	Volume       *models.Volume     `json:"volume,omitempty"`
-	Presets      *models.Presets    `json:"presets,omitempty"`
-	Sources      *models.Sources    `json:"sources,omitempty"`
-	Bass         *models.Bass       `json:"bass,omitempty"`
-	Group        *models.Group      `json:"group,omitempty"`
-	IsConnected  bool               `json:"isConnected"`
-	LastActivity time.Time          `json:"lastActivity"`
+	NowPlaying             *models.NowPlaying      `json:"nowPlaying,omitempty"`
+	Volume                 *models.Volume          `json:"volume,omitempty"`
+	Presets                *models.Presets         `json:"presets,omitempty"`
+	Sources                *models.Sources         `json:"sources,omitempty"`
+	Bass                   *models.Bass            `json:"bass,omitempty"`
+	Group                  *models.Group           `json:"group,omitempty"`
+	Zone                   *models.ZoneInfo        `json:"zone,omitempty"`
+	Connectivity           Connectivity            `json:"connectivity"`
+	HTTPReachable          bool                    `json:"httpReachable"`
+	WebSocketConnected     bool                    `json:"webSocketConnected"`
+	SpeakerConnectionState *SpeakerConnectionState `json:"speakerConnectionState,omitempty"`
+	IsConnected            bool                    `json:"isConnected"`
+	LastActivity           time.Time               `json:"lastActivity"`
+}
+
+// Connectivity is the player's view of HTTP reachability. It deliberately
+// excludes both the event WebSocket transport and the network state reported
+// by the speaker itself: either can flap while the control API remains usable.
+type Connectivity string
+
+const (
+	// ConnectivityOnline means the latest HTTP poll reached the speaker.
+	ConnectivityOnline Connectivity = "online"
+	// ConnectivityStale means recent HTTP probes failed within the grace period.
+	ConnectivityStale Connectivity = "stale"
+	// ConnectivityOffline means repeated HTTP failures exceeded the grace period.
+	ConnectivityOffline Connectivity = "offline"
+)
+
+const (
+	offlineFailureThreshold = 2
+	offlineGracePeriod      = 60 * time.Second
+)
+
+// SpeakerConnectionState is the network state reported by a SoundTouch
+// connectionStateUpdated event. It is diagnostic data, not proof that the
+// player can currently reach the speaker's HTTP API.
+type SpeakerConnectionState struct {
+	State  string `json:"state"`
+	Signal string `json:"signal,omitempty"`
 }
 
 // NewDeviceConnection creates a fully-initialised connection. The
@@ -90,6 +146,7 @@ func NewDeviceConnection(c *client.Client, info *models.DeviceInfo) *DeviceConne
 		done:       make(chan struct{}),
 	}
 	conn.status.Store(&DeviceStatus{
+		Connectivity: ConnectivityOffline,
 		IsConnected:  false,
 		LastActivity: time.Now(),
 	})
@@ -141,6 +198,48 @@ func (c *DeviceConnection) ApplyNameEvent(name string) {
 	c.storeDeviceName(name)
 }
 
+// BeginVolumeRefresh starts a field-specific generation for an asynchronous
+// /volume readback. Unlike a full HTTP status poll, an unrelated speaker event
+// must not invalidate a confirmed volume value.
+func (c *DeviceConnection) BeginVolumeRefresh() uint64 {
+	c.volumeMu.Lock()
+	defer c.volumeMu.Unlock()
+
+	c.volumeGen++
+
+	return c.volumeGen
+}
+
+// ApplyPolledVolume stores a /volume result unless a newer volume readback or
+// volumeUpdated event superseded it.
+func (c *DeviceConnection) ApplyPolledVolume(generation uint64, volume *models.Volume) bool {
+	c.volumeMu.Lock()
+	defer c.volumeMu.Unlock()
+
+	if generation != c.volumeGen {
+		return false
+	}
+
+	c.UpdateStatus(func(status *DeviceStatus) {
+		status.Volume = volume
+	})
+
+	return true
+}
+
+// ApplyVolumeEvent stores the newest volumeUpdated event and invalidates all
+// in-flight /volume readbacks. It also participates in full-poll ordering.
+func (c *DeviceConnection) ApplyVolumeEvent(volume *models.Volume, activity time.Time) {
+	c.volumeMu.Lock()
+	defer c.volumeMu.Unlock()
+
+	c.volumeGen++
+	c.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.Volume = volume
+		status.LastActivity = activity
+	})
+}
+
 // Info returns a read-only metadata snapshot with the latest device name.
 func (c *DeviceConnection) Info() *models.DeviceInfo {
 	if c.DeviceInfo == nil {
@@ -182,10 +281,132 @@ func (c *DeviceConnection) Close() {
 	c.closeOnce.Do(func() {
 		close(c.done)
 
-		if c.WebSocket != nil {
-			_ = c.WebSocket.Disconnect()
+		if ws := c.CurrentWebSocket(); ws != nil {
+			_ = ws.Close()
 		}
 	})
+}
+
+// CurrentWebSocket returns the currently connected device event transport, if
+// any. It is the concurrency-safe counterpart to the compatibility field.
+func (c *DeviceConnection) CurrentWebSocket() *client.WebSocketClient {
+	c.webSocketMu.RLock()
+	defer c.webSocketMu.RUnlock()
+
+	return c.WebSocket
+}
+
+// SetWebSocket stores the current device event transport. Passing nil clears
+// it. HTTP handlers inspect the pointer concurrently with the reconnect loop,
+// so internal code pairs this method with CurrentWebSocket.
+func (c *DeviceConnection) SetWebSocket(ws *client.WebSocketClient) {
+	c.webSocketMu.Lock()
+	c.WebSocket = ws
+	c.webSocketMu.Unlock()
+}
+
+// TryStartWebSocketLoop claims ownership of the one reconnect loop allowed for
+// this device. The owner must call FinishWebSocketLoop when it exits.
+func (c *DeviceConnection) TryStartWebSocketLoop() bool {
+	return c.webSocketLoopRunning.CompareAndSwap(false, true)
+}
+
+// FinishWebSocketLoop releases reconnect-loop ownership.
+func (c *DeviceConnection) FinishWebSocketLoop() {
+	c.webSocketLoopRunning.Store(false)
+}
+
+// BeginHTTPPoll returns a monotonically increasing generation for a status
+// poll. CompleteHTTPPoll uses it to prevent an older, slower result from
+// overwriting a newer one.
+func (c *DeviceConnection) BeginHTTPPoll() uint64 {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	c.nextPollGeneration++
+	if c.pollEventGen == nil {
+		c.pollEventGen = make(map[uint64]uint64)
+	}
+
+	c.pollEventGen[c.nextPollGeneration] = c.speakerEventGen
+
+	return c.nextPollGeneration
+}
+
+// ApplySpeakerEvent serializes a real-time speaker event against HTTP poll
+// completion. A poll that began before this event may still update health, but
+// cannot merge older payload fields over the event.
+func (c *DeviceConnection) ApplySpeakerEvent(mut func(*DeviceStatus)) {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	c.speakerEventGen++
+	c.UpdateStatus(mut)
+}
+
+// CompleteHTTPPoll records the outcome of one HTTP status poll and applies its
+// successfully fetched fields through merge. It returns false when a newer
+// poll has already completed and this result was therefore discarded.
+func (c *DeviceConnection) CompleteHTTPPoll(
+	generation uint64,
+	success bool,
+	at time.Time,
+	merge func(*DeviceStatus),
+) bool {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	pollEventGeneration, knownGeneration := c.pollEventGen[generation]
+	delete(c.pollEventGen, generation)
+
+	if generation <= c.lastPollGeneration {
+		return false
+	}
+
+	c.lastPollGeneration = generation
+	for olderGeneration := range c.pollEventGen {
+		if olderGeneration < generation {
+			delete(c.pollEventGen, olderGeneration)
+		}
+	}
+
+	connectivity := ConnectivityStale
+
+	if success {
+		c.lastHTTPSuccess = at
+		c.consecutiveFailures = 0
+		connectivity = ConnectivityOnline
+	} else {
+		c.consecutiveFailures++
+		if c.consecutiveFailures >= offlineFailureThreshold &&
+			!c.lastHTTPSuccess.IsZero() &&
+			at.Sub(c.lastHTTPSuccess) >= offlineGracePeriod {
+			connectivity = ConnectivityOffline
+		}
+	}
+
+	c.UpdateStatus(func(status *DeviceStatus) {
+		if merge != nil && knownGeneration && pollEventGeneration == c.speakerEventGen {
+			merge(status)
+		}
+
+		status.Connectivity = connectivity
+		status.HTTPReachable = success
+
+		status.IsConnected = connectivity != ConnectivityOffline
+		if success {
+			status.LastActivity = at
+		}
+	})
+
+	return true
+}
+
+// MarkHTTPSuccess records a successful out-of-band HTTP request such as the
+// /info request used while adding a device.
+func (c *DeviceConnection) MarkHTTPSuccess(at time.Time) {
+	generation := c.BeginHTTPPoll()
+	c.CompleteHTTPPoll(generation, true, at, nil)
 }
 
 // SetStatus atomically replaces the entire status. Use sparingly —
@@ -201,7 +422,8 @@ func (c *DeviceConnection) SetStatus(s *DeviceStatus) {
 // writers cannot silently lose each other's changes.
 //
 // The copy mut receives is a shallow value copy of the previous status.
-// Nested pointer fields (NowPlaying, Volume, Presets, Sources, Bass, Group)
+// Nested pointer fields (NowPlaying, Volume, Presets, Sources, Bass, Group,
+// Zone)
 // share their backing struct with the previous version: callers MUST
 // REPLACE these pointers (s.Volume = &models.Volume{...}) rather than
 // mutate through them (s.Volume.ActualVolume++ would race with any
@@ -273,6 +495,55 @@ func normalizeGroup(group *models.Group) *models.Group {
 	}
 
 	return group
+}
+
+// BeginZoneRefresh starts a new generation for an asynchronous master
+// /getZone request. Starting a new refresh invalidates any older response.
+func (c *DeviceConnection) BeginZoneRefresh() uint64 {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	c.zoneGeneration++
+
+	return c.zoneGeneration
+}
+
+// ApplyPolledZone stores topology only when it was returned by the queried
+// master and no newer refresh superseded it. A master-confirmed standalone
+// response clears the cached zone; member responses are ignored.
+func (c *DeviceConnection) ApplyPolledZone(
+	generation uint64,
+	queriedDeviceID string,
+	zone *models.ZoneInfo,
+) bool {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	if generation != c.zoneGeneration || zone == nil ||
+		strings.TrimSpace(zone.Master) != strings.TrimSpace(queriedDeviceID) {
+		return false
+	}
+
+	c.replaceZone(normalizeZone(zone))
+
+	return true
+}
+
+func (c *DeviceConnection) replaceZone(zone *models.ZoneInfo) bool {
+	changed := !reflect.DeepEqual(c.Status().Zone, zone)
+	c.UpdateStatus(func(status *DeviceStatus) {
+		status.Zone = zone
+	})
+
+	return changed
+}
+
+func normalizeZone(zone *models.ZoneInfo) *models.ZoneInfo {
+	if zone == nil || zone.IsStandalone() {
+		return nil
+	}
+
+	return zone
 }
 
 // APIResponse is a standard JSON response wrapper
