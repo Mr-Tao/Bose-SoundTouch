@@ -85,6 +85,23 @@ test('resolves zone member display and controls from the current projection', ()
         controlId: '192.0.2.21',
         name: 'Living',
     });
+
+    const physicalStereoRepresentative = {
+        controlId: 'LEFT',
+        name: 'Living Room Left',
+        deviceIds: ['LEFT'],
+    };
+    const logicalStereoMember = {
+        controlId: 'LEFT',
+        name: 'Living Room',
+        deviceIds: ['LEFT', 'RIGHT'],
+    };
+    assert.deepEqual(resolvedZoneMember(
+        { members: [logicalStereoMember] }, physicalStereoRepresentative), {
+        member: logicalStereoMember,
+        controlId: 'LEFT',
+        name: 'Living Room',
+    });
     assert.deepEqual(resolvedZoneMember(undefined, {
         ip: '192.0.2.99',
         deviceIds: ['missing-id'],
