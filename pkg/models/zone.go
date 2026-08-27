@@ -184,6 +184,7 @@ func (zi *ZoneInfo) GetMemberByIP(ipAddress string) (*Member, bool) {
 // GetAllDeviceIDs returns all device IDs in the zone (master + members)
 func (zi *ZoneInfo) GetAllDeviceIDs() []string {
 	devices := []string{zi.Master}
+
 	for _, member := range zi.Members {
 		if member.DeviceID == zi.Master {
 			continue
@@ -198,6 +199,7 @@ func (zi *ZoneInfo) GetAllDeviceIDs() []string {
 // GetTotalDeviceCount returns the total number of devices in the zone
 func (zi *ZoneInfo) GetTotalDeviceCount() int {
 	count := 1
+
 	for _, member := range zi.Members {
 		if member.DeviceID != zi.Master {
 			count++
@@ -231,6 +233,7 @@ func (zi *ZoneInfo) String() string {
 	}
 
 	var memberIDs []string
+
 	for _, member := range zi.Members {
 		if member.DeviceID == zi.Master {
 			continue

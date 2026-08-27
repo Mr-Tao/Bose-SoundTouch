@@ -93,6 +93,7 @@ func NewDeviceConnection(c *client.Client, info *models.DeviceInfo) *DeviceConne
 		IsConnected:  false,
 		LastActivity: time.Now(),
 	})
+
 	if info != nil {
 		conn.storeDeviceName(info.Name)
 	}
