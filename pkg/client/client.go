@@ -688,9 +688,11 @@ func (c *Client) SetBassWithCapabilities(level int, capabilities *models.BassCap
 	if err := capabilities.Validate(); err != nil {
 		return fmt.Errorf("invalid bass capabilities: %w", err)
 	}
+
 	if !capabilities.BassAvailable {
 		return fmt.Errorf("bass control is unavailable")
 	}
+
 	if !capabilities.ValidateLevel(level) {
 		return fmt.Errorf("invalid bass level: %d (must be between %d and %d)", level, capabilities.BassMin, capabilities.BassMax)
 	}
@@ -791,13 +793,16 @@ func (c *Client) adjustBalance(delta int) (*models.Balance, error) {
 	}
 
 	minLevel, maxLevel := models.BalanceLevelMin, models.BalanceLevelMax
+
 	available, advertisedMin, advertisedMax, _, capabilityKnown := currentBalance.Capability()
 	if capabilityKnown {
 		if !available {
 			return nil, fmt.Errorf("failed to set balance: balance is unavailable")
 		}
+
 		minLevel, maxLevel = advertisedMin, advertisedMax
 	}
+
 	newLevel := models.ClampBalanceLevelForRange(currentBalance.GetLevel()+delta, minLevel, maxLevel)
 
 	err = c.SetBalanceForRange(newLevel, minLevel, maxLevel)
@@ -1552,18 +1557,23 @@ type bassCapabilitiesWire struct {
 
 func (wire *bassCapabilitiesWire) value() (*models.BassCapabilities, error) {
 	missing := make([]string, 0, 4)
+
 	if wire.BassAvailable == nil {
 		missing = append(missing, "bassAvailable")
 	}
+
 	if wire.BassMin == nil {
 		missing = append(missing, "bassMin")
 	}
+
 	if wire.BassMax == nil {
 		missing = append(missing, "bassMax")
 	}
+
 	if wire.BassDefault == nil {
 		missing = append(missing, "bassDefault")
 	}
+
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing fields: %s", strings.Join(missing, ", "))
 	}

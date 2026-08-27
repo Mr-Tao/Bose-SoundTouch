@@ -147,20 +147,23 @@ func setBalanceWithReadback(soundTouchClient *client.Client, level int) (*models
 	}
 
 	minLevel, maxLevel := models.BalanceLevelMin, models.BalanceLevelMax
+
 	available, advertisedMin, advertisedMax, _, capabilityKnown := current.Capability()
 	if capabilityKnown {
 		if !available {
 			return nil, fmt.Errorf("balance is unavailable")
 		}
+
 		minLevel, maxLevel = advertisedMin, advertisedMax
 	}
+
 	if !models.ValidateBalanceLevelForRange(level, minLevel, maxLevel) {
 		return nil, fmt.Errorf("invalid balance level: %d (must be between %d and %d)",
 			level, minLevel, maxLevel)
 	}
 
-	if err := soundTouchClient.SetBalanceForRange(level, minLevel, maxLevel); err != nil {
-		return nil, err
+	if setErr := soundTouchClient.SetBalanceForRange(level, minLevel, maxLevel); setErr != nil {
+		return nil, setErr
 	}
 
 	readback, err := soundTouchClient.GetBalance()

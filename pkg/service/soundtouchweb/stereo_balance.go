@@ -19,10 +19,34 @@ type stereoBalanceResult struct {
 	AtTarget  bool `json:"atTarget"`
 }
 
+type stereoBalanceOperation struct {
+	result    stereoBalanceResult
+	response  webtypes.APIResponse
+	status    int
+	broadcast bool
+}
+
+func newStereoBalanceOperation(requested int) *stereoBalanceOperation {
+	result := stereoBalanceResult{Requested: requested}
+
+	return &stereoBalanceOperation{
+		result:   result,
+		response: webtypes.APIResponse{Success: true, Data: result},
+		status:   http.StatusOK,
+	}
+}
+
+func (operation *stereoBalanceOperation) fail(status int, message string) {
+	operation.status = status
+	operation.response.Success = false
+	operation.response.Error = message
+}
+
 // HandleStereoBalance sets and immediately verifies balance on the confirmed
 // LEFT/master represented by one logical stereo-pair card.
 func (app *WebApp) HandleStereoBalance(w http.ResponseWriter, r *http.Request) {
 	controlID := strings.TrimSpace(chi.URLParam(r, "id"))
+
 	requested, err := strconv.Atoi(chi.URLParam(r, "level"))
 	if err != nil {
 		app.sendError(w, "Invalid balance level", http.StatusBadRequest)
@@ -35,123 +59,157 @@ func (app *WebApp) HandleStereoBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := stereoBalanceResult{Requested: requested}
-	status := http.StatusOK
-	response := webtypes.APIResponse{Success: true, Data: result}
-	broadcast := false
+	operation := newStereoBalanceOperation(requested)
 
 	conn.WithBalanceOperation(func() {
-		if !app.confirmedStereoBalanceTarget(controlID, conn) {
-			status = http.StatusConflict
-			response.Success = false
-			response.Error = "Device is not the LEFT/master of a confirmed stereo pair"
-			return
-		}
-
-		if conn.Client == nil {
-			status = http.StatusBadGateway
-			response.Success = false
-			response.Error = "Stereo balance device client is unavailable"
-			return
-		}
-
-		refresh, ok := conn.BeginBalanceRefresh()
-		if !ok || !confirmedStereoBalanceMaster(conn.Info().DeviceID, refresh.Group) {
-			status = http.StatusConflict
-			response.Success = false
-			response.Error = "Stereo pair topology changed"
-			return
-		}
-
-		available, minLevel, maxLevel, _, capabilityKnown := refresh.Balance.Capability()
-		if !capabilityKnown || !available {
-			status = http.StatusConflict
-			response.Success = false
-			response.Error = "Stereo balance capability is unknown or unavailable"
-			return
-		}
-		if !models.ValidateBalanceLevelForRange(requested, minLevel, maxLevel) {
-			status = http.StatusBadRequest
-			response.Success = false
-			response.Error = fmt.Sprintf("Invalid balance level (must be between %d and %d)", minLevel, maxLevel)
-			return
-		}
-		var writeErr error
-		if !app.withCurrentBalanceWrite(controlID, conn, refresh, func() {
-			writeErr = conn.Client.SetBalanceForRange(requested, minLevel, maxLevel)
-		}) {
-			status = http.StatusConflict
-			response.Success = false
-			response.Error = "Stereo pair topology changed"
-			return
-		}
-
-		balance, readErr := conn.Client.GetBalance()
-
-		if !app.balanceRefreshCurrent(controlID, conn, refresh) || !app.confirmedStereoBalanceTarget(controlID, conn) {
-			status = http.StatusConflict
-			response.Success = false
-			response.Error = "Stereo pair topology changed during balance update"
-			return
-		}
-		if readErr != nil || balance == nil {
-			if !app.applyBalanceReadback(controlID, conn, refresh, nil) {
-				status = http.StatusConflict
-				response.Success = false
-				response.Error = "Stereo pair topology changed during balance update"
-				return
-			}
-			broadcast = true
-			status = http.StatusBadGateway
-			response.Success = false
-			switch {
-			case writeErr != nil && readErr != nil:
-				response.Error = fmt.Sprintf("Stereo balance write and readback are unverified: write: %v; read: %v", writeErr, readErr)
-			case readErr != nil:
-				response.Error = fmt.Sprintf("Stereo balance readback is unverified: %v", readErr)
-			default:
-				response.Error = "Stereo balance readback is unverified"
-			}
-			return
-		}
-		readAvailable, _, _, _, readCapabilityKnown := balance.Capability()
-		if !app.applyBalanceReadback(controlID, conn, refresh, balance) {
-			status = http.StatusConflict
-			response.Success = false
-			response.Error = "Stereo pair topology changed during balance update"
-			return
-		}
-		broadcast = true
-		if !readCapabilityKnown {
-			status = http.StatusBadGateway
-			response.Success = false
-			response.Error = "Stereo balance readback capability is unverified"
-			return
-		}
-		if !readAvailable {
-			status = http.StatusConflict
-			response.Success = false
-			response.Error = "Stereo balance is no longer available"
-			return
-		}
-
-		target := balance.TargetBalance
-		actual := balance.ActualBalance
-		result.Target = &target
-		result.Actual = &actual
-		result.AtTarget = target == requested && actual == requested
-		response.Data = result
+		app.runStereoBalanceOperation(controlID, conn, requested, operation)
 	})
 
-	if broadcast {
+	if operation.broadcast {
 		app.BroadcastDeviceList()
 	}
 
-	response.Data = result
+	operation.response.Data = operation.result
+
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+	w.WriteHeader(operation.status)
+
+	if err := json.NewEncoder(w).Encode(operation.response); err != nil {
 		http.Error(w, "Failed to encode stereo balance response", http.StatusInternalServerError)
+	}
+}
+
+func (app *WebApp) runStereoBalanceOperation(
+	controlID string,
+	conn *webtypes.DeviceConnection,
+	requested int,
+	operation *stereoBalanceOperation,
+) {
+	if !app.confirmedStereoBalanceTarget(controlID, conn) {
+		operation.fail(http.StatusConflict, "Device is not the LEFT/master of a confirmed stereo pair")
+
+		return
+	}
+
+	if conn.Client == nil {
+		operation.fail(http.StatusBadGateway, "Stereo balance device client is unavailable")
+
+		return
+	}
+
+	refresh, minLevel, maxLevel, ok := prepareStereoBalanceWrite(conn, requested, operation)
+	if !ok {
+		return
+	}
+
+	var writeErr error
+
+	if !app.withCurrentBalanceWrite(controlID, conn, refresh, func() {
+		writeErr = conn.Client.SetBalanceForRange(requested, minLevel, maxLevel)
+	}) {
+		operation.fail(http.StatusConflict, "Stereo pair topology changed")
+
+		return
+	}
+
+	balance, readErr := conn.Client.GetBalance()
+	if !app.balanceRefreshCurrent(controlID, conn, refresh) || !app.confirmedStereoBalanceTarget(controlID, conn) {
+		operation.fail(http.StatusConflict, "Stereo pair topology changed during balance update")
+
+		return
+	}
+
+	app.finishStereoBalanceReadback(controlID, conn, refresh, balance, writeErr, readErr, operation)
+}
+
+func prepareStereoBalanceWrite(
+	conn *webtypes.DeviceConnection,
+	requested int,
+	operation *stereoBalanceOperation,
+) (webtypes.BalanceRefresh, int, int, bool) {
+	refresh, ok := conn.BeginBalanceRefresh()
+	if !ok || !confirmedStereoBalanceMaster(conn.Info().DeviceID, refresh.Group) {
+		operation.fail(http.StatusConflict, "Stereo pair topology changed")
+
+		return refresh, 0, 0, false
+	}
+
+	available, minLevel, maxLevel, _, capabilityKnown := refresh.Balance.Capability()
+	if !capabilityKnown || !available {
+		operation.fail(http.StatusConflict, "Stereo balance capability is unknown or unavailable")
+
+		return refresh, 0, 0, false
+	}
+
+	if !models.ValidateBalanceLevelForRange(requested, minLevel, maxLevel) {
+		operation.fail(
+			http.StatusBadRequest,
+			fmt.Sprintf("Invalid balance level (must be between %d and %d)", minLevel, maxLevel),
+		)
+
+		return refresh, 0, 0, false
+	}
+
+	return refresh, minLevel, maxLevel, true
+}
+
+func (app *WebApp) finishStereoBalanceReadback(
+	controlID string,
+	conn *webtypes.DeviceConnection,
+	refresh webtypes.BalanceRefresh,
+	balance *models.Balance,
+	writeErr error,
+	readErr error,
+	operation *stereoBalanceOperation,
+) {
+	if readErr != nil || balance == nil {
+		if !app.applyBalanceReadback(controlID, conn, refresh, nil) {
+			operation.fail(http.StatusConflict, "Stereo pair topology changed during balance update")
+
+			return
+		}
+
+		operation.broadcast = true
+		operation.fail(http.StatusBadGateway, stereoBalanceReadbackError(writeErr, readErr))
+
+		return
+	}
+
+	readAvailable, _, _, _, readCapabilityKnown := balance.Capability()
+	if !app.applyBalanceReadback(controlID, conn, refresh, balance) {
+		operation.fail(http.StatusConflict, "Stereo pair topology changed during balance update")
+
+		return
+	}
+
+	operation.broadcast = true
+	if !readCapabilityKnown {
+		operation.fail(http.StatusBadGateway, "Stereo balance readback capability is unverified")
+
+		return
+	}
+
+	if !readAvailable {
+		operation.fail(http.StatusConflict, "Stereo balance is no longer available")
+
+		return
+	}
+
+	target := balance.TargetBalance
+	actual := balance.ActualBalance
+	operation.result.Target = &target
+	operation.result.Actual = &actual
+	operation.result.AtTarget = target == operation.result.Requested && actual == operation.result.Requested
+}
+
+func stereoBalanceReadbackError(writeErr, readErr error) string {
+	switch {
+	case writeErr != nil && readErr != nil:
+		return fmt.Sprintf("Stereo balance write and readback are unverified: write: %v; read: %v", writeErr, readErr)
+	case readErr != nil:
+		return fmt.Sprintf("Stereo balance readback is unverified: %v", readErr)
+	default:
+		return "Stereo balance readback is unverified"
 	}
 }
 
@@ -165,6 +223,7 @@ func (app *WebApp) withCurrentBalanceWrite(
 	operation func(),
 ) bool {
 	current := false
+
 	conn.WithBalanceWriteFence(func() {
 		current = app.balanceRefreshCurrent(controlID, conn, refresh) &&
 			app.confirmedStereoBalanceTarget(controlID, conn)
@@ -185,7 +244,9 @@ func (app *WebApp) confirmedStereoBalanceTarget(controlID string, conn *webtypes
 	if !exists || registered != conn {
 		return false
 	}
+
 	info := conn.Info()
+
 	status := conn.Status()
 	if info == nil || status == nil || !confirmedStereoBalanceMaster(info.DeviceID, status.Group) {
 		return false

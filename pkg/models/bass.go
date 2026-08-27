@@ -153,9 +153,11 @@ func (bc *BassCapabilities) Validate() error {
 	if bc == nil {
 		return fmt.Errorf("bass capabilities are nil")
 	}
+
 	if bc.BassMin > bc.BassMax {
 		return fmt.Errorf("bass minimum %d exceeds maximum %d", bc.BassMin, bc.BassMax)
 	}
+
 	if bc.BassDefault < bc.BassMin || bc.BassDefault > bc.BassMax {
 		return fmt.Errorf("bass default %d is outside range %d to %d", bc.BassDefault, bc.BassMin, bc.BassMax)
 	}

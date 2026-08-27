@@ -272,15 +272,18 @@ func (app *WebApp) RemoveDevice(id string) bool {
 	app.devicesMu.RLock()
 	conn, exists := app.devices[id]
 	app.devicesMu.RUnlock()
+
 	if !exists {
 		return false
 	}
 
 	removed := false
+
 	conn.WithBalanceWriteFence(func() {
 		app.devicesMu.Lock()
 		if app.devices[id] == conn {
 			delete(app.devices, id)
+
 			removed = true
 		}
 		app.devicesMu.Unlock()
@@ -302,10 +305,12 @@ func (app *WebApp) removeDeviceIfMatch(id string, expected *webtypes.DeviceConne
 	}
 
 	removed := false
+
 	expected.WithBalanceWriteFence(func() {
 		app.devicesMu.Lock()
 		if app.devices[id] == expected {
 			delete(app.devices, id)
+
 			removed = true
 		}
 		app.devicesMu.Unlock()
@@ -992,8 +997,9 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	members := make([]zoneMemberView, 0, len(zone.Members))
 	var masterMember *zoneMemberView
+
+	members := make([]zoneMemberView, 0, len(zone.Members))
 
 	projection, projected := projectZoneInfo(zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
 	if projected {
@@ -1003,6 +1009,7 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 				master := member
 				masterMember = &master
 				masterName = member.Name
+
 				continue
 			}
 
@@ -1028,9 +1035,11 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 				if info := conn.Info(); info != nil {
 					member.Name = info.Name
 				}
+
 				status := conn.Status()
 				member.Connectivity = projectedConnectivity(status)
 				member.Available = member.Connectivity != webtypes.ConnectivityOffline
+
 				if status != nil && status.Volume != nil {
 					volume := status.Volume.ActualVolume
 					member.ActualVolume = &volume
@@ -1173,6 +1182,7 @@ func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	masterHwID := masterConn.DeviceInfo.DeviceID
+
 	slaveHwID := ""
 	if slaveConn, found := app.GetDevice(slaveIP); found && slaveConn.DeviceInfo != nil {
 		slaveHwID = slaveConn.DeviceInfo.DeviceID
@@ -1195,6 +1205,7 @@ func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
+
 		if strings.TrimSpace(slaveHwID) == "" {
 			app.sendError(w, "Slave device not found in current zone", http.StatusNotFound)
 			return

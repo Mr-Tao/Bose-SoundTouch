@@ -175,22 +175,27 @@ func (b *Balance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	}
 
 	*b = Balance{XMLName: start.Name, DeviceID: wire.DeviceID}
+
 	target := wire.TargetBalance
 	if target == nil {
 		target = wire.LegacyTargetBalance
 	}
+
 	actual := wire.ActualBalance
 	if actual == nil {
 		actual = wire.LegacyActualBalance
 	}
+
 	if target != nil {
 		b.TargetBalance = *target
 	}
+
 	if actual != nil {
 		b.ActualBalance = *actual
 	}
 
 	capabilityFields := 0
+
 	for _, present := range []bool{
 		wire.BalanceAvailable != nil,
 		wire.BalanceMin != nil,
@@ -201,9 +206,11 @@ func (b *Balance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 			capabilityFields++
 		}
 	}
+
 	if capabilityFields == 0 {
 		return nil
 	}
+
 	if capabilityFields != 4 {
 		return fmt.Errorf("incomplete balance capability response")
 	}
@@ -212,16 +219,20 @@ func (b *Balance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	b.BalanceMin = *wire.BalanceMin
 	b.BalanceMax = *wire.BalanceMax
 	b.BalanceDefault = *wire.BalanceDefault
+
 	b.CapabilityKnown = true
 	if _, _, _, _, ok := b.Capability(); !ok {
 		return fmt.Errorf("invalid balance capability range %d..%d with default %d", b.BalanceMin, b.BalanceMax, b.BalanceDefault)
 	}
+
 	if target == nil || actual == nil {
 		return fmt.Errorf("incomplete balance readback response")
 	}
+
 	if !ValidateBalanceLevelForRange(b.TargetBalance, b.BalanceMin, b.BalanceMax) {
 		return fmt.Errorf("invalid target balance level: %d", b.TargetBalance)
 	}
+
 	if !ValidateBalanceLevelForRange(b.ActualBalance, b.BalanceMin, b.BalanceMax) {
 		return fmt.Errorf("invalid actual balance level: %d", b.ActualBalance)
 	}
@@ -234,6 +245,7 @@ func (b *Balance) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
 	if start.Name.Local == "" {
 		start.Name.Local = "balance"
 	}
+
 	if b.CapabilityKnown {
 		if _, _, _, _, ok := b.Capability(); !ok {
 			return fmt.Errorf("invalid balance capability range %d..%d with default %d", b.BalanceMin, b.BalanceMax, b.BalanceDefault)
@@ -242,6 +254,7 @@ func (b *Balance) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
 
 	target := b.TargetBalance
 	actual := b.ActualBalance
+
 	wire := balanceXML{
 		DeviceID:      b.DeviceID,
 		TargetBalance: &target,

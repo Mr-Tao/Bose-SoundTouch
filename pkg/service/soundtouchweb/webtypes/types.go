@@ -340,8 +340,10 @@ func (c *DeviceConnection) ApplyBalanceReadback(refresh BalanceRefresh, balance 
 }
 
 func (c *DeviceConnection) balanceRefreshCurrentLocked(refresh BalanceRefresh) bool {
-	return refresh.groupGeneration == c.groupGeneration &&
-		refresh.groupGeneration == c.confirmedGroupGeneration &&
+	currentGroupGeneration := c.groupGeneration
+
+	return currentGroupGeneration == c.confirmedGroupGeneration &&
+		refresh.groupGeneration == currentGroupGeneration &&
 		refresh.balanceGeneration == c.balanceGen &&
 		reflect.DeepEqual(refresh.Group, c.Status().Group)
 }
@@ -351,8 +353,11 @@ func (c *DeviceConnection) balanceRefreshCurrentLocked(refresh BalanceRefresh) b
 type BassCapabilitiesFetchOutcome uint8
 
 const (
+	// BassCapabilitiesFetchFailed means no valid capability response was obtained.
 	BassCapabilitiesFetchFailed BassCapabilitiesFetchOutcome = iota
+	// BassCapabilitiesCacheHit means a previously validated response was reused.
 	BassCapabilitiesCacheHit
+	// BassCapabilitiesFetched means a fresh valid capability response was stored.
 	BassCapabilitiesFetched
 )
 
@@ -404,6 +409,7 @@ func (c *DeviceConnection) EnsureBassCapabilities(
 			err = fmt.Errorf("invalid bass capabilities: %w", validationErr)
 		}
 	}
+
 	if err == nil {
 		c.UpdateStatus(func(status *DeviceStatus) {
 			status.BassCapabilities = capabilities
@@ -419,6 +425,7 @@ func (c *DeviceConnection) EnsureBassCapabilities(
 	flight.outcome = flightOutcome
 	flight.err = err
 	c.bassCapabilitiesFlight = nil
+
 	close(flight.done)
 	c.bassCapabilitiesMu.Unlock()
 
@@ -635,9 +642,11 @@ func (c *DeviceConnection) UpdateStatus(mut func(*DeviceStatus)) {
 // request. Only the latest started request may later update Group.
 func (c *DeviceConnection) BeginGroupRefresh() uint64 {
 	var generation uint64
+
 	c.WithBalanceWriteFence(func() {
 		c.groupMu.Lock()
 		defer c.groupMu.Unlock()
+
 		c.balanceMu.Lock()
 		defer c.balanceMu.Unlock()
 
@@ -658,12 +667,14 @@ func (c *DeviceConnection) BeginGroupRefresh() uint64 {
 func (c *DeviceConnection) ApplyPolledGroup(generation uint64, group *models.Group) bool {
 	c.groupMu.Lock()
 	defer c.groupMu.Unlock()
+
 	c.balanceMu.Lock()
 	defer c.balanceMu.Unlock()
 
 	if generation != c.groupGeneration {
 		return false
 	}
+
 	c.confirmedGroupGeneration = generation
 
 	c.replaceGroup(normalizeGroup(group), time.Time{})
@@ -675,9 +686,11 @@ func (c *DeviceConnection) ApplyPolledGroup(generation uint64, group *models.Gro
 // in-flight /getGroup requests. Empty teardown events clear the current claim.
 func (c *DeviceConnection) ApplyGroupEvent(group *models.Group, activity time.Time) bool {
 	changed := false
+
 	c.WithBalanceWriteFence(func() {
 		c.groupMu.Lock()
 		defer c.groupMu.Unlock()
+
 		c.balanceMu.Lock()
 		defer c.balanceMu.Unlock()
 
@@ -694,6 +707,7 @@ func (c *DeviceConnection) replaceGroup(group *models.Group, activity time.Time)
 	changed := !reflect.DeepEqual(c.Status().Group, group)
 	c.UpdateStatus(func(s *DeviceStatus) {
 		s.Group = group
+
 		s.Balance = nil
 		if !activity.IsZero() {
 			s.LastActivity = activity
@@ -739,6 +753,7 @@ func (c *DeviceConnection) ApplyPolledZone(
 	}
 
 	master := strings.TrimSpace(zone.Master)
+
 	queriedDeviceID = strings.TrimSpace(queriedDeviceID)
 	if queriedDeviceID == "" ||
 		(master == "" && len(zone.Members) != 0) ||

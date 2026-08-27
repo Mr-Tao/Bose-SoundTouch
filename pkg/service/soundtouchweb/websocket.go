@@ -419,103 +419,149 @@ func (app *WebApp) UpdateDeviceStatus(deviceID string, conn *webtypes.DeviceConn
 	nameGeneration := conn.BeginNameRefresh()
 	zoneGeneration := conn.BeginZoneRefresh()
 
-	// Phase 1: slow network fetches. Local vars only, no shared state
-	// is touched yet. Errors are recorded so the merge below can tell
-	// "field N stayed unchanged" apart from "field N got refreshed".
-	nowPlaying, nowPlayingErr := conn.Client.GetNowPlaying()
-	name, nameErr := conn.Client.GetName()
-	volumeGeneration := conn.BeginVolumeRefresh()
-	volume, volumeErr := conn.Client.GetVolume()
-	presets, presetsErr := conn.Client.GetPresets()
-	sources, sourcesErr := conn.Client.GetSources()
-	bass, bassErr := conn.Client.GetBass()
-	bassCapabilitiesOutcome, _ := conn.EnsureBassCapabilities(conn.Client.GetBassCapabilities)
-	zone, zoneErr := conn.Client.GetZone()
-
-	var (
-		group          *models.Group
-		groupErr       error
-		balance        *models.Balance
-		balanceErr     error
-		balanceFetched bool
-	)
-
-	if stereoCapable {
-		group, groupErr = conn.Client.GetGroup()
-	}
-
-	groupAccepted := false
-	if stereoCapable && groupErr == nil {
-		groupAccepted = conn.ApplyPolledGroup(groupGeneration, group)
-	}
-
-	if groupAccepted && confirmedStereoBalanceMaster(conn.Info().DeviceID, group) {
-		conn.WithBalanceOperation(func() {
-			refresh, ok := conn.BeginBalanceRefresh()
-			if !ok || !sameGroupClaim(refresh.Group, group) || !app.balanceRefreshCurrent(deviceID, conn, refresh) {
-				return
-			}
-
-			balanceFetched = true
-			balance, balanceErr = conn.Client.GetBalance()
-			if balanceErr == nil && balance != nil {
-				app.applyBalanceReadback(deviceID, conn, refresh, balance)
-			}
-		})
-	}
+	poll := fetchDeviceStatus(conn)
+	stereo := app.fetchStereoStatus(deviceID, conn, stereoCapable, groupGeneration)
 
 	// Phase 2: fast merge. Only fields we successfully fetched
 	// overwrite; everything else keeps the value other goroutines may
 	// have just written.
-	statusUpdated := anyStatusFetchSucceeded(
-		nowPlayingErr,
-		nameErr,
-		volumeErr,
-		presetsErr,
-		sourcesErr,
-		bassErr,
-		zoneErr,
+	if poll.volumeErr == nil {
+		conn.ApplyPolledVolume(poll.volumeGeneration, poll.volume)
+	}
+
+	conn.CompleteHTTPPoll(
+		pollGeneration,
+		deviceStatusPollSucceeded(poll, stereo, stereoCapable),
+		time.Now(),
+		poll.merge,
 	)
-	if bassCapabilitiesOutcome == webtypes.BassCapabilitiesFetched {
-		statusUpdated = true
-	}
-	if stereoCapable && groupErr == nil {
-		statusUpdated = true
-	}
-	if balanceFetched && balanceErr == nil && balance != nil {
-		statusUpdated = true
-	}
-	if volumeErr == nil {
-		conn.ApplyPolledVolume(volumeGeneration, volume)
+
+	if poll.nameErr == nil {
+		conn.ApplyPolledName(nameGeneration, poll.name.Value)
 	}
 
-	conn.CompleteHTTPPoll(pollGeneration, statusUpdated, time.Now(), func(s *webtypes.DeviceStatus) {
-		if nowPlayingErr == nil {
-			s.NowPlaying = nowPlaying
+	if poll.zoneErr == nil {
+		if info := conn.Info(); info != nil {
+			conn.ApplyPolledZone(zoneGeneration, info.DeviceID, poll.zone)
+		}
+	}
+}
+
+type deviceStatusPoll struct {
+	nowPlaying              *models.NowPlaying
+	name                    *models.Name
+	volume                  *models.Volume
+	presets                 *models.Presets
+	sources                 *models.Sources
+	bass                    *models.Bass
+	zone                    *models.ZoneInfo
+	volumeGeneration        uint64
+	nowPlayingErr           error
+	nameErr                 error
+	volumeErr               error
+	presetsErr              error
+	sourcesErr              error
+	bassErr                 error
+	zoneErr                 error
+	bassCapabilitiesOutcome webtypes.BassCapabilitiesFetchOutcome
+}
+
+// fetchDeviceStatus performs the slow non-stereo reads without touching the
+// shared status snapshot. The caller merges successful fields afterwards.
+func fetchDeviceStatus(conn *webtypes.DeviceConnection) deviceStatusPoll {
+	var poll deviceStatusPoll
+
+	poll.nowPlaying, poll.nowPlayingErr = conn.Client.GetNowPlaying()
+	poll.name, poll.nameErr = conn.Client.GetName()
+	poll.volumeGeneration = conn.BeginVolumeRefresh()
+	poll.volume, poll.volumeErr = conn.Client.GetVolume()
+	poll.presets, poll.presetsErr = conn.Client.GetPresets()
+	poll.sources, poll.sourcesErr = conn.Client.GetSources()
+	poll.bass, poll.bassErr = conn.Client.GetBass()
+	poll.bassCapabilitiesOutcome, _ = conn.EnsureBassCapabilities(conn.Client.GetBassCapabilities)
+	poll.zone, poll.zoneErr = conn.Client.GetZone()
+
+	return poll
+}
+
+func (poll deviceStatusPoll) merge(status *webtypes.DeviceStatus) {
+	if poll.nowPlayingErr == nil {
+		status.NowPlaying = poll.nowPlaying
+	}
+
+	if poll.presetsErr == nil {
+		status.Presets = poll.presets
+	}
+
+	if poll.sourcesErr == nil {
+		status.Sources = poll.sources
+	}
+
+	if poll.bassErr == nil {
+		status.Bass = poll.bass
+	}
+}
+
+type stereoStatusPoll struct {
+	groupErr       error
+	balance        *models.Balance
+	balanceErr     error
+	balanceFetched bool
+}
+
+func (app *WebApp) fetchStereoStatus(
+	deviceID string,
+	conn *webtypes.DeviceConnection,
+	stereoCapable bool,
+	groupGeneration uint64,
+) stereoStatusPoll {
+	var poll stereoStatusPoll
+	if !stereoCapable {
+		return poll
+	}
+
+	group, err := conn.Client.GetGroup()
+
+	poll.groupErr = err
+	if err != nil || !conn.ApplyPolledGroup(groupGeneration, group) ||
+		!confirmedStereoBalanceMaster(conn.Info().DeviceID, group) {
+		return poll
+	}
+
+	conn.WithBalanceOperation(func() {
+		refresh, ok := conn.BeginBalanceRefresh()
+		if !ok || !sameGroupClaim(refresh.Group, group) ||
+			!app.balanceRefreshCurrent(deviceID, conn, refresh) {
+			return
 		}
 
-		if presetsErr == nil {
-			s.Presets = presets
-		}
+		poll.balanceFetched = true
 
-		if sourcesErr == nil {
-			s.Sources = sources
-		}
-
-		if bassErr == nil {
-			s.Bass = bass
+		poll.balance, poll.balanceErr = conn.Client.GetBalance()
+		if poll.balanceErr == nil && poll.balance != nil {
+			app.applyBalanceReadback(deviceID, conn, refresh, poll.balance)
 		}
 	})
 
-	if nameErr == nil {
-		conn.ApplyPolledName(nameGeneration, name.Value)
-	}
+	return poll
+}
 
-	if zoneErr == nil {
-		if info := conn.Info(); info != nil {
-			conn.ApplyPolledZone(zoneGeneration, info.DeviceID, zone)
-		}
-	}
+func deviceStatusPollSucceeded(
+	poll deviceStatusPoll,
+	stereo stereoStatusPoll,
+	stereoCapable bool,
+) bool {
+	return anyStatusFetchSucceeded(
+		poll.nowPlayingErr,
+		poll.nameErr,
+		poll.volumeErr,
+		poll.presetsErr,
+		poll.sourcesErr,
+		poll.bassErr,
+		poll.zoneErr,
+	) || poll.bassCapabilitiesOutcome == webtypes.BassCapabilitiesFetched ||
+		(stereoCapable && stereo.groupErr == nil) ||
+		(stereo.balanceFetched && stereo.balanceErr == nil && stereo.balance != nil)
 }
 
 func anyStatusFetchSucceeded(errors ...error) bool {

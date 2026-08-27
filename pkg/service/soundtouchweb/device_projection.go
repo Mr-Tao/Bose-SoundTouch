@@ -281,6 +281,7 @@ func newZoneProjectionCandidate(
 	degraded := false
 	groupVolume := 0
 	groupVolumeKnown := false
+
 	zoneMemberIPs := make(map[string]string, len(zone.Members))
 	for _, zoneMember := range zone.Members {
 		deviceID := strings.TrimSpace(zoneMember.DeviceID)
@@ -292,6 +293,7 @@ func newZoneProjectionCandidate(
 	for _, deviceID := range zone.GetAllDeviceIDs() {
 		deviceID = strings.TrimSpace(deviceID)
 		logicalID := physicalToLogical[deviceID]
+
 		controlID := logicalID
 		if controlID == "" {
 			controlID = zoneMemberIPs[deviceID]
@@ -316,29 +318,27 @@ func newZoneProjectionCandidate(
 
 			member.Connectivity = projectedConnectivity(view.Status)
 			member.Available = member.Connectivity != webtypes.ConnectivityOffline
+
 			if view.StereoPair != nil {
 				member.HardwareID = view.StereoPair.MasterDeviceID
+
 				member.DeviceIDs = member.DeviceIDs[:0]
 				for _, pairMember := range view.StereoPair.Members {
 					member.DeviceIDs = append(member.DeviceIDs, pairMember.DeviceID)
 				}
+
 				if view.StereoPair.Degraded {
 					degraded = true
 				}
 			}
 		}
 
-		for _, physicalID := range member.DeviceIDs {
-			if volume, ok := physicalVolume(byDeviceID, physicalID); ok {
-				groupVolumeKnown = true
-				if member.ActualVolume == nil || volume > *member.ActualVolume {
-					value := volume
-					member.ActualVolume = &value
-				}
+		member.ActualVolume = maximumPhysicalVolume(byDeviceID, member.DeviceIDs)
+		if member.ActualVolume != nil {
+			groupVolumeKnown = true
 
-				if volume > groupVolume {
-					groupVolume = volume
-				}
+			if *member.ActualVolume > groupVolume {
+				groupVolume = *member.ActualVolume
 			}
 		}
 
@@ -377,6 +377,24 @@ func newZoneProjectionCandidate(
 			Members:              members,
 		},
 	}, true
+}
+
+func maximumPhysicalVolume(byDeviceID map[string][]deviceProjectionEntry, deviceIDs []string) *int {
+	var actualVolume *int
+
+	for _, physicalID := range deviceIDs {
+		volume, ok := physicalVolume(byDeviceID, physicalID)
+		if !ok {
+			continue
+		}
+
+		if actualVolume == nil || volume > *actualVolume {
+			value := volume
+			actualVolume = &value
+		}
+	}
+
+	return actualVolume
 }
 
 func projectedConnectivity(status *webtypes.DeviceStatus) webtypes.Connectivity {

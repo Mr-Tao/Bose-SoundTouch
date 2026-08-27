@@ -243,7 +243,10 @@ func addBalanceBroadcastClient(t *testing.T, app *WebApp) *websocket.Conn {
 		}
 		serverConnection <- conn
 	}))
-	clientConnection, _, err := websocket.DefaultDialer.Dial("ws"+server.URL[len("http"):], nil)
+	clientConnection, response, err := websocket.DefaultDialer.Dial("ws"+server.URL[len("http"):], nil)
+	if response != nil {
+		_ = response.Body.Close()
+	}
 	if err != nil {
 		server.Close()
 		t.Fatalf("dial broadcast client: %v", err)
