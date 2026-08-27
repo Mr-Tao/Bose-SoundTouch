@@ -43,7 +43,7 @@ func (operation *stereoBalanceOperation) fail(status int, message string) {
 }
 
 // HandleStereoBalance sets and immediately verifies balance on the confirmed
-// LEFT/master represented by one logical stereo-pair card.
+// group master represented by one logical stereo-pair card.
 func (app *WebApp) HandleStereoBalance(w http.ResponseWriter, r *http.Request) {
 	controlID := strings.TrimSpace(chi.URLParam(r, "id"))
 
@@ -86,7 +86,7 @@ func (app *WebApp) runStereoBalanceOperation(
 	operation *stereoBalanceOperation,
 ) {
 	if !app.confirmedStereoBalanceTarget(controlID, conn) {
-		operation.fail(http.StatusConflict, "Device is not the LEFT/master of a confirmed stereo pair")
+		operation.fail(http.StatusConflict, "Device is not the master of a confirmed stereo pair")
 
 		return
 	}
@@ -258,29 +258,11 @@ func (app *WebApp) confirmedStereoBalanceTarget(controlID string, conn *webtypes
 		return false
 	}
 
-	for _, member := range view.StereoPair.Members {
-		if strings.EqualFold(strings.TrimSpace(member.Role), "LEFT") &&
-			strings.TrimSpace(member.DeviceID) == strings.TrimSpace(view.StereoPair.MasterDeviceID) {
-			return true
-		}
-	}
-
-	return false
+	return true
 }
 
 func confirmedStereoBalanceMaster(deviceID string, group *models.Group) bool {
-	if !validMasterGroup(deviceID, group) {
-		return false
-	}
-
-	masterID := strings.TrimSpace(group.MasterDeviceID)
-	for _, member := range group.Roles.Roles {
-		if strings.TrimSpace(member.DeviceID) == masterID && strings.EqualFold(strings.TrimSpace(member.Role), "LEFT") {
-			return true
-		}
-	}
-
-	return false
+	return validMasterGroup(deviceID, group)
 }
 
 func (app *WebApp) balanceRefreshCurrent(

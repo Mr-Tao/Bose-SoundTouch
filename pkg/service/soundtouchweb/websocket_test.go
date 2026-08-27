@@ -533,22 +533,26 @@ func TestUpdateDeviceStatusSkipsGroupForNonStereoModel(t *testing.T) {
 }
 
 func TestUpdateDeviceStatusPollsBalanceOnlyForConfirmedStereoMaster(t *testing.T) {
-	speaker := newBalanceTestSpeaker(t, 4)
-	app := NewWebApp()
-	left, right := addStereoBalancePair(app, speaker, "LEFT")
-	right.Client = client.NewClientFromHost(speaker.server.URL)
+	for _, masterRole := range []string{"LEFT", "RIGHT"} {
+		t.Run(masterRole+" role master", func(t *testing.T) {
+			speaker := newBalanceTestSpeaker(t, 4)
+			app := NewWebApp()
+			master, member := addStereoBalancePair(app, speaker, masterRole)
+			member.Client = client.NewClientFromHost(speaker.server.URL)
 
-	app.UpdateDeviceStatus("192.0.2.20", right)
-	if gets := speaker.getCount(); gets != 0 {
-		t.Fatalf("RIGHT/member balance GETs = %d, want 0", gets)
-	}
+			app.UpdateDeviceStatus("192.0.2.20", member)
+			if gets := speaker.getCount(); gets != 0 {
+				t.Fatalf("non-master balance GETs = %d, want 0", gets)
+			}
 
-	app.UpdateDeviceStatus("192.0.2.10", left)
-	if gets := speaker.getCount(); gets != 1 {
-		t.Fatalf("LEFT/master balance GETs = %d, want 1", gets)
-	}
-	if got := left.Status().Balance; got == nil || got.TargetBalance != 4 || got.ActualBalance != 4 {
-		t.Fatalf("polled balance = %+v, want 4", got)
+			app.UpdateDeviceStatus("192.0.2.10", master)
+			if gets := speaker.getCount(); gets != 1 {
+				t.Fatalf("master balance GETs = %d, want 1", gets)
+			}
+			if got := master.Status().Balance; got == nil || got.TargetBalance != 4 || got.ActualBalance != 4 {
+				t.Fatalf("polled balance = %+v, want 4", got)
+			}
+		})
 	}
 }
 

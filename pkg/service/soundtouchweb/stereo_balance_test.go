@@ -394,7 +394,7 @@ func TestHandleStereoBalanceUsesConfirmedCapabilityRange(t *testing.T) {
 	}
 }
 
-func TestHandleStereoBalanceRequiresConfirmedLeftMasterCard(t *testing.T) {
+func TestHandleStereoBalanceRequiresConfirmedMasterCard(t *testing.T) {
 	t.Run("ordinary zone", func(t *testing.T) {
 		speaker := newBalanceTestSpeaker(t, 0)
 		app := NewWebApp()
@@ -427,14 +427,20 @@ func TestHandleStereoBalanceRequiresConfirmedLeftMasterCard(t *testing.T) {
 		}
 	})
 
-	t.Run("master role is not left", func(t *testing.T) {
+	t.Run("right-role master", func(t *testing.T) {
 		speaker := newBalanceTestSpeaker(t, 0)
 		app := NewWebApp()
-		addStereoBalancePair(app, speaker, "RIGHT")
+		master, _ := addStereoBalancePair(app, speaker, "RIGHT")
 		response := httptest.NewRecorder()
 		app.HandleStereoBalance(response, stereoBalanceRequest("0"))
-		if response.Code != http.StatusConflict {
-			t.Fatalf("status = %d, want 409: %s", response.Code, response.Body.String())
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+		}
+		if got := speaker.postedLevels(); fmt.Sprint(got) != "[0]" {
+			t.Fatalf("right-role master balance posts = %v, want [0]", got)
+		}
+		if got := master.Status().Balance; got == nil || got.TargetBalance != 0 || got.ActualBalance != 0 {
+			t.Fatalf("right-role master cached balance = %+v, want confirmed readback 0", got)
 		}
 	})
 }

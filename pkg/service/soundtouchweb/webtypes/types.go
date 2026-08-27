@@ -255,7 +255,7 @@ func (c *DeviceConnection) ApplyVolumeEvent(volume *models.Volume, activity time
 
 // WithBalanceOperation serializes balance endpoint traffic for this physical
 // speaker. Stereo-balance writes and periodic readbacks use this seam so only
-// the confirmed LEFT/master is accessed and operations cannot overlap.
+// the confirmed group master is accessed and operations cannot overlap.
 func (c *DeviceConnection) WithBalanceOperation(operation func()) {
 	c.balanceOperationMu.Lock()
 	defer c.balanceOperationMu.Unlock()

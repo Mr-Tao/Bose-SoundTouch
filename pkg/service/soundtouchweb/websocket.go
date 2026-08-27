@@ -408,7 +408,7 @@ func (app *WebApp) UpdateDeviceStatus(deviceID string, conn *webtypes.DeviceConn
 
 	// /getGroup and /balance are ST10-only; ST20/ST30 may accept these requests
 	// but never reply. Balance is narrower still: this same poll must first
-	// confirm the physical device as the LEFT/master.
+	// confirm the physical device as the stereo-pair group master.
 	stereoCapable := stereoPairCapable(conn.DeviceInfo)
 
 	var groupGeneration uint64
