@@ -188,7 +188,7 @@ func TestZoneCacheRequiresAuthoritativeMaster(t *testing.T) {
 	}
 }
 
-func TestZoneCacheRejectsStaleRefreshAndClearsOnMasterStandalone(t *testing.T) {
+func TestZoneCacheRejectsStaleRefreshAndClearsOnEmptyStandalone(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
 	zone := &models.ZoneInfo{
 		Master: "MASTER",
@@ -205,21 +205,44 @@ func TestZoneCacheRejectsStaleRefreshAndClearsOnMasterStandalone(t *testing.T) {
 
 	stale := conn.BeginZoneRefresh()
 	standalone := conn.BeginZoneRefresh()
-	if conn.ApplyPolledZone(stale, "MASTER", &models.ZoneInfo{Master: "MASTER"}) {
+	if conn.ApplyPolledZone(stale, "MASTER", &models.ZoneInfo{Master: " \t "}) {
 		t.Fatal("stale standalone response was accepted")
 	}
 	if conn.Status().Zone == nil {
 		t.Fatal("stale response cleared cached topology")
 	}
 
-	if !conn.ApplyPolledZone(standalone, "MASTER", &models.ZoneInfo{
-		Master:  "MASTER",
-		Members: []models.Member{{DeviceID: "MASTER", IP: "192.0.2.10"}},
-	}) {
-		t.Fatal("master-confirmed standalone response did not clear the zone")
+	if !conn.ApplyPolledZone(standalone, "MASTER", &models.ZoneInfo{}) {
+		t.Fatal("empty standalone response did not clear the zone")
 	}
 	if conn.Status().Zone != nil {
 		t.Fatalf("standalone topology remained cached: %+v", conn.Status().Zone)
+	}
+}
+
+func TestZoneCacheRejectsMalformedMasterlessResponse(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	malformed := conn.BeginZoneRefresh()
+	if conn.ApplyPolledZone(malformed, "MASTER", &models.ZoneInfo{
+		Members: []models.Member{{DeviceID: "MEMBER", IP: "192.0.2.20"}},
+	}) {
+		t.Fatal("masterless response with members was accepted")
+	}
+	if conn.Status().Zone == nil || conn.Status().Zone.Master != "MASTER" {
+		t.Fatalf("malformed response cleared cached topology: %+v", conn.Status().Zone)
 	}
 }
 

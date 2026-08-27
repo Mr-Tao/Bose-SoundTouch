@@ -723,8 +723,9 @@ func (c *DeviceConnection) BeginZoneRefresh() uint64 {
 }
 
 // ApplyPolledZone stores topology only when it was returned by the queried
-// master and no newer refresh superseded it. A master-confirmed standalone
-// response clears the cached zone; member responses are ignored.
+// master and no newer refresh superseded it. An empty response from the
+// queried device authoritatively clears the cached zone; member responses and
+// malformed masterless responses are ignored.
 func (c *DeviceConnection) ApplyPolledZone(
 	generation uint64,
 	queriedDeviceID string,
@@ -733,8 +734,15 @@ func (c *DeviceConnection) ApplyPolledZone(
 	c.zoneMu.Lock()
 	defer c.zoneMu.Unlock()
 
-	if generation != c.zoneGeneration || zone == nil ||
-		strings.TrimSpace(zone.Master) != strings.TrimSpace(queriedDeviceID) {
+	if generation != c.zoneGeneration || zone == nil {
+		return false
+	}
+
+	master := strings.TrimSpace(zone.Master)
+	queriedDeviceID = strings.TrimSpace(queriedDeviceID)
+	if queriedDeviceID == "" ||
+		(master == "" && len(zone.Members) != 0) ||
+		(master != "" && master != queriedDeviceID) {
 		return false
 	}
 
