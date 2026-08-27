@@ -104,6 +104,7 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 					r.Post("/", app.HandleCreateStereoPair)
 					r.Patch("/", app.HandleRenameStereoPair)
 					r.Delete("/", app.HandleDissolveStereoPair)
+					r.Post("/balance/{level}", app.HandleStereoBalance)
 				})
 
 				// Play a result from a content provider on this device.

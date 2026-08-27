@@ -299,12 +299,10 @@ Sets balance settings. Value must be within the range specified by `balanceMin` 
 
 **Request XML:**
 ```xml
-<balance>
-  <targetBalance>0</targetBalance>
-</balance>
+<balance>0</balance>
 ```
 
-**Range Examples:**
+**Example Values (when the device advertises `-7..7`):**
 - `-7` = left speaker
 - `0` = centered
 - `7` = right speaker

@@ -304,9 +304,16 @@ func TestRefreshZonesAfterEventPreservesCacheOnMasterError(t *testing.T) {
 
 func TestUpdateDeviceStatusSkipsGroupForNonStereoModel(t *testing.T) {
 	var groupRequested atomic.Bool
+	var balanceRequested atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/getGroup" {
 			groupRequested.Store(true)
+			http.Error(w, "unsupported endpoint", http.StatusInternalServerError)
+
+			return
+		}
+		if r.URL.Path == "/balance" {
+			balanceRequested.Store(true)
 			http.Error(w, "unsupported endpoint", http.StatusInternalServerError)
 
 			return
@@ -346,6 +353,152 @@ func TestUpdateDeviceStatusSkipsGroupForNonStereoModel(t *testing.T) {
 
 	if groupRequested.Load() {
 		t.Fatal("UpdateDeviceStatus requested /getGroup for a non-stereo model")
+	}
+	if balanceRequested.Load() {
+		t.Fatal("UpdateDeviceStatus requested /balance for a non-stereo model")
+	}
+}
+
+func TestUpdateDeviceStatusPollsBalanceOnlyForConfirmedStereoMaster(t *testing.T) {
+	speaker := newBalanceTestSpeaker(t, 4)
+	app := NewWebApp()
+	left, right := addStereoBalancePair(app, speaker, "LEFT")
+	right.Client = client.NewClientFromHost(speaker.server.URL)
+
+	app.UpdateDeviceStatus("192.0.2.20", right)
+	if gets := speaker.getCount(); gets != 0 {
+		t.Fatalf("RIGHT/member balance GETs = %d, want 0", gets)
+	}
+
+	app.UpdateDeviceStatus("192.0.2.10", left)
+	if gets := speaker.getCount(); gets != 1 {
+		t.Fatalf("LEFT/master balance GETs = %d, want 1", gets)
+	}
+	if got := left.Status().Balance; got == nil || got.TargetBalance != 4 || got.ActualBalance != 4 {
+		t.Fatalf("polled balance = %+v, want 4", got)
+	}
+}
+
+func TestUpdateDeviceStatusRequiresFreshMasterGroupBeforeBalance(t *testing.T) {
+	t.Run("failed group refresh", func(t *testing.T) {
+		speaker := newBalanceTestSpeaker(t, 3)
+		speaker.groupStatus = http.StatusInternalServerError
+		app := NewWebApp()
+		left, _ := addStereoBalancePair(app, speaker, "LEFT")
+
+		app.UpdateDeviceStatus("192.0.2.10", left)
+
+		if gets := speaker.getCount(); gets != 0 {
+			t.Fatalf("balance GETs = %d, want 0 after failed group refresh", gets)
+		}
+		if got := left.Status().Balance; got != nil {
+			t.Fatalf("stale balance survived an unconfirmed group generation: %+v", got)
+		}
+	})
+
+	t.Run("fresh unpaired group", func(t *testing.T) {
+		speaker := newBalanceTestSpeaker(t, 3)
+		app := NewWebApp()
+		left, _ := addStereoBalancePair(app, speaker, "LEFT")
+		speaker.mu.Lock()
+		speaker.group = &models.Group{}
+		speaker.mu.Unlock()
+
+		app.UpdateDeviceStatus("192.0.2.10", left)
+
+		if gets := speaker.getCount(); gets != 0 {
+			t.Fatalf("unpaired ST10 balance GETs = %d, want 0", gets)
+		}
+		if left.Status().Group != nil || left.Status().Balance != nil {
+			t.Fatalf("unpaired refresh retained stereo state: %+v", left.Status())
+		}
+	})
+}
+
+func TestUpdateDeviceStatusRejectsBalanceAfterGroupEvent(t *testing.T) {
+	speaker := newBalanceTestSpeaker(t, 3)
+	speaker.getStarted = make(chan struct{}, 1)
+	speaker.releaseGet = make(chan struct{})
+	app := NewWebApp()
+	left, _ := addStereoBalancePair(app, speaker, "LEFT")
+
+	done := make(chan struct{})
+	go func() {
+		app.UpdateDeviceStatus("192.0.2.10", left)
+		close(done)
+	}()
+	<-speaker.getStarted
+
+	eventGroup := stereoBalanceGroup("LEFT")
+	eventGroup.ID = "pair-event"
+	left.ApplyGroupEvent(eventGroup, time.Now())
+	close(speaker.releaseGet)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("status poll did not finish")
+	}
+	if got := left.Status().Group; got == nil || got.ID != "pair-event" {
+		t.Fatalf("group event was lost: %+v", got)
+	}
+	if got := left.Status().Balance; got != nil {
+		t.Fatalf("stale poll balance crossed group event: %+v", got)
+	}
+}
+
+func TestBalancePollSerializesWithPOSTAndPOSTWins(t *testing.T) {
+	speaker := newBalanceTestSpeaker(t, 0)
+	speaker.getStarted = make(chan struct{}, 2)
+	speaker.releaseGet = make(chan struct{})
+	speaker.postStarted = make(chan int, 1)
+	app := NewWebApp()
+	left, _ := addStereoBalancePair(app, speaker, "LEFT")
+
+	pollDone := make(chan struct{})
+	go func() {
+		app.UpdateDeviceStatus("192.0.2.10", left)
+		close(pollDone)
+	}()
+	<-speaker.getStarted
+
+	response := httptest.NewRecorder()
+	postDone := make(chan struct{})
+	go func() {
+		app.HandleStereoBalance(response, stereoBalanceRequest("5"))
+		close(postDone)
+	}()
+	select {
+	case post := <-speaker.postStarted:
+		t.Fatalf("POST %d started while the poll readback was in flight", post)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(speaker.releaseGet)
+	select {
+	case post := <-speaker.postStarted:
+		if post != 1 {
+			t.Fatalf("started POST = %d, want 1", post)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("POST did not start after the poll readback completed")
+	}
+
+	for name, done := range map[string]<-chan struct{}{"poll": pollDone, "POST": postDone} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not finish", name)
+		}
+	}
+	if response.Code != http.StatusOK {
+		t.Fatalf("POST status = %d: %s", response.Code, response.Body.String())
+	}
+	if got := left.Status().Balance; got == nil || got.ActualBalance != 5 {
+		t.Fatalf("final balance = %+v, want POST readback 5", got)
+	}
+	if gets := speaker.getCount(); gets != 2 {
+		t.Fatalf("balance GETs = %d, want poll plus POST", gets)
 	}
 }
 

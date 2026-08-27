@@ -414,6 +414,101 @@ func TestApplyVolumeEventSupersedesPolledVolume(t *testing.T) {
 	}
 }
 
+func TestNewerBalanceReadbackSupersedesOlderPoll(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{Group: &models.Group{ID: "pair-1"}})
+	staleRefresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("initial balance refresh was rejected")
+	}
+	newRefresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("new balance refresh was rejected")
+	}
+
+	if !conn.ApplyBalanceReadback(newRefresh, &models.Balance{TargetBalance: 6, ActualBalance: 6}) {
+		t.Fatal("newest balance readback was rejected")
+	}
+	if conn.ApplyBalanceReadback(staleRefresh, &models.Balance{TargetBalance: -6, ActualBalance: -6}) {
+		t.Fatal("stale balance readback replaced a newer result")
+	}
+	if got := conn.Status().Balance; got == nil || got.ActualBalance != 6 {
+		t.Fatalf("balance = %+v, want newest readback 6", got)
+	}
+}
+
+func TestBalanceReadbackRejectedAcrossTeardownAndRepair(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{
+		Group:   &models.Group{ID: "pair-1", MasterDeviceID: "left"},
+		Balance: &models.Balance{TargetBalance: 2, ActualBalance: 2},
+	})
+
+	staleRefresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("initial balance refresh was rejected")
+	}
+	conn.ApplyGroupEvent(&models.Group{}, time.Now())
+	conn.ApplyGroupEvent(&models.Group{ID: "pair-2", MasterDeviceID: "left"}, time.Now())
+
+	if conn.ApplyBalanceReadback(staleRefresh, &models.Balance{TargetBalance: 5, ActualBalance: 5}) {
+		t.Fatal("pre-teardown readback was applied to a replacement pair")
+	}
+	if got := conn.Status().Balance; got != nil {
+		t.Fatalf("balance = %+v, want unknown after re-pair", got)
+	}
+
+	freshRefresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("replacement pair balance refresh was rejected")
+	}
+	if !conn.ApplyBalanceReadback(freshRefresh, &models.Balance{TargetBalance: -3, ActualBalance: -3}) {
+		t.Fatal("replacement pair readback was rejected")
+	}
+}
+
+func TestDeviceStatusBalanceJSON(t *testing.T) {
+	status := DeviceStatus{Balance: &models.Balance{
+		BalanceAvailable: true,
+		BalanceMin:       -12,
+		BalanceMax:       9,
+		BalanceDefault:   1,
+		TargetBalance:    8,
+		ActualBalance:    7,
+		CapabilityKnown:  true,
+	}}
+
+	payload, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("Marshal DeviceStatus: %v", err)
+	}
+
+	var decoded struct {
+		Balance *models.Balance `json:"balance"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("Unmarshal DeviceStatus: %v", err)
+	}
+	if decoded.Balance == nil || !decoded.Balance.CapabilityKnown || !decoded.Balance.BalanceAvailable ||
+		decoded.Balance.BalanceMin != -12 || decoded.Balance.BalanceMax != 9 ||
+		decoded.Balance.BalanceDefault != 1 || decoded.Balance.TargetBalance != 8 ||
+		decoded.Balance.ActualBalance != 7 {
+		t.Fatalf("balance did not round-trip in status JSON: %+v", decoded.Balance)
+	}
+
+	emptyPayload, err := json.Marshal(DeviceStatus{})
+	if err != nil {
+		t.Fatalf("Marshal empty DeviceStatus: %v", err)
+	}
+	var emptyDecoded map[string]json.RawMessage
+	if err := json.Unmarshal(emptyPayload, &emptyDecoded); err != nil {
+		t.Fatalf("Unmarshal empty DeviceStatus: %v", err)
+	}
+	if _, ok := emptyDecoded["balance"]; ok {
+		t.Errorf("nil balance should be omitted, JSON = %s", emptyPayload)
+	}
+}
+
 func TestDeviceStatusGroupJSON(t *testing.T) {
 	status := DeviceStatus{
 		Group: &models.Group{

@@ -264,45 +264,58 @@ func (app *WebApp) TouchDevice(id string) bool {
 
 // RemoveDevice removes the device registered under id and stops its
 // background goroutines (status poller + WebSocket reconnect loop) via
-// conn.Close. Returns true if id was present. Close runs outside the
-// registry lock because it performs network I/O (WebSocket disconnect).
+// conn.Close. Registry removal shares the connection's balance-write fence
+// so it cannot replace a connection between a final identity check and balance
+// write initiation. Close runs outside both locks because it performs network
+// I/O (WebSocket disconnect).
 func (app *WebApp) RemoveDevice(id string) bool {
-	app.devicesMu.Lock()
-
-	conn, ok := app.devices[id]
-	if ok {
-		delete(app.devices, id)
+	app.devicesMu.RLock()
+	conn, exists := app.devices[id]
+	app.devicesMu.RUnlock()
+	if !exists {
+		return false
 	}
 
-	app.devicesMu.Unlock()
+	removed := false
+	conn.WithBalanceWriteFence(func() {
+		app.devicesMu.Lock()
+		if app.devices[id] == conn {
+			delete(app.devices, id)
+			removed = true
+		}
+		app.devicesMu.Unlock()
+	})
 
-	if ok {
+	if removed {
 		conn.Close()
 	}
 
-	return ok
+	return removed
 }
 
 // removeDeviceIfMatch removes id only when it still points at expected. It is
 // used when an asynchronous probe must not delete a newer replacement that was
 // registered under the same host.
 func (app *WebApp) removeDeviceIfMatch(id string, expected *webtypes.DeviceConnection) bool {
-	app.devicesMu.Lock()
-
-	current, ok := app.devices[id]
-	if ok && current == expected {
-		delete(app.devices, id)
-	} else {
-		ok = false
+	if expected == nil {
+		return false
 	}
 
-	app.devicesMu.Unlock()
+	removed := false
+	expected.WithBalanceWriteFence(func() {
+		app.devicesMu.Lock()
+		if app.devices[id] == expected {
+			delete(app.devices, id)
+			removed = true
+		}
+		app.devicesMu.Unlock()
+	})
 
-	if ok {
+	if removed {
 		expected.Close()
 	}
 
-	return ok
+	return removed
 }
 
 // HandleAPIDevices returns all devices as JSON

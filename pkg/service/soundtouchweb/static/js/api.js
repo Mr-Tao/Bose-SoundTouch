@@ -13,6 +13,7 @@ export const api = {
     key: (id, key) => req(`/api/control/devices/${id}/key/${key}`, { method: 'POST' }),
     volume: (id, level) => req(`/api/control/devices/${id}/volume/${level}`, { method: 'POST' }),
     zoneVolume: (id, level) => req(`/api/control/devices/${id}/zone/volume/${level}`, { method: 'POST' }),
+    stereoBalance: (id, level) => req(`/api/control/devices/${id}/stereo-pair/balance/${level}`, { method: 'POST' }),
     bass: (id, level) => req(`/api/control/devices/${id}/action/bass`, {
         method: 'POST',
         headers: JSON_HEADERS,

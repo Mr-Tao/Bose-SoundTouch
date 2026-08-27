@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createLatestWinsScheduler } from '../static/js/zoneVolumeScheduler.mjs';
+import { createLatestWinsScheduler } from '../static/js/latestWinsScheduler.mjs';
 
 function deferred() {
     let resolve;

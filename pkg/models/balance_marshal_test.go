@@ -32,8 +32,8 @@ func TestBalanceMarshalXML(t *testing.T) {
 	// Check that XML contains expected elements
 	expectedElements := []string{
 		`deviceID="1234567890AB"`,
-		`<targetbalance>-25</targetbalance>`,
-		`<actualbalance>-25</actualbalance>`,
+		`<targetBalance>-25</targetBalance>`,
+		`<actualBalance>-25</actualBalance>`,
 	}
 
 	for _, expected := range expectedElements {
@@ -66,8 +66,8 @@ func TestBalanceMarshalXML_PositiveValue(t *testing.T) {
 	xmlStr := buf.String()
 	expectedElements := []string{
 		`deviceID="ABCDEF123456"`,
-		`<targetbalance>30</targetbalance>`,
-		`<actualbalance>30</actualbalance>`,
+		`<targetBalance>30</targetBalance>`,
+		`<actualBalance>30</actualBalance>`,
 	}
 
 	for _, expected := range expectedElements {
@@ -100,8 +100,8 @@ func TestBalanceMarshalXML_ZeroValue(t *testing.T) {
 	xmlStr := buf.String()
 	expectedElements := []string{
 		`deviceID="ZERO0000TEST"`,
-		`<targetbalance>0</targetbalance>`,
-		`<actualbalance>0</actualbalance>`,
+		`<targetBalance>0</targetBalance>`,
+		`<actualBalance>0</actualBalance>`,
 	}
 
 	for _, expected := range expectedElements {
@@ -134,8 +134,8 @@ func TestBalanceMarshalXML_ExtremeValues(t *testing.T) {
 	xmlStr := buf.String()
 	expectedElements := []string{
 		`deviceID="EXTREME_TEST"`,
-		`<targetbalance>-50</targetbalance>`,
-		`<actualbalance>50</actualbalance>`,
+		`<targetBalance>-50</targetBalance>`,
+		`<actualBalance>50</actualBalance>`,
 	}
 
 	for _, expected := range expectedElements {

@@ -198,6 +198,7 @@ POST     /api/control/devices/{id}/providers/tts/play                 soundtouch
 POST     /api/control/devices/{id}/providers/tunein/play              soundtouchweb.(*WebApp).HandlePlayTuneIn-fm
 POST     /api/control/devices/{id}/providers/url/play                 soundtouchweb.(*WebApp).HandlePlayURL-fm
 POST     /api/control/devices/{id}/stereo-pair/                       soundtouchweb.(*WebApp).HandleCreateStereoPair-fm
+POST     /api/control/devices/{id}/stereo-pair/balance/{level}        soundtouchweb.(*WebApp).HandleStereoBalance-fm
 POST     /api/control/devices/{id}/volume/{volume}                    soundtouchweb.(*WebApp).HandleDirectVolumeControl-fm
 POST     /api/control/devices/{id}/zone/add/{slaveId}                 soundtouchweb.(*WebApp).HandleZoneAdd-fm
 POST     /api/control/devices/{id}/zone/dissolve                      soundtouchweb.(*WebApp).HandleZoneDissolve-fm

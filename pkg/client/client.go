@@ -57,7 +57,7 @@
 //		log.Fatal(err)
 //	}
 //
-//	err = client.SetBalance(-10)  // Range: -50 (left) to +50 (right)
+//	err = client.SetBalance(-7)   // Conservative fallback range: -7 to +7
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -132,7 +132,7 @@
 //   - Playback Control (Play/Pause/Stop/Next/Previous/Key commands)
 //   - Volume Control (Get/Set/Increment/Decrement)
 //   - Bass Control (-9 to +9 range)
-//   - Balance Control (-50 to +50 range)
+//   - Balance Control (device-advertised range)
 //   - Source Selection (Spotify, Bluetooth, AUX, Radio, etc.)
 //   - Preset Management (Get configured presets)
 //   - Clock/Time Management
@@ -737,11 +737,13 @@ func (c *Client) GetBalance() (*models.Balance, error) {
 
 // SetBalance sets the balance level using the /balance endpoint
 func (c *Client) SetBalance(level int) error {
-	if !models.ValidateBalanceLevel(level) {
-		return fmt.Errorf("invalid balance level: %d (must be between %d and %d)", level, models.BalanceLevelMin, models.BalanceLevelMax)
-	}
+	return c.SetBalanceForRange(level, models.BalanceLevelMin, models.BalanceLevelMax)
+}
 
-	balanceReq, err := models.NewBalanceRequest(level)
+// SetBalanceForRange sets balance after validating against a capability range
+// obtained from the same device.
+func (c *Client) SetBalanceForRange(level, minLevel, maxLevel int) error {
+	balanceReq, err := models.NewBalanceRequestForRange(level, minLevel, maxLevel)
 	if err != nil {
 		return fmt.Errorf("failed to create balance request: %w", err)
 	}
@@ -757,32 +759,31 @@ func (c *Client) SetBalanceSafe(level int) error {
 
 // IncreaseBalance increases balance by the specified amount (with safety limits)
 func (c *Client) IncreaseBalance(amount int) (*models.Balance, error) {
-	currentBalance, err := c.GetBalance()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current balance: %w", err)
-	}
-
-	newLevel := models.ClampBalanceLevel(currentBalance.GetLevel() + amount)
-
-	err = c.SetBalance(newLevel)
-	if err != nil {
-		return nil, fmt.Errorf("failed to set balance: %w", err)
-	}
-
-	// Return updated balance
-	return c.GetBalance()
+	return c.adjustBalance(amount)
 }
 
 // DecreaseBalance decreases balance by the specified amount (with safety limits)
 func (c *Client) DecreaseBalance(amount int) (*models.Balance, error) {
+	return c.adjustBalance(-amount)
+}
+
+func (c *Client) adjustBalance(delta int) (*models.Balance, error) {
 	currentBalance, err := c.GetBalance()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current balance: %w", err)
 	}
 
-	newLevel := models.ClampBalanceLevel(currentBalance.GetLevel() - amount)
+	minLevel, maxLevel := models.BalanceLevelMin, models.BalanceLevelMax
+	available, advertisedMin, advertisedMax, _, capabilityKnown := currentBalance.Capability()
+	if capabilityKnown {
+		if !available {
+			return nil, fmt.Errorf("failed to set balance: balance is unavailable")
+		}
+		minLevel, maxLevel = advertisedMin, advertisedMax
+	}
+	newLevel := models.ClampBalanceLevelForRange(currentBalance.GetLevel()+delta, minLevel, maxLevel)
 
-	err = c.SetBalance(newLevel)
+	err = c.SetBalanceForRange(newLevel, minLevel, maxLevel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to set balance: %w", err)
 	}

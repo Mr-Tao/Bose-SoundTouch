@@ -709,8 +709,8 @@ Balance control commands.
 # Get current balance
 soundtouch-cli --host <device> balance get
 
-# Set balance (-50 to 50, negative=left, positive=right)
-soundtouch-cli --host <device> balance set --level <-50 to 50>
+# Set balance (validated against the device-advertised range; -7 to 7 fallback)
+soundtouch-cli --host <device> balance set --level <integer>
 
 # Shift balance left
 soundtouch-cli --host <device> balance left [--amount <1-10>]
@@ -727,7 +727,7 @@ soundtouch-cli --host <device> balance center
 # Get balance
 soundtouch-cli --host 192.0.2.10 balance get
 
-# Set balance 10 units to the right
+# Set balance 10 units to the right on a device advertising that range
 soundtouch-cli --host 192.0.2.10 balance set --level 10
 
 # Shift left by 5 units (default)

@@ -398,7 +398,7 @@ func sleepOrDone(conn *webtypes.DeviceConnection, d time.Duration) bool {
 // stays fast and never retries slow IO. A speaker event that arrives after the
 // poll starts prevents the older payload from merging, while the poll may still
 // update connectivity health.
-func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection) {
+func (app *WebApp) UpdateDeviceStatus(deviceID string, conn *webtypes.DeviceConnection) {
 	// Skip status update if client is not available (e.g., in tests)
 	if conn.Client == nil {
 		return
@@ -406,7 +406,9 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 
 	pollGeneration := conn.BeginHTTPPoll()
 
-	// /getGroup is ST10-only; ST20/ST30 may accept the request but never reply.
+	// /getGroup and /balance are ST10-only; ST20/ST30 may accept these requests
+	// but never reply. Balance is narrower still: this same poll must first
+	// confirm the physical device as the LEFT/master.
 	stereoCapable := stereoPairCapable(conn.DeviceInfo)
 
 	var groupGeneration uint64
@@ -430,12 +432,35 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	zone, zoneErr := conn.Client.GetZone()
 
 	var (
-		group    *models.Group
-		groupErr error
+		group          *models.Group
+		groupErr       error
+		balance        *models.Balance
+		balanceErr     error
+		balanceFetched bool
 	)
 
 	if stereoCapable {
 		group, groupErr = conn.Client.GetGroup()
+	}
+
+	groupAccepted := false
+	if stereoCapable && groupErr == nil {
+		groupAccepted = conn.ApplyPolledGroup(groupGeneration, group)
+	}
+
+	if groupAccepted && confirmedStereoBalanceMaster(conn.Info().DeviceID, group) {
+		conn.WithBalanceOperation(func() {
+			refresh, ok := conn.BeginBalanceRefresh()
+			if !ok || !sameGroupClaim(refresh.Group, group) || !app.balanceRefreshCurrent(deviceID, conn, refresh) {
+				return
+			}
+
+			balanceFetched = true
+			balance, balanceErr = conn.Client.GetBalance()
+			if balanceErr == nil && balance != nil {
+				app.applyBalanceReadback(deviceID, conn, refresh, balance)
+			}
+		})
 	}
 
 	// Phase 2: fast merge. Only fields we successfully fetched
@@ -453,7 +478,9 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	if stereoCapable && groupErr == nil {
 		statusUpdated = true
 	}
-
+	if balanceFetched && balanceErr == nil && balance != nil {
+		statusUpdated = true
+	}
 	if volumeErr == nil {
 		conn.ApplyPolledVolume(volumeGeneration, volume)
 	}
@@ -478,10 +505,6 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 
 	if nameErr == nil {
 		conn.ApplyPolledName(nameGeneration, name.Value)
-	}
-
-	if stereoCapable && groupErr == nil {
-		conn.ApplyPolledGroup(groupGeneration, group)
 	}
 
 	if zoneErr == nil {

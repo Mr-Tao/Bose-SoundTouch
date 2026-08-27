@@ -59,11 +59,16 @@ type DeviceConnection struct {
 
 	webSocketLoopRunning atomic.Bool
 
-	nameMu    sync.Mutex
-	nameGen   uint64
-	volumeMu  sync.Mutex
-	volumeGen uint64
-	healthMu  sync.Mutex
+	nameMu     sync.Mutex
+	nameGen    uint64
+	volumeMu   sync.Mutex
+	volumeGen  uint64
+	balanceMu  sync.Mutex
+	balanceGen uint64
+	healthMu   sync.Mutex
+
+	balanceOperationMu sync.Mutex
+	balanceWriteMu     sync.Mutex
 
 	nextPollGeneration  uint64
 	lastPollGeneration  uint64
@@ -75,8 +80,9 @@ type DeviceConnection struct {
 	// groupMu orders polled /getGroup responses against real-time
 	// groupUpdated events. Starting a newer refresh or receiving an event
 	// invalidates any older in-flight poll.
-	groupMu         sync.Mutex
-	groupGeneration uint64
+	groupMu                  sync.Mutex
+	groupGeneration          uint64
+	confirmedGroupGeneration uint64
 
 	// zoneMu protects the last topology confirmed by a zone master. Member
 	// responses and failed refreshes must not dissolve a logical zone.
@@ -95,6 +101,7 @@ type DeviceConnection struct {
 type DeviceStatus struct {
 	NowPlaying             *models.NowPlaying      `json:"nowPlaying,omitempty"`
 	Volume                 *models.Volume          `json:"volume,omitempty"`
+	Balance                *models.Balance         `json:"balance,omitempty"`
 	Presets                *models.Presets         `json:"presets,omitempty"`
 	Sources                *models.Sources         `json:"sources,omitempty"`
 	Bass                   *models.Bass            `json:"bass,omitempty"`
@@ -238,6 +245,99 @@ func (c *DeviceConnection) ApplyVolumeEvent(volume *models.Volume, activity time
 		status.Volume = volume
 		status.LastActivity = activity
 	})
+}
+
+// WithBalanceOperation serializes balance endpoint traffic for this physical
+// speaker. Stereo-balance writes and periodic readbacks use this seam so only
+// the confirmed LEFT/master is accessed and operations cannot overlap.
+func (c *DeviceConnection) WithBalanceOperation(operation func()) {
+	c.balanceOperationMu.Lock()
+	defer c.balanceOperationMu.Unlock()
+
+	operation()
+}
+
+// WithBalanceWriteFence linearizes balance write initiation with group and
+// registry invalidation without delaying invalidation across GET readback.
+func (c *DeviceConnection) WithBalanceWriteFence(operation func()) {
+	c.balanceWriteMu.Lock()
+	defer c.balanceWriteMu.Unlock()
+
+	operation()
+}
+
+// BalanceRefresh ties a /balance readback to one confirmed group generation.
+// Group and Balance are immutable snapshots and must not be modified.
+type BalanceRefresh struct {
+	Group   *models.Group
+	Balance *models.Balance
+
+	groupGeneration   uint64
+	balanceGeneration uint64
+}
+
+// BeginBalanceRefresh snapshots the latest confirmed group and balance
+// capability. An in-flight or failed /getGroup refresh makes balance access
+// unsafe until a newer group response is confirmed.
+func (c *DeviceConnection) BeginBalanceRefresh() (BalanceRefresh, bool) {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	c.balanceMu.Lock()
+	defer c.balanceMu.Unlock()
+
+	if c.groupGeneration != c.confirmedGroupGeneration {
+		return BalanceRefresh{}, false
+	}
+
+	c.balanceGen++
+	status := c.Status()
+
+	return BalanceRefresh{
+		Group:             status.Group,
+		Balance:           status.Balance,
+		groupGeneration:   c.groupGeneration,
+		balanceGeneration: c.balanceGen,
+	}, true
+}
+
+// BalanceRefreshCurrent reports whether neither topology nor a newer balance
+// operation has superseded refresh.
+func (c *DeviceConnection) BalanceRefreshCurrent(refresh BalanceRefresh) bool {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	c.balanceMu.Lock()
+	defer c.balanceMu.Unlock()
+
+	return c.balanceRefreshCurrentLocked(refresh)
+}
+
+// ApplyBalanceReadback stores a confirmed /balance response only while both
+// the group and balance generations captured by refresh remain current.
+func (c *DeviceConnection) ApplyBalanceReadback(refresh BalanceRefresh, balance *models.Balance) bool {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	c.balanceMu.Lock()
+	defer c.balanceMu.Unlock()
+
+	if !c.balanceRefreshCurrentLocked(refresh) {
+		return false
+	}
+
+	c.UpdateStatus(func(status *DeviceStatus) {
+		status.Balance = balance
+	})
+
+	return true
+}
+
+func (c *DeviceConnection) balanceRefreshCurrentLocked(refresh BalanceRefresh) bool {
+	return refresh.groupGeneration == c.groupGeneration &&
+		refresh.groupGeneration == c.confirmedGroupGeneration &&
+		refresh.balanceGeneration == c.balanceGen &&
+		reflect.DeepEqual(refresh.Group, c.Status().Group)
 }
 
 // Info returns a read-only metadata snapshot with the latest device name.
@@ -422,8 +522,8 @@ func (c *DeviceConnection) SetStatus(s *DeviceStatus) {
 // writers cannot silently lose each other's changes.
 //
 // The copy mut receives is a shallow value copy of the previous status.
-// Nested pointer fields (NowPlaying, Volume, Presets, Sources, Bass, Group,
-// Zone)
+// Nested pointer fields (NowPlaying, Volume, Balance, Presets, Sources, Bass,
+// Group, Zone)
 // share their backing struct with the previous version: callers MUST
 // REPLACE these pointers (s.Volume = &models.Volume{...}) rather than
 // mutate through them (s.Volume.ActualVolume++ would race with any
@@ -445,42 +545,67 @@ func (c *DeviceConnection) UpdateStatus(mut func(*DeviceStatus)) {
 // BeginGroupRefresh starts a new generation for an asynchronous /getGroup
 // request. Only the latest started request may later update Group.
 func (c *DeviceConnection) BeginGroupRefresh() uint64 {
-	c.groupMu.Lock()
-	defer c.groupMu.Unlock()
+	var generation uint64
+	c.WithBalanceWriteFence(func() {
+		c.groupMu.Lock()
+		defer c.groupMu.Unlock()
+		c.balanceMu.Lock()
+		defer c.balanceMu.Unlock()
 
-	c.groupGeneration++
+		c.groupGeneration++
+		c.balanceGen++
+		c.UpdateStatus(func(status *DeviceStatus) {
+			status.Balance = nil
+		})
+		generation = c.groupGeneration
+	})
 
-	return c.groupGeneration
+	return generation
 }
 
 // ApplyPolledGroup stores a /getGroup result only when no newer poll or
-// groupUpdated event superseded it. Empty groups clear the current claim.
+// groupUpdated event superseded it. It reports whether the response was
+// accepted; empty groups clear the current claim.
 func (c *DeviceConnection) ApplyPolledGroup(generation uint64, group *models.Group) bool {
 	c.groupMu.Lock()
 	defer c.groupMu.Unlock()
+	c.balanceMu.Lock()
+	defer c.balanceMu.Unlock()
 
 	if generation != c.groupGeneration {
 		return false
 	}
+	c.confirmedGroupGeneration = generation
 
-	return c.replaceGroup(normalizeGroup(group), time.Time{})
+	c.replaceGroup(normalizeGroup(group), time.Time{})
+
+	return true
 }
 
 // ApplyGroupEvent stores the newest groupUpdated event and invalidates all
 // in-flight /getGroup requests. Empty teardown events clear the current claim.
 func (c *DeviceConnection) ApplyGroupEvent(group *models.Group, activity time.Time) bool {
-	c.groupMu.Lock()
-	defer c.groupMu.Unlock()
+	changed := false
+	c.WithBalanceWriteFence(func() {
+		c.groupMu.Lock()
+		defer c.groupMu.Unlock()
+		c.balanceMu.Lock()
+		defer c.balanceMu.Unlock()
 
-	c.groupGeneration++
+		c.groupGeneration++
+		c.confirmedGroupGeneration = c.groupGeneration
+		c.balanceGen++
+		changed = c.replaceGroup(normalizeGroup(group), activity)
+	})
 
-	return c.replaceGroup(normalizeGroup(group), activity)
+	return changed
 }
 
 func (c *DeviceConnection) replaceGroup(group *models.Group, activity time.Time) bool {
 	changed := !reflect.DeepEqual(c.Status().Group, group)
 	c.UpdateStatus(func(s *DeviceStatus) {
 		s.Group = group
+		s.Balance = nil
 		if !activity.IsZero() {
 			s.LastActivity = activity
 		}

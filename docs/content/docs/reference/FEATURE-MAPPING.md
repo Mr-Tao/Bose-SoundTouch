@@ -40,7 +40,7 @@ Basic device functionality required for operation:
 ### 🔊 Audio Features
 Sound quality and audio processing:
 - **Bass Control** - Bass level adjustment (-9 to +9)
-- **Balance Control** - Left/right audio balance (-50 to +50)
+- **Balance Control** - Left/right audio balance (device-advertised range)
 - **Advanced Audio Controls** - DSP controls, tone controls, audio processing
 
 ### ▶️ Playback Features
@@ -275,7 +275,7 @@ soundtouch-cli bass down                   # Decrease bass
 
 # Balance Control
 soundtouch-cli balance get                 # Get current balance
-soundtouch-cli balance set --level 10      # Set balance +10 (right)
+soundtouch-cli balance set --level 10      # Set +10 when the device advertises that range
 soundtouch-cli balance left                # Move balance left
 soundtouch-cli balance right               # Move balance right
 
