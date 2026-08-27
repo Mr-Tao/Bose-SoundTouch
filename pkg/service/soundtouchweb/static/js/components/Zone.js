@@ -1,5 +1,9 @@
 import { h, htm, useEffect, useState } from '../dependencies.js';
 import { api } from '../api.js';
+import {
+    resolvedZoneMember,
+    zoneMemberPresentation,
+} from '../devicePresentation.mjs';
 
 const html = htm.bind(h);
 
@@ -61,13 +65,32 @@ export function Zone({ deviceId, devices }) {
 
     if (!zone) return null;
 
+    const projection = devices?.[zone.masterIp || deviceId]?.zone || devices?.[deviceId]?.zone;
+    const resolvedMaster = resolvedZoneMember(projection, zone.master);
+
     // Devices not already in the zone are available to add
-    const zoneIps = new Set([zone.masterIp, ...(zone.members || []).map(m => m.ip)].filter(Boolean));
+    const zoneIps = new Set([
+        resolvedMaster.controlId || zone.masterIp,
+        ...(zone.members || []).map(member => resolvedZoneMember(projection, member).controlId),
+    ].filter(Boolean));
     const selectedHardwareId = devices?.[deviceId]?.info?.device_id;
     const available = Object.entries(devices || {}).filter(([ip, candidate]) =>
         ip !== deviceId && candidate.info?.device_id !== selectedHardwareId &&
         !zoneIps.has(ip) && candidate.status?.isConnected);
     const deviceName = (ip) => devices[ip]?.info?.name || ip;
+    function memberStatus(member) {
+        const { connectivity, label, role, volume } = zoneMemberPresentation(
+            member);
+
+        return html`
+            <span class="device-indicator ${connectivity}" role=${role} title=${label}
+                  aria-label=${label}></span>
+            ${volume !== null ? html`
+                <span class="zone-member-volume" title=${`Volume ${volume}%`}
+                      aria-label=${`Volume ${volume}%`}>${volume}%</span>
+            ` : null}
+        `;
+    }
 
     return html`
         <div class="zone-section">
@@ -90,16 +113,22 @@ export function Zone({ deviceId, devices }) {
                 <div class="zone-members">
                     <div class="zone-member zone-master-row">
                         <span class="zone-badge master">Master</span>
-                        <span class="zone-member-name">${deviceName(deviceId)}</span>
+                        <span class="zone-member-name">${resolvedMaster.name || deviceName(deviceId)}</span>
+                        ${memberStatus(resolvedMaster.member)}
                     </div>
-                    ${(zone.members || []).map(m => html`
-                        <div class="zone-member" key=${m.ip}>
-                            <span class="zone-badge slave">Member</span>
-                            <span class="zone-member-name">${m.name || deviceName(m.ip)}</span>
-                            <button class="btn-icon zone-remove" title="Remove from zone"
-                                onClick=${() => removeDevice(m.ip)}>✕</button>
-                        </div>
-                    `)}
+                    ${(zone.members || []).map(m => {
+                        const resolved = resolvedZoneMember(projection, m);
+                        const controlId = resolved.controlId;
+                        return html`
+                            <div class="zone-member" key=${m.hwId || controlId}>
+                                <span class="zone-badge slave">Member</span>
+                                <span class="zone-member-name">${resolved.name || deviceName(controlId)}</span>
+                                ${memberStatus(resolved.member)}
+                                <button class="btn-icon zone-remove" title="Remove from zone"
+                                    onClick=${() => removeDevice(controlId)}>✕</button>
+                            </div>
+                        `;
+                    })}
                     <div class="zone-actions">
                         ${available.length > 0 && html`
                             <button class="btn-secondary zone-btn" onClick=${() => setShowPicker(true)}
@@ -114,6 +143,7 @@ export function Zone({ deviceId, devices }) {
                 <div class="zone-row">
                     <span class="zone-badge slave">Member</span>
                     <span class="zone-member-name">Zone: ${zone.masterName || deviceName(zone.masterIp)}</span>
+                    ${memberStatus(zone.master)}
                     <button class="btn-secondary zone-btn" onClick=${leave}>Leave zone</button>
                 </div>
             `}

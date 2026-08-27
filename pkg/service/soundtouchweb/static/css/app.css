@@ -787,6 +787,7 @@ img { display: block; max-width: 100%; }
     border: 1px solid var(--border);
     border-radius: 999px;
     background: var(--surface);
+    color: var(--text);
     font-size: .8rem;
     transition: background .1s, border-color .1s;
 }
@@ -818,7 +819,14 @@ img { display: block; max-width: 100%; }
 .zone-badge.master { background: var(--accent); color: var(--accent-fg); }
 .zone-badge.slave  { background: var(--border); color: var(--text-dim); }
 
-.zone-member-name { flex: 1; font-size: .875rem; }
+.zone-member-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: .875rem; }
+.zone-member-volume {
+    min-width: 2.5rem;
+    color: var(--text-dim);
+    font-size: .75rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
 .zone-remove { font-size: .75rem; color: var(--text-dim); padding: .15rem .35rem; }
 .zone-remove:hover { color: var(--text); }
 

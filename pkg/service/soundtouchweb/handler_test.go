@@ -972,6 +972,93 @@ func TestHandleGetZoneDoesNotProjectMasterAsMember(t *testing.T) {
 	}
 }
 
+func TestHandleGetZoneProjectsStereoMasterAsLogicalMember(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master: "zone-master",
+		Members: []models.Member{
+			{DeviceID: "zone-master", IP: "192.0.2.5"},
+			{DeviceID: "left-id", IP: "192.0.2.10"},
+		},
+	}
+	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/getZone" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`<zone master="zone-master"><member ipaddress="192.0.2.5">zone-master</member><member ipaddress="192.0.2.10">left-id</member></zone>`))
+	}))
+	defer speaker.Close()
+
+	group := testStereoGroup()
+	group.Name = "Living Room"
+	group.Roles.Roles[0].IPAddress = "192.0.2.10"
+	group.Roles.Roles[1].IPAddress = "192.0.2.11"
+
+	app := NewWebApp()
+	master := webtypes.NewDeviceConnection(client.NewClient(&client.Config{Host: speaker.URL}),
+		&models.DeviceInfo{Name: "Kitchen", DeviceID: "zone-master", IPAddress: "192.0.2.5"})
+	master.SetStatus(&webtypes.DeviceStatus{
+		Zone: zone, Volume: &models.Volume{ActualVolume: 25},
+		Connectivity: webtypes.ConnectivityOnline, IsConnected: true,
+	})
+	left := webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Living Room Left", DeviceID: "left-id", IPAddress: "192.0.2.10"})
+	left.SetStatus(&webtypes.DeviceStatus{
+		Group: group, Volume: &models.Volume{ActualVolume: 12},
+		Connectivity: webtypes.ConnectivityStale, IsConnected: true,
+	})
+	right := webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Living Room Right", DeviceID: "right-id", IPAddress: "192.0.2.11"})
+	right.SetStatus(&webtypes.DeviceStatus{
+		Group: group, Volume: &models.Volume{ActualVolume: 18},
+		Connectivity: webtypes.ConnectivityOnline, IsConnected: true,
+	})
+	app.AddDevice("192.0.2.5", master)
+	app.AddDevice("192.0.2.10", left)
+	app.AddDevice("192.0.2.11", right)
+
+	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.5/zone", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.5"})
+	w := httptest.NewRecorder()
+	app.HandleGetZone(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Data struct {
+			Members []struct {
+				ControlID    string                `json:"controlId"`
+				IP           string                `json:"ip"`
+				HwID         string                `json:"hwId"`
+				Name         string                `json:"name"`
+				DeviceIDs    []string              `json:"deviceIds"`
+				Connectivity webtypes.Connectivity `json:"connectivity"`
+				ActualVolume *int                  `json:"actualVolume"`
+			} `json:"members"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Data.Members) != 1 {
+		t.Fatalf("zone members = %+v, want one logical stereo member", response.Data.Members)
+	}
+	member := response.Data.Members[0]
+	if member.Name != "Living Room" || member.ControlID != "192.0.2.10" ||
+		member.IP != "192.0.2.10" || member.HwID != "left-id" ||
+		len(member.DeviceIDs) != 2 || member.DeviceIDs[0] != "left-id" || member.DeviceIDs[1] != "right-id" ||
+		member.Connectivity != webtypes.ConnectivityStale || member.ActualVolume == nil || *member.ActualVolume != 18 {
+		t.Fatalf("logical stereo member = %+v", member)
+	}
+
+	projected := app.deviceViewSnapshot()
+	if len(projected) != 1 || projected["192.0.2.5"].Zone == nil ||
+		len(projected["192.0.2.5"].Zone.Members) != 2 {
+		t.Fatalf("top-level projection diverged from zone detail: %+v", projected)
+	}
+}
+
 func TestHandleZoneAddRejectsSameHardwareUnderDifferentKeys(t *testing.T) {
 	app := NewWebApp()
 	app.AddDevice("speaker.local", webtypes.NewDeviceConnection(
@@ -1151,6 +1238,46 @@ func TestHandleZoneRemove_UsesRemoveZoneSlave(t *testing.T) {
 
 	if !strings.Contains(gotBody, `master="MASTERHW01"`) {
 		t.Errorf("removeZoneSlave body should name the master, got: %s", gotBody)
+	}
+}
+
+func TestHandleZoneRemoveUsesMasterTopologyForMissingMember(t *testing.T) {
+	var requests []string
+	var removeBody string
+	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/getZone":
+			_, _ = w.Write([]byte(`<zone master="MASTERHW01"><member ipaddress="192.0.2.10">MASTERHW01</member><member ipaddress="192.0.2.99">MISSINGHW02</member></zone>`))
+		case "/removeZoneSlave":
+			body, _ := io.ReadAll(r.Body)
+			removeBody = string(body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer speaker.Close()
+
+	app := NewWebApp()
+	app.AddDevice("192.0.2.10", webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: speaker.URL}),
+		&models.DeviceInfo{Name: "Master", DeviceID: "MASTERHW01"},
+	))
+
+	req := httptest.NewRequest("POST", "/api/control/devices/192.0.2.10/zone/remove/192.0.2.99", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "slaveId": "192.0.2.99"})
+	w := httptest.NewRecorder()
+	app.HandleZoneRemove(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if want := []string{"GET /getZone", "POST /removeZoneSlave"}; !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+	if !strings.Contains(removeBody, "MISSINGHW02") || !strings.Contains(removeBody, "192.0.2.99") {
+		t.Fatalf("removeZoneSlave body lost topology-only member identity: %s", removeBody)
 	}
 }
 

@@ -66,11 +66,14 @@ type zoneView struct {
 }
 
 type zoneMemberView struct {
-	ControlID string   `json:"controlId,omitempty"`
-	Name      string   `json:"name,omitempty"`
-	DeviceIDs []string `json:"deviceIds"`
-	Available bool     `json:"available"`
-	Volume    *int     `json:"volume,omitempty"`
+	ControlID    string                `json:"controlId,omitempty"`
+	IP           string                `json:"ip,omitempty"`
+	HardwareID   string                `json:"hwId,omitempty"`
+	Name         string                `json:"name,omitempty"`
+	DeviceIDs    []string              `json:"deviceIds"`
+	Available    bool                  `json:"available"`
+	Connectivity webtypes.Connectivity `json:"connectivity"`
+	ActualVolume *int                  `json:"actualVolume,omitempty"`
 }
 
 // deviceViewSnapshot projects the physical registry into logical control
@@ -102,6 +105,19 @@ func captureDeviceProjectionEntries(snapshot []DeviceEntry) []deviceProjectionEn
 }
 
 func projectCapturedDeviceEntries(snapshot []deviceProjectionEntry) map[string]deviceView {
+	devices, physicalToLogical, byDeviceID := projectLogicalDeviceEntries(snapshot)
+
+	return projectZoneViews(snapshot, devices, physicalToLogical, byDeviceID)
+}
+
+// projectLogicalDeviceEntries folds physical stereo members into their shared
+// control target. Zone projection and the zone-detail endpoint both build on
+// this representation so names and member status cannot diverge.
+func projectLogicalDeviceEntries(snapshot []deviceProjectionEntry) (
+	map[string]deviceView,
+	map[string]string,
+	map[string][]deviceProjectionEntry,
+) {
 	byDeviceID := make(map[string][]deviceProjectionEntry, len(snapshot))
 	for _, entry := range snapshot {
 		if entry.Info == nil {
@@ -166,7 +182,14 @@ func projectCapturedDeviceEntries(snapshot []deviceProjectionEntry) map[string]d
 		}
 	}
 
-	return projectZoneViews(snapshot, devices, physicalToLogical, byDeviceID)
+	return devices, physicalToLogical, byDeviceID
+}
+
+func projectZoneInfo(zone *models.ZoneInfo, snapshot []deviceProjectionEntry) (*zoneView, bool) {
+	devices, physicalToLogical, byDeviceID := projectLogicalDeviceEntries(snapshot)
+	candidate, ok := newZoneProjectionCandidate(zone, devices, physicalToLogical, byDeviceID)
+
+	return candidate.view, ok
 }
 
 type zoneProjectionCandidate struct {
@@ -258,32 +281,32 @@ func newZoneProjectionCandidate(
 	degraded := false
 	groupVolume := 0
 	groupVolumeKnown := false
+	zoneMemberIPs := make(map[string]string, len(zone.Members))
+	for _, zoneMember := range zone.Members {
+		deviceID := strings.TrimSpace(zoneMember.DeviceID)
+		if deviceID != "" {
+			zoneMemberIPs[deviceID] = strings.TrimSpace(zoneMember.IP)
+		}
+	}
 
 	for _, deviceID := range zone.GetAllDeviceIDs() {
 		deviceID = strings.TrimSpace(deviceID)
 		logicalID := physicalToLogical[deviceID]
+		controlID := logicalID
+		if controlID == "" {
+			controlID = zoneMemberIPs[deviceID]
+		}
 
-		if index, exists := memberByLogicalID[logicalID]; logicalID != "" && exists {
-			members[index].DeviceIDs = append(members[index].DeviceIDs, deviceID)
-			if volume, ok := physicalVolume(byDeviceID, deviceID); ok {
-				groupVolumeKnown = true
-
-				if members[index].Volume == nil || volume > *members[index].Volume {
-					value := volume
-					members[index].Volume = &value
-				}
-
-				if volume > groupVolume {
-					groupVolume = volume
-				}
-			}
-
+		if _, exists := memberByLogicalID[logicalID]; logicalID != "" && exists {
 			continue
 		}
 
 		member := zoneMemberView{
-			ControlID: logicalID,
-			DeviceIDs: []string{deviceID},
+			ControlID:    controlID,
+			IP:           controlID,
+			HardwareID:   deviceID,
+			DeviceIDs:    []string{deviceID},
+			Connectivity: webtypes.ConnectivityOffline,
 		}
 
 		if view, ok := devices[logicalID]; ok {
@@ -291,19 +314,31 @@ func newZoneProjectionCandidate(
 				member.Name = view.Info.Name
 			}
 
-			member.Available = view.Status != nil && view.Status.IsConnected
-			if view.StereoPair != nil && view.StereoPair.Degraded {
-				degraded = true
+			member.Connectivity = projectedConnectivity(view.Status)
+			member.Available = member.Connectivity != webtypes.ConnectivityOffline
+			if view.StereoPair != nil {
+				member.HardwareID = view.StereoPair.MasterDeviceID
+				member.DeviceIDs = member.DeviceIDs[:0]
+				for _, pairMember := range view.StereoPair.Members {
+					member.DeviceIDs = append(member.DeviceIDs, pairMember.DeviceID)
+				}
+				if view.StereoPair.Degraded {
+					degraded = true
+				}
 			}
 		}
 
-		if volume, ok := physicalVolume(byDeviceID, deviceID); ok {
-			groupVolumeKnown = true
-			value := volume
-			member.Volume = &value
+		for _, physicalID := range member.DeviceIDs {
+			if volume, ok := physicalVolume(byDeviceID, physicalID); ok {
+				groupVolumeKnown = true
+				if member.ActualVolume == nil || volume > *member.ActualVolume {
+					value := volume
+					member.ActualVolume = &value
+				}
 
-			if volume > groupVolume {
-				groupVolume = volume
+				if volume > groupVolume {
+					groupVolume = volume
+				}
 			}
 		}
 
@@ -342,6 +377,23 @@ func newZoneProjectionCandidate(
 			Members:              members,
 		},
 	}, true
+}
+
+func projectedConnectivity(status *webtypes.DeviceStatus) webtypes.Connectivity {
+	if status == nil {
+		return webtypes.ConnectivityOffline
+	}
+
+	switch status.Connectivity {
+	case webtypes.ConnectivityOnline, webtypes.ConnectivityStale, webtypes.ConnectivityOffline:
+		return status.Connectivity
+	default:
+		if status.IsConnected {
+			return webtypes.ConnectivityOnline
+		}
+
+		return webtypes.ConnectivityOffline
+	}
 }
 
 func physicalVolume(byDeviceID map[string][]deviceProjectionEntry, deviceID string) (int, bool) {

@@ -1,5 +1,6 @@
 import { h, htm, useEffect, useRef, useState } from '../dependencies.js';
 import { api } from '../api.js';
+import { connectivityLabel, connectivityState } from '../devicePresentation.mjs';
 import { createLatestWinsScheduler } from '../latestWinsScheduler.mjs';
 import { clampVolume, maxReadbackActual, partialFailureMessage } from '../zoneVolumeResult.mjs';
 import {
@@ -54,15 +55,15 @@ function cardDetails(id, device, showIP, nameID) {
     const np = status?.nowPlaying;
     const isPlaying = np?.PlayStatus === 'PLAY_STATE';
     const isStandby = !np || np.Source === 'STANDBY';
-    const connectivity = status?.connectivity || (status?.isConnected ? 'online' : 'offline');
-    const connectivityLabel = connectivity.charAt(0).toUpperCase() + connectivity.slice(1);
+    const connectivity = connectivityState(device);
+    const statusLabel = connectivityLabel(device);
     const showTechnicalDetails = info?.type || stereoPair || (showIP && info?.ip_address);
 
     return html`
         <div class="device-header">
             <span class="device-name" id=${nameID}>${info?.name || id}</span>
-            <span class="device-indicator ${connectivity}" role="status" title=${connectivityLabel}
-                  aria-label=${connectivityLabel}></span>
+            <span class="device-indicator ${connectivity}" role="status" title=${statusLabel}
+                  aria-label=${statusLabel}></span>
         </div>
         ${!isStandby ? html`
             <div class="now-playing-mini">

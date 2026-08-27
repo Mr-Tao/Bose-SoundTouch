@@ -150,6 +150,64 @@ func TestProjectDeviceEntriesCollapsesMasterConfirmedZone(t *testing.T) {
 	}
 }
 
+func TestProjectDeviceEntriesSerializesCollapsedMemberStatus(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master: "master-id",
+		Members: []models.Member{
+			{DeviceID: "master-id", IP: "192.0.2.10"},
+			{DeviceID: "stale-id", IP: "192.0.2.20"},
+			{DeviceID: "offline-id", IP: "192.0.2.30"},
+		},
+	}
+	master := projectionDeviceWithZone("192.0.2.10", "master-id", "Kitchen", true, 20, nil, zone)
+	stale := projectionDeviceWithZone("192.0.2.20", "stale-id", "Dining", true, 35, nil, nil)
+	offline := projectionDeviceWithZone("192.0.2.30", "offline-id", "Patio", false, 0, nil, nil)
+	master.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Connectivity = webtypes.ConnectivityOnline
+	})
+	stale.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Connectivity = webtypes.ConnectivityStale
+	})
+	offline.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Connectivity = webtypes.ConnectivityOffline
+	})
+
+	got := projectDeviceEntries([]DeviceEntry{master, stale, offline})
+	if len(got) != 1 {
+		t.Fatalf("projected devices = %d, want only the zone master: %+v", len(got), got)
+	}
+
+	encoded, err := json.Marshal(got["192.0.2.10"])
+	if err != nil {
+		t.Fatalf("marshal projected zone: %v", err)
+	}
+	var payload struct {
+		Zone struct {
+			AvailableMemberCount int  `json:"availableMemberCount"`
+			Degraded             bool `json:"degraded"`
+			Members              []struct {
+				ControlID    string                `json:"controlId"`
+				Connectivity webtypes.Connectivity `json:"connectivity"`
+				ActualVolume *int                  `json:"actualVolume"`
+			} `json:"members"`
+		} `json:"zone"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("unmarshal projected zone: %v", err)
+	}
+	if payload.Zone.AvailableMemberCount != 2 || !payload.Zone.Degraded || len(payload.Zone.Members) != 3 {
+		t.Fatalf("unexpected zone status projection: %+v", payload.Zone)
+	}
+	if member := payload.Zone.Members[1]; member.ControlID != "192.0.2.20" ||
+		member.Connectivity != webtypes.ConnectivityStale || member.ActualVolume == nil || *member.ActualVolume != 35 {
+		t.Fatalf("stale member JSON = %+v", member)
+	}
+	if member := payload.Zone.Members[2]; member.ControlID != "192.0.2.30" ||
+		member.Connectivity != webtypes.ConnectivityOffline || member.ActualVolume == nil || *member.ActualVolume != 0 {
+		t.Fatalf("offline member JSON = %+v", member)
+	}
+}
+
 func TestProjectDeviceEntriesPreservesZoneWhenMemberIsMissing(t *testing.T) {
 	zone := &models.ZoneInfo{
 		Master: "master-id",
@@ -166,6 +224,10 @@ func TestProjectDeviceEntriesPreservesZoneWhenMemberIsMissing(t *testing.T) {
 	view := got["192.0.2.10"].Zone
 	if view == nil || !view.Degraded || view.MemberCount != 2 || view.AvailableMemberCount != 1 {
 		t.Fatalf("missing member did not produce a stable degraded zone: %+v", got)
+	}
+	if len(view.Members) != 2 || view.Members[1].ControlID != "192.0.2.99" ||
+		view.Members[1].IP != "192.0.2.99" || view.Members[1].HardwareID != "missing-id" {
+		t.Fatalf("missing member lost its topology identity: %+v", view.Members)
 	}
 }
 
@@ -195,6 +257,36 @@ func TestProjectDeviceEntriesFoldsStereoBeforeZone(t *testing.T) {
 	}
 	if len(view.Members[1].DeviceIDs) != 2 {
 		t.Fatalf("stereo logical member does not retain both physical IDs: %+v", view.Members[1])
+	}
+}
+
+func TestProjectZoneInfoExpandsStereoPairRepresentedByMasterOnly(t *testing.T) {
+	group := testStereoGroup()
+	group.Name = "Living Room"
+	zone := &models.ZoneInfo{
+		Master: "master-id",
+		Members: []models.Member{
+			{DeviceID: "master-id", IP: "192.0.2.5"},
+			{DeviceID: "left-id", IP: "192.0.2.10"},
+		},
+	}
+
+	entries := []DeviceEntry{
+		projectionDeviceWithZone("192.0.2.5", "master-id", "Kitchen", true, 25, nil, zone),
+		projectionDeviceWithZone("192.0.2.10", "left-id", "Living Room Left", true, 12, group, nil),
+		projectionDeviceWithZone("192.0.2.11", "right-id", "Living Room Right", true, 18, group, nil),
+	}
+	view, ok := projectZoneInfo(zone, captureDeviceProjectionEntries(entries))
+	if !ok || len(view.Members) != 2 {
+		t.Fatalf("projected zone = %+v, ok=%v; want master plus one stereo member", view, ok)
+	}
+
+	pair := view.Members[1]
+	if pair.Name != "Living Room" || pair.ControlID != "192.0.2.10" || pair.IP != "192.0.2.10" ||
+		pair.HardwareID != "left-id" || len(pair.DeviceIDs) != 2 ||
+		pair.DeviceIDs[0] != "left-id" || pair.DeviceIDs[1] != "right-id" ||
+		pair.ActualVolume == nil || *pair.ActualVolume != 18 {
+		t.Fatalf("stereo zone member = %+v", pair)
 	}
 }
 

@@ -992,31 +992,53 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	type memberInfo struct {
-		IP   string `json:"ip"`
-		HwID string `json:"hwId"`
-		Name string `json:"name"`
-	}
+	members := make([]zoneMemberView, 0, len(zone.Members))
+	var masterMember *zoneMemberView
 
-	members := make([]memberInfo, 0, len(zone.Members))
-
-	for _, m := range zone.Members {
-		// SoundTouch masters include themselves in their /getZone member list.
-		// Keep the API projection role-based so the master is not also rendered
-		// as a removable member.
-		if m.DeviceID == zone.Master {
-			continue
-		}
-
-		name := ""
-
-		if conn, ok := app.GetDevice(m.IP); ok {
-			if info := conn.Info(); info != nil {
-				name = info.Name
+	projection, projected := projectZoneInfo(zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
+	if projected {
+		masterIP = projection.MasterControlID
+		for _, member := range projection.Members {
+			if member.ControlID == projection.MasterControlID {
+				master := member
+				masterMember = &master
+				masterName = member.Name
+				continue
 			}
-		}
 
-		members = append(members, memberInfo{IP: m.IP, HwID: m.DeviceID, Name: name})
+			members = append(members, member)
+		}
+	} else {
+		for _, m := range zone.Members {
+			// SoundTouch masters include themselves in their /getZone member list.
+			// Keep the API projection role-based so the master is not also rendered
+			// as a removable member.
+			if m.DeviceID == zone.Master {
+				continue
+			}
+
+			member := zoneMemberView{
+				ControlID:    m.IP,
+				IP:           m.IP,
+				HardwareID:   m.DeviceID,
+				DeviceIDs:    []string{m.DeviceID},
+				Connectivity: webtypes.ConnectivityOffline,
+			}
+			if conn, ok := app.GetDevice(m.IP); ok {
+				if info := conn.Info(); info != nil {
+					member.Name = info.Name
+				}
+				status := conn.Status()
+				member.Connectivity = projectedConnectivity(status)
+				member.Available = member.Connectivity != webtypes.ConnectivityOffline
+				if status != nil && status.Volume != nil {
+					volume := status.Volume.ActualVolume
+					member.ActualVolume = &volume
+				}
+			}
+
+			members = append(members, member)
+		}
 	}
 
 	isMaster := zone.Master == currentHwID && !zone.IsStandalone()
@@ -1030,6 +1052,7 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 			"masterIp":     masterIP,
 			"masterHwId":   zone.Master,
 			"masterName":   masterName,
+			"master":       masterMember,
 			"members":      members,
 			"isMaster":     isMaster,
 			"isSlave":      isSlave,
@@ -1144,19 +1167,39 @@ func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slaveConn, ok := app.GetDevice(slaveIP)
-	if !ok {
-		app.sendError(w, "Slave device not found", http.StatusNotFound)
-		return
-	}
-
-	if masterConn.Client == nil || masterConn.DeviceInfo == nil || slaveConn.DeviceInfo == nil {
+	if masterConn.Client == nil || masterConn.DeviceInfo == nil {
 		app.sendError(w, "Device not ready", http.StatusInternalServerError)
 		return
 	}
 
 	masterHwID := masterConn.DeviceInfo.DeviceID
-	slaveHwID := slaveConn.DeviceInfo.DeviceID
+	slaveHwID := ""
+	if slaveConn, found := app.GetDevice(slaveIP); found && slaveConn.DeviceInfo != nil {
+		slaveHwID = slaveConn.DeviceInfo.DeviceID
+	}
+
+	// A disconnected member can disappear from the registry while the master
+	// still reports it in /getZone. In that case, use only the master's current
+	// topology to recover the hardware ID; never accept an arbitrary target IP.
+	if strings.TrimSpace(slaveHwID) == "" {
+		zone, err := masterConn.Client.GetZone()
+		if err != nil {
+			app.sendError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		for _, member := range zone.Members {
+			if strings.TrimSpace(member.IP) == strings.TrimSpace(slaveIP) &&
+				strings.TrimSpace(member.DeviceID) != strings.TrimSpace(masterHwID) {
+				slaveHwID = member.DeviceID
+				break
+			}
+		}
+		if strings.TrimSpace(slaveHwID) == "" {
+			app.sendError(w, "Slave device not found in current zone", http.StatusNotFound)
+			return
+		}
+	}
 
 	// Remove a single member with the dedicated /removeZoneSlave endpoint.
 	// Rebuilding the zone via /setZone with the remaining members does not
