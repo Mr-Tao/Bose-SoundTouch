@@ -681,6 +681,23 @@ func (c *Client) SetBass(level int) error {
 	return c.post("/bass", bassReq)
 }
 
+// SetBassWithCapabilities sets bass after validating the level against the
+// capabilities reported by this device. Callers that cache /bassCapabilities
+// can use this without falling back to the legacy generic model range.
+func (c *Client) SetBassWithCapabilities(level int, capabilities *models.BassCapabilities) error {
+	if err := capabilities.Validate(); err != nil {
+		return fmt.Errorf("invalid bass capabilities: %w", err)
+	}
+	if !capabilities.BassAvailable {
+		return fmt.Errorf("bass control is unavailable")
+	}
+	if !capabilities.ValidateLevel(level) {
+		return fmt.Errorf("invalid bass level: %d (must be between %d and %d)", level, capabilities.BassMin, capabilities.BassMax)
+	}
+
+	return c.post("/bass", &models.BassRequest{Level: level})
+}
+
 // SetBassSafe sets bass with validation and clamping
 func (c *Client) SetBassSafe(level int) error {
 	clampedLevel := models.ClampBassLevel(level)
@@ -1524,13 +1541,63 @@ func (c *Client) SetName(name string) error {
 	return c.post("/name", nameRequest)
 }
 
-// GetBassCapabilities retrieves the bass capabilities for the device
+type bassCapabilitiesWire struct {
+	XMLName       xml.Name `xml:"bassCapabilities"`
+	DeviceID      string   `xml:"deviceID,attr"`
+	BassAvailable *bool    `xml:"bassAvailable"`
+	BassMin       *int     `xml:"bassMin"`
+	BassMax       *int     `xml:"bassMax"`
+	BassDefault   *int     `xml:"bassDefault"`
+}
+
+func (wire *bassCapabilitiesWire) value() (*models.BassCapabilities, error) {
+	missing := make([]string, 0, 4)
+	if wire.BassAvailable == nil {
+		missing = append(missing, "bassAvailable")
+	}
+	if wire.BassMin == nil {
+		missing = append(missing, "bassMin")
+	}
+	if wire.BassMax == nil {
+		missing = append(missing, "bassMax")
+	}
+	if wire.BassDefault == nil {
+		missing = append(missing, "bassDefault")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("missing fields: %s", strings.Join(missing, ", "))
+	}
+
+	capabilities := &models.BassCapabilities{
+		XMLName:       wire.XMLName,
+		DeviceID:      wire.DeviceID,
+		BassAvailable: *wire.BassAvailable,
+		BassMin:       *wire.BassMin,
+		BassMax:       *wire.BassMax,
+		BassDefault:   *wire.BassDefault,
+	}
+	if err := capabilities.Validate(); err != nil {
+		return nil, err
+	}
+
+	return capabilities, nil
+}
+
+// GetBassCapabilities retrieves a structurally complete, internally
+// consistent bass capability response from the device.
 func (c *Client) GetBassCapabilities() (*models.BassCapabilities, error) {
-	var bassCapabilities models.BassCapabilities
+	var wire bassCapabilitiesWire
 
-	err := c.get("/bassCapabilities", &bassCapabilities)
+	if err := c.get("/bassCapabilities", &wire); err != nil {
+		return nil, err
+	}
 
-	return &bassCapabilities, err
+	capabilities, err := wire.value()
+	if err != nil {
+		return nil, fmt.Errorf("invalid bass capabilities response: %w", err)
+	}
+
+	return capabilities, nil
 }
 
 // GetTrackInfo retrieves track information (duplicate of GetNowPlaying per official API)

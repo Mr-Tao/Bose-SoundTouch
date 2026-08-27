@@ -583,8 +583,14 @@ func (app *WebApp) handleBassControl(w http.ResponseWriter, r *http.Request, dev
 		return
 	}
 
-	if bassReq.Level < -9 || bassReq.Level > 9 {
-		app.sendError(w, "Bass must be between -9 and 9", http.StatusBadRequest)
+	capabilities := effectiveBassCapabilities(device.Status())
+	if !capabilities.BassAvailable {
+		app.sendError(w, "Bass control is unavailable", http.StatusBadRequest)
+		return
+	}
+
+	if !capabilities.ValidateLevel(bassReq.Level) {
+		app.sendError(w, fmt.Sprintf("Bass must be between %d and %d", capabilities.BassMin, capabilities.BassMax), http.StatusBadRequest)
 		return
 	}
 
@@ -593,8 +599,24 @@ func (app *WebApp) handleBassControl(w http.ResponseWriter, r *http.Request, dev
 		return
 	}
 
-	err := device.Client.SetBass(bassReq.Level)
+	err := device.Client.SetBassWithCapabilities(bassReq.Level, &capabilities)
 	app.sendControlResponse(w, err, fmt.Sprintf("Bass set to %d", bassReq.Level))
+}
+
+func effectiveBassCapabilities(status *webtypes.DeviceStatus) models.BassCapabilities {
+	if status != nil && status.BassCapabilities != nil {
+		capabilities := *status.BassCapabilities
+		if capabilities.Validate() == nil {
+			return capabilities
+		}
+	}
+
+	return models.BassCapabilities{
+		BassAvailable: true,
+		BassMin:       -9,
+		BassMax:       0,
+		BassDefault:   0,
+	}
 }
 
 // handleSourceControl processes source control requests

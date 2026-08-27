@@ -4,11 +4,14 @@ package soundtouchweb
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -336,6 +339,13 @@ func TestHandleAPIControl_BassValidation(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 			expectSuccess:  false,
 		},
+		{
+			name:           "fallback rejects positive bass",
+			method:         "POST",
+			body:           `{"level": 1}`,
+			expectedStatus: http.StatusBadRequest,
+			expectSuccess:  false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -358,6 +368,117 @@ func TestHandleAPIControl_BassValidation(t *testing.T) {
 
 			if response.Success != tt.expectSuccess {
 				t.Errorf("Expected success=%v, got %v", tt.expectSuccess, response.Success)
+			}
+		})
+	}
+}
+
+func TestHandleAPIControl_BassCapabilities(t *testing.T) {
+	tests := []struct {
+		name         string
+		capabilities *models.BassCapabilities
+		level        int
+		wantStatus   int
+		wantPost     bool
+	}{
+		{
+			name: "reported SoundTouch range accepts zero",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+			},
+			level: 0, wantStatus: http.StatusOK, wantPost: true,
+		},
+		{
+			name: "reported SoundTouch range rejects positive",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+			},
+			level: 1, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "different reported range accepts its maximum",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: true, BassMin: -4, BassMax: 12, BassDefault: 1,
+			},
+			level: 12, wantStatus: http.StatusOK, wantPost: true,
+		},
+		{
+			name: "different reported range rejects above maximum",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: true, BassMin: -4, BassMax: 12, BassDefault: 1,
+			},
+			level: 13, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "reported unavailable capability rejects write",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: false, BassMin: 0, BassMax: 0, BassDefault: 0,
+			},
+			level: 0, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "unknown capability uses conservative fallback",
+			level:      -9,
+			wantStatus: http.StatusOK,
+			wantPost:   true,
+		},
+		{
+			name:       "unknown capability fallback rejects positive",
+			level:      1,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var posts atomic.Int32
+			speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/bass" {
+					t.Errorf("speaker request = %s %s, want POST /bass", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+
+				posts.Add(1)
+				var request models.BassRequest
+				if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Errorf("decode bass request: %v", err)
+					http.Error(w, "invalid bass request", http.StatusBadRequest)
+					return
+				}
+				if request.Level != tt.level {
+					t.Errorf("posted bass = %d, want %d", request.Level, tt.level)
+				}
+			}))
+			defer speaker.Close()
+
+			app := NewWebApp()
+			device := webtypes.NewDeviceConnection(
+				client.NewClientFromHost(speaker.URL),
+				&models.DeviceInfo{Name: "Test Speaker"},
+			)
+			device.SetStatus(&webtypes.DeviceStatus{
+				Bass:             &models.Bass{TargetBass: 0, ActualBass: 0},
+				BassCapabilities: tt.capabilities,
+				IsConnected:      true,
+			})
+			app.AddDevice("test-device", device)
+
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/api/control/devices/test-device/action/bass",
+				strings.NewReader(fmt.Sprintf(`{"level":%d}`, tt.level)),
+			)
+			request = withChiParams(request, map[string]string{"id": "test-device", "action": "bass"})
+			response := httptest.NewRecorder()
+
+			app.HandleAPIControl(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", response.Code, tt.wantStatus, response.Body.String())
+			}
+			if got := posts.Load() > 0; got != tt.wantPost {
+				t.Fatalf("speaker POST = %v, want %v", got, tt.wantPost)
 			}
 		})
 	}

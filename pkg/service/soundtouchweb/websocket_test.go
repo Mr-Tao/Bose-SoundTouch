@@ -127,17 +127,188 @@ func TestUpdateDeviceStatusRefreshesDeviceName(t *testing.T) {
 	}
 }
 
+func TestUpdateDeviceStatusFetchesAndCachesBassCapabilities(t *testing.T) {
+	var capabilityRequests atomic.Int32
+	responses := map[string]string{
+		"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+		"/name":        `<name>Living Room</name>`,
+		"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
+		"/presets":     `<presets/>`,
+		"/sources":     `<sources/>`,
+		"/bass":        `<bass><targetbass>-3</targetbass><actualbass>-3</actualbass></bass>`,
+		"/bassCapabilities": `<bassCapabilities deviceID="device-1">
+			<bassAvailable>true</bassAvailable><bassMin>-9</bassMin>
+			<bassMax>0</bassMax><bassDefault>0</bassDefault>
+		</bassCapabilities>`,
+		"/getZone": `<zone master="device-1"><member>device-1</member></zone>`,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, ok := responses[r.URL.Path]
+		if !ok {
+			t.Errorf("unexpected status endpoint %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/bassCapabilities" {
+			capabilityRequests.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	conn := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(server.URL),
+		&models.DeviceInfo{DeviceID: "device-1", Type: "SoundTouch 20"},
+	)
+	app := NewWebApp()
+	app.UpdateDeviceStatus("device-1", conn)
+	app.UpdateDeviceStatus("device-1", conn)
+
+	capabilities := conn.Status().BassCapabilities
+	if capabilities == nil || !capabilities.BassAvailable ||
+		capabilities.BassMin != -9 || capabilities.BassMax != 0 || capabilities.BassDefault != 0 {
+		t.Fatalf("bass capabilities = %+v, want reported -9..0 default 0", capabilities)
+	}
+	if got := capabilityRequests.Load(); got != 1 {
+		t.Fatalf("/bassCapabilities requests = %d, want 1", got)
+	}
+}
+
+func TestUpdateDeviceStatusCacheHitDoesNotMaskTotalHTTPFailure(t *testing.T) {
+	var capabilityRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/bassCapabilities" {
+			capabilityRequests.Add(1)
+		}
+		http.Error(w, "speaker unavailable", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	capabilities := &models.BassCapabilities{
+		BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+	}
+	conn := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(server.URL),
+		&models.DeviceInfo{DeviceID: "device-1", Type: "SoundTouch 20"},
+	)
+	conn.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.BassCapabilities = capabilities
+	})
+	conn.MarkHTTPSuccess(time.Now().Add(-61 * time.Second))
+
+	app := NewWebApp()
+	app.UpdateDeviceStatus("device-1", conn)
+	if status := conn.Status(); status.Connectivity != webtypes.ConnectivityStale || status.HTTPReachable {
+		t.Fatalf("first failed poll = connectivity %q, reachable %v; want stale false", status.Connectivity, status.HTTPReachable)
+	}
+
+	app.UpdateDeviceStatus("device-1", conn)
+	status := conn.Status()
+	if status.Connectivity != webtypes.ConnectivityOffline || status.IsConnected || status.HTTPReachable {
+		t.Fatalf("second failed poll = connectivity %q, connected %v, reachable %v; want offline false false",
+			status.Connectivity, status.IsConnected, status.HTTPReachable)
+	}
+	if status.BassCapabilities != capabilities {
+		t.Fatal("cached capabilities were discarded by failed status polls")
+	}
+	if got := capabilityRequests.Load(); got != 0 {
+		t.Fatalf("cached /bassCapabilities requests = %d, want 0", got)
+	}
+}
+
+func TestUpdateDeviceStatusRetriesInvalidBassCapabilities(t *testing.T) {
+	valid := `<bassCapabilities deviceID="device-1">
+		<bassAvailable>true</bassAvailable><bassMin>-9</bassMin>
+		<bassMax>0</bassMax><bassDefault>0</bassDefault>
+	</bassCapabilities>`
+
+	for _, test := range []struct {
+		name  string
+		first string
+	}{
+		{
+			name: "omitted bassMax",
+			first: `<bassCapabilities><bassAvailable>true</bassAvailable>
+				<bassMin>-9</bassMin><bassDefault>0</bassDefault></bassCapabilities>`,
+		},
+		{
+			name: "semantic range error",
+			first: `<bassCapabilities><bassAvailable>true</bassAvailable>
+				<bassMin>1</bassMin><bassMax>0</bassMax><bassDefault>0</bassDefault></bassCapabilities>`,
+		},
+		{
+			name: "malformed scalar",
+			first: `<bassCapabilities><bassAvailable>true</bassAvailable>
+				<bassMin>-9</bassMin><bassMax>invalid</bassMax><bassDefault>0</bassDefault></bassCapabilities>`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var capabilityRequests atomic.Int32
+			responses := map[string]string{
+				"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+				"/name":        `<name>Living Room</name>`,
+				"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
+				"/presets":     `<presets/>`,
+				"/sources":     `<sources/>`,
+				"/bass":        `<bass><targetbass>-3</targetbass><actualbass>-3</actualbass></bass>`,
+				"/getZone":     `<zone master="device-1"><member>device-1</member></zone>`,
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/xml")
+				if r.URL.Path == "/bassCapabilities" {
+					if capabilityRequests.Add(1) == 1 {
+						_, _ = w.Write([]byte(test.first))
+					} else {
+						_, _ = w.Write([]byte(valid))
+					}
+					return
+				}
+
+				body, ok := responses[r.URL.Path]
+				if !ok {
+					t.Errorf("unexpected status endpoint %q", r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+
+			conn := webtypes.NewDeviceConnection(
+				client.NewClientFromHost(server.URL),
+				&models.DeviceInfo{DeviceID: "device-1", Type: "SoundTouch 20"},
+			)
+			app := NewWebApp()
+			app.UpdateDeviceStatus("device-1", conn)
+			if conn.Status().BassCapabilities != nil {
+				t.Fatal("invalid capability response was cached")
+			}
+
+			app.UpdateDeviceStatus("device-1", conn)
+			capabilities := conn.Status().BassCapabilities
+			if capabilities == nil || capabilities.BassMin != -9 || capabilities.BassMax != 0 {
+				t.Fatalf("retried capabilities = %+v, want valid -9..0", capabilities)
+			}
+			if got := capabilityRequests.Load(); got != 2 {
+				t.Fatalf("capability requests = %d, want invalid attempt plus retry", got)
+			}
+		})
+	}
+}
+
 func TestUpdateDeviceStatusDoesNotOverwriteNewerNameEvent(t *testing.T) {
 	nameRequestStarted := make(chan struct{})
 	releaseNameResponse := make(chan struct{})
 	responses := map[string]string{
-		"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
-		"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
-		"/presets":     `<presets/>`,
-		"/sources":     `<sources/>`,
-		"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
-		"/getGroup":    `<group/>`,
-		"/getZone":     `<zone master="device-1"><member>device-1</member></zone>`,
+		"/now_playing":      `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+		"/volume":           `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
+		"/presets":          `<presets/>`,
+		"/sources":          `<sources/>`,
+		"/bass":             `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
+		"/bassCapabilities": `<bassCapabilities><bassAvailable>true</bassAvailable><bassMin>-9</bassMin><bassMax>0</bassMax><bassDefault>0</bassDefault></bassCapabilities>`,
+		"/getGroup":         `<group/>`,
+		"/getZone":          `<zone master="device-1"><member>device-1</member></zone>`,
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
@@ -196,13 +367,14 @@ func TestUpdateDeviceStatusCannotOverwriteNewerVolumeReadback(t *testing.T) {
 	presetsRequestStarted := make(chan struct{})
 	releasePresetsResponse := make(chan struct{})
 	responses := map[string]string{
-		"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
-		"/name":        `<name>Living Room</name>`,
-		"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
-		"/presets":     `<presets/>`,
-		"/sources":     `<sources/>`,
-		"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
-		"/getZone":     `<zone master="device-1"><member>device-1</member></zone>`,
+		"/now_playing":      `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+		"/name":             `<name>Living Room</name>`,
+		"/volume":           `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
+		"/presets":          `<presets/>`,
+		"/sources":          `<sources/>`,
+		"/bass":             `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
+		"/bassCapabilities": `<bassCapabilities><bassAvailable>true</bassAvailable><bassMin>-9</bassMin><bassMax>0</bassMax><bassDefault>0</bassDefault></bassCapabilities>`,
+		"/getZone":          `<zone master="device-1"><member>device-1</member></zone>`,
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
@@ -320,13 +492,14 @@ func TestUpdateDeviceStatusSkipsGroupForNonStereoModel(t *testing.T) {
 		}
 
 		responses := map[string]string{
-			"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
-			"/name":        `<name>Living Room</name>`,
-			"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
-			"/presets":     `<presets/>`,
-			"/sources":     `<sources/>`,
-			"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
-			"/getZone":     `<zone master="device-1"><member>device-1</member></zone>`,
+			"/now_playing":      `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+			"/name":             `<name>Living Room</name>`,
+			"/volume":           `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
+			"/presets":          `<presets/>`,
+			"/sources":          `<sources/>`,
+			"/bass":             `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
+			"/bassCapabilities": `<bassCapabilities><bassAvailable>true</bassAvailable><bassMin>-9</bassMin><bassMax>0</bassMax><bassDefault>0</bassDefault></bassCapabilities>`,
+			"/getZone":          `<zone master="device-1"><member>device-1</member></zone>`,
 		}
 		body, ok := responses[r.URL.Path]
 		if !ok {
@@ -746,13 +919,14 @@ func newStatusTestServer(t *testing.T, groupStatus int, groupBody string) *httpt
 	t.Helper()
 
 	responses := map[string]string{
-		"/now_playing": `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
-		"/name":        `<name>Living Room Left</name>`,
-		"/volume":      `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
-		"/presets":     `<presets/>`,
-		"/sources":     `<sources/>`,
-		"/bass":        `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
-		"/getZone":     `<zone master="device-1"><member>device-1</member></zone>`,
+		"/now_playing":      `<nowPlaying source="STANDBY"><playStatus>STOP_STATE</playStatus></nowPlaying>`,
+		"/name":             `<name>Living Room Left</name>`,
+		"/volume":           `<volume><targetvolume>10</targetvolume><actualvolume>10</actualvolume><muteenabled>false</muteenabled></volume>`,
+		"/presets":          `<presets/>`,
+		"/sources":          `<sources/>`,
+		"/bass":             `<bass><targetbass>0</targetbass><actualbass>0</actualbass></bass>`,
+		"/bassCapabilities": `<bassCapabilities><bassAvailable>true</bassAvailable><bassMin>-9</bassMin><bassMax>0</bassMax><bassDefault>0</bassDefault></bassCapabilities>`,
+		"/getZone":          `<zone master="device-1"><member>device-1</member></zone>`,
 	}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

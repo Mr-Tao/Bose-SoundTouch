@@ -429,6 +429,7 @@ func (app *WebApp) UpdateDeviceStatus(deviceID string, conn *webtypes.DeviceConn
 	presets, presetsErr := conn.Client.GetPresets()
 	sources, sourcesErr := conn.Client.GetSources()
 	bass, bassErr := conn.Client.GetBass()
+	bassCapabilitiesOutcome, _ := conn.EnsureBassCapabilities(conn.Client.GetBassCapabilities)
 	zone, zoneErr := conn.Client.GetZone()
 
 	var (
@@ -475,6 +476,9 @@ func (app *WebApp) UpdateDeviceStatus(deviceID string, conn *webtypes.DeviceConn
 		bassErr,
 		zoneErr,
 	)
+	if bassCapabilitiesOutcome == webtypes.BassCapabilitiesFetched {
+		statusUpdated = true
+	}
 	if stereoCapable && groupErr == nil {
 		statusUpdated = true
 	}

@@ -322,6 +322,30 @@ func TestProjectCapturedDeviceEntriesUsesOneCoherentStatusPerDevice(t *testing.T
 	}
 }
 
+func TestLogicalStereoProjectionPreservesMasterBassCapabilities(t *testing.T) {
+	group := testStereoGroup()
+	master := projectionDevice("192.0.2.10", "left-id", "Living Room", true, group)
+	master.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.BassCapabilities = &models.BassCapabilities{
+			BassAvailable: true,
+			BassMin:       -9,
+			BassMax:       0,
+			BassDefault:   0,
+		}
+	})
+
+	got := projectDeviceEntries([]DeviceEntry{
+		master,
+		projectionDevice("192.0.2.11", "right-id", "Living Room", true, group),
+	})
+
+	view := got["192.0.2.10"]
+	if view.StereoPair == nil || view.Status == nil || view.Status.BassCapabilities == nil ||
+		view.Status.BassCapabilities.BassMax != 0 {
+		t.Fatalf("logical stereo projection lost master bass capabilities: %+v", view)
+	}
+}
+
 func TestHandleAPIDevicesUsesLogicalStereoProjection(t *testing.T) {
 	app := NewWebApp()
 	group := testStereoGroup()

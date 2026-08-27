@@ -2,6 +2,8 @@
 package webtypes
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -67,6 +69,9 @@ type DeviceConnection struct {
 	balanceGen uint64
 	healthMu   sync.Mutex
 
+	bassCapabilitiesMu     sync.Mutex
+	bassCapabilitiesFlight *bassCapabilitiesFlight
+
 	balanceOperationMu sync.Mutex
 	balanceWriteMu     sync.Mutex
 
@@ -99,20 +104,21 @@ type DeviceConnection struct {
 
 // DeviceStatus represents the current device state
 type DeviceStatus struct {
-	NowPlaying             *models.NowPlaying      `json:"nowPlaying,omitempty"`
-	Volume                 *models.Volume          `json:"volume,omitempty"`
-	Balance                *models.Balance         `json:"balance,omitempty"`
-	Presets                *models.Presets         `json:"presets,omitempty"`
-	Sources                *models.Sources         `json:"sources,omitempty"`
-	Bass                   *models.Bass            `json:"bass,omitempty"`
-	Group                  *models.Group           `json:"group,omitempty"`
-	Zone                   *models.ZoneInfo        `json:"zone,omitempty"`
-	Connectivity           Connectivity            `json:"connectivity"`
-	HTTPReachable          bool                    `json:"httpReachable"`
-	WebSocketConnected     bool                    `json:"webSocketConnected"`
-	SpeakerConnectionState *SpeakerConnectionState `json:"speakerConnectionState,omitempty"`
-	IsConnected            bool                    `json:"isConnected"`
-	LastActivity           time.Time               `json:"lastActivity"`
+	NowPlaying             *models.NowPlaying       `json:"nowPlaying,omitempty"`
+	Volume                 *models.Volume           `json:"volume,omitempty"`
+	Balance                *models.Balance          `json:"balance,omitempty"`
+	Presets                *models.Presets          `json:"presets,omitempty"`
+	Sources                *models.Sources          `json:"sources,omitempty"`
+	Bass                   *models.Bass             `json:"bass,omitempty"`
+	BassCapabilities       *models.BassCapabilities `json:"bassCapabilities,omitempty"`
+	Group                  *models.Group            `json:"group,omitempty"`
+	Zone                   *models.ZoneInfo         `json:"zone,omitempty"`
+	Connectivity           Connectivity             `json:"connectivity"`
+	HTTPReachable          bool                     `json:"httpReachable"`
+	WebSocketConnected     bool                     `json:"webSocketConnected"`
+	SpeakerConnectionState *SpeakerConnectionState  `json:"speakerConnectionState,omitempty"`
+	IsConnected            bool                     `json:"isConnected"`
+	LastActivity           time.Time                `json:"lastActivity"`
 }
 
 // Connectivity is the player's view of HTTP reachability. It deliberately
@@ -340,6 +346,89 @@ func (c *DeviceConnection) balanceRefreshCurrentLocked(refresh BalanceRefresh) b
 		reflect.DeepEqual(refresh.Group, c.Status().Group)
 }
 
+// BassCapabilitiesFetchOutcome describes whether EnsureBassCapabilities made a
+// fresh request, reused the cache, or failed to obtain a valid response.
+type BassCapabilitiesFetchOutcome uint8
+
+const (
+	BassCapabilitiesFetchFailed BassCapabilitiesFetchOutcome = iota
+	BassCapabilitiesCacheHit
+	BassCapabilitiesFetched
+)
+
+type bassCapabilitiesFlight struct {
+	done    chan struct{}
+	outcome BassCapabilitiesFetchOutcome
+	err     error
+}
+
+// EnsureBassCapabilities retains the first successful valid capability
+// response for this physical connection. Calls that arrive during a failed
+// fetch share that failure; a later call starts a new attempt.
+func (c *DeviceConnection) EnsureBassCapabilities(
+	fetch func() (*models.BassCapabilities, error),
+) (BassCapabilitiesFetchOutcome, error) {
+	c.bassCapabilitiesMu.Lock()
+
+	if capabilities := c.Status().BassCapabilities; capabilities != nil {
+		if err := capabilities.Validate(); err == nil {
+			c.bassCapabilitiesMu.Unlock()
+			return BassCapabilitiesCacheHit, nil
+		}
+
+		c.UpdateStatus(func(status *DeviceStatus) {
+			status.BassCapabilities = nil
+		})
+	}
+
+	if flight := c.bassCapabilitiesFlight; flight != nil {
+		c.bassCapabilitiesMu.Unlock()
+		<-flight.done
+
+		if flight.outcome == BassCapabilitiesFetchFailed {
+			return BassCapabilitiesFetchFailed, flight.err
+		}
+
+		return BassCapabilitiesCacheHit, nil
+	}
+
+	flight := &bassCapabilitiesFlight{done: make(chan struct{})}
+	c.bassCapabilitiesFlight = flight
+	c.bassCapabilitiesMu.Unlock()
+
+	capabilities, err := fetch()
+	if err == nil {
+		if capabilities == nil {
+			err = errors.New("bass capabilities response is nil")
+		} else if validationErr := capabilities.Validate(); validationErr != nil {
+			err = fmt.Errorf("invalid bass capabilities: %w", validationErr)
+		}
+	}
+	if err == nil {
+		c.UpdateStatus(func(status *DeviceStatus) {
+			status.BassCapabilities = capabilities
+		})
+	}
+
+	flightOutcome := BassCapabilitiesFetched
+	if err != nil {
+		flightOutcome = BassCapabilitiesFetchFailed
+	}
+
+	c.bassCapabilitiesMu.Lock()
+	flight.outcome = flightOutcome
+	flight.err = err
+	c.bassCapabilitiesFlight = nil
+	close(flight.done)
+	c.bassCapabilitiesMu.Unlock()
+
+	if err != nil {
+		return BassCapabilitiesFetchFailed, err
+	}
+
+	return BassCapabilitiesFetched, nil
+}
+
 // Info returns a read-only metadata snapshot with the latest device name.
 func (c *DeviceConnection) Info() *models.DeviceInfo {
 	if c.DeviceInfo == nil {
@@ -523,7 +612,7 @@ func (c *DeviceConnection) SetStatus(s *DeviceStatus) {
 //
 // The copy mut receives is a shallow value copy of the previous status.
 // Nested pointer fields (NowPlaying, Volume, Balance, Presets, Sources, Bass,
-// Group, Zone)
+// BassCapabilities, Group, Zone)
 // share their backing struct with the previous version: callers MUST
 // REPLACE these pointers (s.Volume = &models.Volume{...}) rather than
 // mutate through them (s.Volume.ActualVolume++ would race with any

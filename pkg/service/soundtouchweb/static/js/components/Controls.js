@@ -1,5 +1,6 @@
 import { h, htm, useEffect, useState } from '../dependencies.js';
 import { api } from '../api.js';
+import { bassControlForStatus } from '../bassCapabilities.mjs';
 
 const html = htm.bind(h);
 
@@ -48,8 +49,8 @@ export function Controls({ deviceId, status }) {
     const isMuted = status?.volume?.MuteEnabled ?? false;
     const shuffle = np?.ShuffleSetting ?? 'SHUFFLE_OFF';
     const repeat = np?.RepeatSetting ?? 'REPEAT_OFF';
-    const actualBass = status?.bass?.TargetBass ?? 0;
-    const hasBass = status?.bass != null;
+    const bassControl = bassControlForStatus(status);
+    const actualBass = bassControl.value;
 
     const [localVolume, setLocalVolume] = useState(actualVolume);
     const [localBass, setLocalBass] = useState(actualBass);
@@ -105,10 +106,11 @@ export function Controls({ deviceId, status }) {
                     value=${localVolume} onInput=${onVolumeChange} />
                 <span class="volume-value">${localVolume}</span>
             </div>
-            ${hasBass && html`
+            ${bassControl.available && html`
                 <div class="bass-row">
                     <span class="bass-label">Bass</span>
-                    <input type="range" class="volume-slider" min="-9" max="9"
+                    <input type="range" class="volume-slider"
+                        min=${bassControl.min} max=${bassControl.max} step="1"
                         value=${localBass} onInput=${onBassChange} />
                     <span class="volume-value">${localBass > 0 ? '+' : ''}${localBass}</span>
                 </div>

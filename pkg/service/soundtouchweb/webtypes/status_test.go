@@ -4,8 +4,11 @@ package webtypes
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -351,8 +354,11 @@ func TestUpdateStatus_AppliesMutator(t *testing.T) {
 func TestUpdateStatus_PreservesUnchangedFields(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
 	conn.SetStatus(&DeviceStatus{
-		Volume:      &models.Volume{ActualVolume: 10},
-		Bass:        &models.Bass{ActualBass: 3},
+		Volume: &models.Volume{ActualVolume: 10},
+		Bass:   &models.Bass{ActualBass: 3},
+		BassCapabilities: &models.BassCapabilities{
+			BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+		},
 		Group:       &models.Group{ID: "pair-1", Name: "Living Room"},
 		IsConnected: true,
 	})
@@ -371,12 +377,131 @@ func TestUpdateStatus_PreservesUnchangedFields(t *testing.T) {
 		t.Errorf("Bass not preserved: %+v", got.Bass)
 	}
 
+	if got.BassCapabilities == nil || got.BassCapabilities.BassMax != 0 {
+		t.Errorf("BassCapabilities not preserved: %+v", got.BassCapabilities)
+	}
+
 	if got.Group == nil || got.Group.ID != "pair-1" {
 		t.Errorf("Group not preserved: %+v", got.Group)
 	}
 
 	if !got.IsConnected {
 		t.Error("IsConnected not preserved")
+	}
+}
+
+func TestEnsureBassCapabilitiesSharesSuccessfulFetch(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	capabilities := &models.BassCapabilities{
+		BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+	}
+
+	var fetches atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fetch := func() (*models.BassCapabilities, error) {
+		if fetches.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return capabilities, nil
+	}
+
+	const callers = 8
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			outcome, err := conn.EnsureBassCapabilities(fetch)
+			if err != nil {
+				t.Errorf("EnsureBassCapabilities: %v", err)
+			}
+			if outcome != BassCapabilitiesFetched && outcome != BassCapabilitiesCacheHit {
+				t.Errorf("EnsureBassCapabilities outcome = %v", outcome)
+			}
+		}()
+	}
+
+	<-started
+	close(release)
+	wg.Wait()
+
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("capability fetches = %d, want 1", got)
+	}
+	if got := conn.Status().BassCapabilities; got != capabilities {
+		t.Fatalf("stored capabilities = %p, want %p", got, capabilities)
+	}
+}
+
+func TestEnsureBassCapabilitiesFailedFlightSurvivesNextRetryOvertake(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	type result struct {
+		outcome BassCapabilitiesFetchOutcome
+		err     error
+	}
+
+	const (
+		rounds  = 50
+		waiters = 8
+	)
+	for round := range rounds {
+		conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+		fetchErr := fmt.Errorf("first flight failed: %d", round)
+		waiterResults := make(chan result, waiters)
+		var waiterFetches atomic.Int32
+		ownerOutcome, ownerErr := conn.EnsureBassCapabilities(func() (*models.BassCapabilities, error) {
+			for range waiters {
+				waiterStarted := make(chan struct{})
+				go func() {
+					close(waiterStarted)
+					outcome, err := conn.EnsureBassCapabilities(func() (*models.BassCapabilities, error) {
+						waiterFetches.Add(1)
+						return nil, errors.New("waiter incorrectly started a fetch")
+					})
+					waiterResults <- result{outcome: outcome, err: err}
+				}()
+				<-waiterStarted
+				for range 4 {
+					runtime.Gosched()
+				}
+			}
+
+			return nil, fetchErr
+		})
+		if ownerOutcome != BassCapabilitiesFetchFailed || !errors.Is(ownerErr, fetchErr) {
+			t.Fatalf("round %d owner result = (%v, %v), want first-flight failure", round, ownerOutcome, ownerErr)
+		}
+		if conn.Status().BassCapabilities != nil {
+			t.Fatalf("round %d failed flight cached capabilities", round)
+		}
+
+		capabilities := &models.BassCapabilities{
+			BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+		}
+		retryOutcome, retryErr := conn.EnsureBassCapabilities(func() (*models.BassCapabilities, error) {
+			return capabilities, nil
+		})
+		if retryErr != nil || retryOutcome != BassCapabilitiesFetched {
+			t.Fatalf("round %d retry = (%v, %v), want fetched success", round, retryOutcome, retryErr)
+		}
+
+		for range waiters {
+			waiter := <-waiterResults
+			if waiter.outcome != BassCapabilitiesFetchFailed || !errors.Is(waiter.err, fetchErr) {
+				t.Fatalf("round %d waiter result = (%v, %v), want immutable first-flight failure",
+					round, waiter.outcome, waiter.err)
+			}
+		}
+		if got := waiterFetches.Load(); got != 0 {
+			t.Fatalf("round %d waiter fetches = %d, want 0", round, got)
+		}
+		if got := conn.Status().BassCapabilities; got != capabilities {
+			t.Fatalf("round %d cached capabilities = %p, want retry result %p", round, got, capabilities)
+		}
 	}
 }
 

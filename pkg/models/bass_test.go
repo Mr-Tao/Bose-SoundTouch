@@ -447,22 +447,30 @@ func TestBass_UnmarshalXML(t *testing.T) {
 			},
 		},
 		{
-			name: "Invalid target bass too high",
+			name: "Device-reported target outside legacy range",
 			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
 <bass deviceID="1234567890AB">
   <targetbass>15</targetbass>
   <actualbass>5</actualbass>
 </bass>`,
-			wantError: true,
+			want: Bass{
+				DeviceID:   "1234567890AB",
+				TargetBass: 15,
+				ActualBass: 5,
+			},
 		},
 		{
-			name: "Invalid actual bass too low",
+			name: "Device-reported actual outside legacy range",
 			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
 <bass deviceID="1234567890AB">
   <targetbass>5</targetbass>
   <actualbass>-15</actualbass>
 </bass>`,
-			wantError: true,
+			want: Bass{
+				DeviceID:   "1234567890AB",
+				TargetBass: 5,
+				ActualBass: -15,
+			},
 		},
 	}
 
