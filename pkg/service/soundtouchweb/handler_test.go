@@ -804,6 +804,53 @@ func TestHandleZoneAddRejectsSelf(t *testing.T) {
 	}
 }
 
+func TestHandleGetZoneDoesNotProjectMasterAsMember(t *testing.T) {
+	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/getZone" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`<zone master="MASTERHW01"><member ipaddress="192.0.2.10">MASTERHW01</member><member ipaddress="192.0.2.20">SLAVEHW02</member></zone>`))
+	}))
+	defer speaker.Close()
+
+	app := NewWebApp()
+	app.AddDevice("192.0.2.10", webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: speaker.URL}),
+		&models.DeviceInfo{Name: "Master", DeviceID: "MASTERHW01"},
+	))
+	app.AddDevice("192.0.2.20", webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Slave", DeviceID: "SLAVEHW02"}))
+
+	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.10/zone", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10"})
+	w := httptest.NewRecorder()
+	app.HandleGetZone(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			IsMaster bool `json:"isMaster"`
+			IsSlave  bool `json:"isSlave"`
+			Members  []struct {
+				HwID string `json:"hwId"`
+			} `json:"members"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.Success || !response.Data.IsMaster || response.Data.IsSlave {
+		t.Fatalf("unexpected role projection: %+v", response.Data)
+	}
+	if len(response.Data.Members) != 1 || response.Data.Members[0].HwID != "SLAVEHW02" {
+		t.Fatalf("members = %+v, want only SLAVEHW02", response.Data.Members)
+	}
+}
+
 func TestHandleZoneAddRejectsSameHardwareUnderDifferentKeys(t *testing.T) {
 	app := NewWebApp()
 	app.AddDevice("speaker.local", webtypes.NewDeviceConnection(

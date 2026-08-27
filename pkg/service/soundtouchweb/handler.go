@@ -948,6 +948,13 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 	members := make([]memberInfo, 0, len(zone.Members))
 
 	for _, m := range zone.Members {
+		// SoundTouch masters include themselves in their /getZone member list.
+		// Keep the API projection role-based so the master is not also rendered
+		// as a removable member.
+		if m.DeviceID == zone.Master {
+			continue
+		}
+
 		name := ""
 		if conn, ok := app.GetDevice(m.IP); ok && conn.DeviceInfo != nil {
 			name = conn.DeviceInfo.Name
@@ -957,14 +964,7 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isMaster := zone.Master == currentHwID && !zone.IsStandalone()
-	isSlave := false
-
-	for _, m := range zone.Members {
-		if m.DeviceID == currentHwID {
-			isSlave = true
-			break
-		}
-	}
+	isSlave := zone.IsMember(currentHwID)
 
 	w.Header().Set("Content-Type", "application/json")
 
