@@ -145,7 +145,7 @@ func TestExecuteInitPlan_FactoryReset_GeneratesAccountAndRunsAllSteps(t *testing
 	wantCalls := []string{
 		"Start",
 		"IdentifyEnter(300000)",
-		"SetLanguage(2)",
+		"SetLanguage(3)",
 		"Enter",
 		"IdentifyLeave",
 		"SetName(Living Room)",

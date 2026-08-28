@@ -2032,7 +2032,7 @@ func setupPairCmd() *cli.Command {
 			&cli.StringFlag{Name: "mode", Value: "full", Usage: "full (state machine) or bare (setMargeAccount only — experimental)"},
 			&cli.StringFlag{Name: "service-url", Value: "http://aftertouch.local:8000", Usage: "AfterTouch base URL (also populates <boseServer>/<updateServer> in setMargeAccount)"},
 			&cli.StringFlag{Name: "name", Usage: "Speaker name to set during pairing (empty = keep current)"},
-			&cli.IntFlag{Name: "language", Value: setup.LanguageEnglish, Usage: "sysLanguage code (2 = English)"},
+			&cli.IntFlag{Name: "language", Value: setup.LanguageEnglish, Usage: "sysLanguage code (3 = English)"},
 			&cli.DurationFlag{Name: "step-timeout", Value: 8 * time.Second},
 			&cli.StringFlag{Name: "token", Usage: "userAuthToken value (empty = use built-in placeholder matching the Bose app token shape)"},
 		},

@@ -201,7 +201,7 @@ func (m *Manager) ExecuteInitPlan(ctx context.Context, plan InitPlan, progress P
 }
 
 // applyInitPlanDefaults validates required fields and fills in defaults
-// from Manager.ServerURL / sysLanguage 2 / DefaultMargeAuthToken.
+// from Manager.ServerURL / LanguageEnglish / DefaultMargeAuthToken.
 func applyInitPlanDefaults(plan InitPlan, serverURL string) (InitPlan, error) {
 	if plan.DeviceIP == "" {
 		return plan, errors.New("InitPlan.DeviceIP is required")

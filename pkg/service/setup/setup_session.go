@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gorilla/websocket"
 )
 
@@ -18,9 +19,9 @@ const (
 	defaultSetupStepTimeout = 8 * time.Second
 	setupHandshakeTimeout   = 10 * time.Second
 
-	// LanguageEnglish is the sysLanguage code for English. ‹2› is the
-	// value the official Bose app sends during English-locale setup.
-	LanguageEnglish = 2
+	// LanguageEnglish is the sysLanguage code used by Stockholm and the
+	// speaker firmware for English.
+	LanguageEnglish = int(models.LanguageEnglish)
 
 	// DefaultMargeAuthToken is the placeholder userAuthToken sent in
 	// <PairDeviceWithAccount> when the caller didn't supply one. The
@@ -271,8 +272,12 @@ func (s *Session) IdentifyEnter(ctx context.Context, timeoutMs int) error {
 	return s.sendStep(ctx, "setup", "POST", body)
 }
 
-// SetLanguage POSTs sysLanguage. Code 2 = English.
+// SetLanguage POSTs a validated sysLanguage code.
 func (s *Session) SetLanguage(ctx context.Context, code int) error {
+	if err := models.LanguageCode(code).Validate(); err != nil {
+		return fmt.Errorf("SetLanguage: %w", err)
+	}
+
 	body := fmt.Sprintf(`<sysLanguage>%d</sysLanguage>`, code)
 	return s.sendStep(ctx, "language", "POST", body)
 }
