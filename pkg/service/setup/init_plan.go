@@ -219,6 +219,7 @@ func applyInitPlanDefaults(plan InitPlan, serverURL string) (InitPlan, error) {
 	if plan.Language == 0 {
 		plan.Language = LanguageEnglish
 	}
+
 	if err := models.LanguageCode(plan.Language).Validate(); err != nil {
 		return plan, fmt.Errorf("InitPlan.Language: %w", err)
 	}

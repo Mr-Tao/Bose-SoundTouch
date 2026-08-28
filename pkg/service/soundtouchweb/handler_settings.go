@@ -112,10 +112,12 @@ var systemLanguageCodes = []models.LanguageCode{
 func supportedSystemLanguageOptions(current models.LanguageCode) []settingsLanguageOption {
 	options := make([]settingsLanguageOption, 0, len(systemLanguageCodes)+1)
 	currentKnown := false
+
 	for _, code := range systemLanguageCodes {
 		options = append(options, settingsLanguageOption{Code: int(code), Name: models.SystemLanguageNames[code]})
 		currentKnown = currentKnown || code == current
 	}
+
 	if !currentKnown {
 		options = append(options, settingsLanguageOption{
 			Code: int(current),
@@ -170,6 +172,7 @@ func settingsSourceList(sources *models.Sources) []settingsSource {
 	}
 
 	result := make([]settingsSource, 0)
+
 	for _, source := range sources.SourceItem {
 		if source.Source != "AUX" {
 			continue
@@ -193,41 +196,7 @@ func settingsConnectionStatus(nowPlaying *models.NowPlaying) (string, string) {
 	return nowPlaying.ConnectionStatusInfo.Status, nowPlaying.ConnectionStatusInfo.DeviceName
 }
 
-func (app *WebApp) readDeviceSettings(device *webtypes.DeviceConnection) (*deviceSettingsSnapshot, error) {
-	capabilities, err := device.Client.GetCapabilities()
-	if err != nil {
-		return nil, fmt.Errorf("read device capabilities: %w", err)
-	}
-
-	supportedURLs, err := device.Client.GetSupportedURLs()
-	if err != nil {
-		return nil, fmt.Errorf("read supported device endpoints: %w", err)
-	}
-
-	snapshot := &deviceSettingsSnapshot{Errors: make(map[string]string)}
-
-	sources, sourcesErr := device.Client.GetSources()
-	if sourcesErr != nil {
-		snapshot.Errors["sources"] = sourcesErr.Error()
-	}
-
-	hasBluetooth := hasSource(sources, "BLUETOOTH")
-	renameableSources := settingsSourceList(sources)
-	snapshot.Sources = renameableSources
-
-	snapshot.Support = settingsSupport{
-		ClockDisplay:   capabilities.HasClockDisplay() && supportedURLs.HasURL("/clockDisplay"),
-		ClockTime:      capabilities.HasClockDisplay() && supportedURLs.HasURL("/clockTime"),
-		SystemTimeout:  capabilities.HasCapability("systemtimeout") && supportedURLs.HasURL("/systemtimeout"),
-		Language:       supportedURLs.HasURL("/language"),
-		Bluetooth:      hasBluetooth && supportedURLs.HasURL("/bluetoothInfo"),
-		BluetoothPair:  hasBluetooth && supportedURLs.HasURL("/enterPairingMode"),
-		BluetoothClear: hasBluetooth && supportedURLs.HasURL("/clearPairedList"),
-		Sync:           capabilities.HasCapability("rebroadcastlatencymode") && supportedURLs.HasURL("/rebroadcastlatencymode"),
-		SourceNaming:   len(renameableSources) > 0 && supportedURLs.HasURL("/nameSource"),
-		WiFiOnboarding: capabilities.HasHostedWifiConfig(),
-	}
-
+func readBasicDeviceSettings(device *webtypes.DeviceConnection, snapshot *deviceSettingsSnapshot) {
 	if snapshot.Support.ClockDisplay {
 		value, readErr := device.Client.GetClockDisplay()
 		if readErr != nil {
@@ -271,57 +240,122 @@ func (app *WebApp) readDeviceSettings(device *webtypes.DeviceConnection) (*devic
 			}
 		}
 	}
+}
 
-	if snapshot.Support.Sync {
-		value, readErr := device.Client.GetRebroadcastLatencyMode()
-		if readErr != nil {
-			snapshot.Errors["sync"] = readErr.Error()
-		} else if !value.Controllable {
-			snapshot.Support.Sync = false
-		} else {
-			snapshot.Sync = &settingsSync{Mode: string(value.Mode)}
-		}
+func readSyncDeviceSetting(device *webtypes.DeviceConnection, snapshot *deviceSettingsSnapshot) {
+	if !snapshot.Support.Sync {
+		return
 	}
 
-	if snapshot.Support.Bluetooth {
-		value, readErr := device.Client.GetBluetoothInfo()
-		if readErr != nil {
-			snapshot.Errors["bluetooth"] = readErr.Error()
-		} else {
-			nowPlaying, nowPlayingErr := device.Client.GetNowPlaying()
-			if nowPlayingErr != nil {
-				snapshot.Errors["bluetooth"] = nowPlayingErr.Error()
-			}
+	value, readErr := device.Client.GetRebroadcastLatencyMode()
+	switch {
+	case readErr != nil:
+		snapshot.Errors["sync"] = readErr.Error()
+	case !value.Controllable:
+		snapshot.Support.Sync = false
+	default:
+		snapshot.Sync = &settingsSync{Mode: string(value.Mode)}
+	}
+}
 
-			status, name := settingsConnectionStatus(nowPlaying)
-			snapshot.Bluetooth = &settingsBluetooth{
-				MACAddress:       value.BluetoothMACAddress,
-				ConnectionStatus: status,
-				DeviceName:       name,
-			}
-		}
+func readBluetoothDeviceSetting(device *webtypes.DeviceConnection, snapshot *deviceSettingsSnapshot) {
+	if !snapshot.Support.Bluetooth {
+		return
 	}
 
-	if supportedURLs.HasURL("/networkInfo") {
-		value, readErr := device.Client.GetNetworkInfo()
-		if readErr != nil {
-			snapshot.Errors["network"] = readErr.Error()
-		} else {
-			network := &settingsNetwork{Interfaces: make([]settingsNetworkInterface, 0, len(value.GetInterfaces()))}
-			for _, iface := range value.GetInterfaces() {
-				network.Interfaces = append(network.Interfaces, settingsNetworkInterface{
-					Type:      iface.Type,
-					Name:      iface.Name,
-					IPAddress: iface.IPAddress,
-					SSID:      iface.SSID,
-					State:     iface.State,
-					Signal:    iface.Signal,
-				})
-			}
+	value, readErr := device.Client.GetBluetoothInfo()
+	if readErr != nil {
+		snapshot.Errors["bluetooth"] = readErr.Error()
 
-			snapshot.Network = network
-		}
+		return
 	}
+
+	nowPlaying, nowPlayingErr := device.Client.GetNowPlaying()
+	if nowPlayingErr != nil {
+		snapshot.Errors["bluetooth"] = nowPlayingErr.Error()
+	}
+
+	status, name := settingsConnectionStatus(nowPlaying)
+	snapshot.Bluetooth = &settingsBluetooth{
+		MACAddress:       value.BluetoothMACAddress,
+		ConnectionStatus: status,
+		DeviceName:       name,
+	}
+}
+
+func readNetworkDeviceSetting(
+	device *webtypes.DeviceConnection,
+	supportedURLs *models.SupportedURLsResponse,
+	snapshot *deviceSettingsSnapshot,
+) {
+	if !supportedURLs.HasURL("/networkInfo") {
+		return
+	}
+
+	value, readErr := device.Client.GetNetworkInfo()
+	if readErr != nil {
+		snapshot.Errors["network"] = readErr.Error()
+
+		return
+	}
+
+	interfaces := value.GetInterfaces()
+	network := &settingsNetwork{Interfaces: make([]settingsNetworkInterface, 0, len(interfaces))}
+
+	for index := range interfaces {
+		iface := &interfaces[index]
+		network.Interfaces = append(network.Interfaces, settingsNetworkInterface{
+			Type:      iface.Type,
+			Name:      iface.Name,
+			IPAddress: iface.IPAddress,
+			SSID:      iface.SSID,
+			State:     iface.State,
+			Signal:    iface.Signal,
+		})
+	}
+
+	snapshot.Network = network
+}
+
+func (app *WebApp) readDeviceSettings(device *webtypes.DeviceConnection) (*deviceSettingsSnapshot, error) {
+	capabilities, err := device.Client.GetCapabilities()
+	if err != nil {
+		return nil, fmt.Errorf("read device capabilities: %w", err)
+	}
+
+	supportedURLs, err := device.Client.GetSupportedURLs()
+	if err != nil {
+		return nil, fmt.Errorf("read supported device endpoints: %w", err)
+	}
+
+	snapshot := &deviceSettingsSnapshot{Errors: make(map[string]string)}
+
+	sources, sourcesErr := device.Client.GetSources()
+	if sourcesErr != nil {
+		snapshot.Errors["sources"] = sourcesErr.Error()
+	}
+
+	hasBluetooth := hasSource(sources, "BLUETOOTH")
+	renameableSources := settingsSourceList(sources)
+	snapshot.Sources = renameableSources
+
+	snapshot.Support = settingsSupport{
+		ClockDisplay:   capabilities.HasClockDisplay() && supportedURLs.HasURL("/clockDisplay"),
+		ClockTime:      capabilities.HasClockDisplay() && supportedURLs.HasURL("/clockTime"),
+		SystemTimeout:  capabilities.HasCapability("systemtimeout") && supportedURLs.HasURL("/systemtimeout"),
+		Language:       supportedURLs.HasURL("/language"),
+		Bluetooth:      hasBluetooth && supportedURLs.HasURL("/bluetoothInfo"),
+		BluetoothPair:  hasBluetooth && supportedURLs.HasURL("/enterPairingMode"),
+		BluetoothClear: hasBluetooth && supportedURLs.HasURL("/clearPairedList"),
+		Sync:           capabilities.HasCapability("rebroadcastlatencymode") && supportedURLs.HasURL("/rebroadcastlatencymode"),
+		SourceNaming:   len(renameableSources) > 0 && supportedURLs.HasURL("/nameSource"),
+		WiFiOnboarding: capabilities.HasHostedWifiConfig(),
+	}
+
+	readBasicDeviceSettings(device, snapshot)
+	readSyncDeviceSetting(device, snapshot)
+	readBluetoothDeviceSetting(device, snapshot)
+	readNetworkDeviceSetting(device, supportedURLs, snapshot)
 
 	if snapshot.Support.WiFiOnboarding && app.OnboardingURL != "" {
 		snapshot.OnboardingURL = app.OnboardingURL
@@ -353,6 +387,7 @@ func (app *WebApp) refreshDeviceSettings(w http.ResponseWriter, device *webtypes
 	app.writeDeviceSettings(w, snapshot)
 }
 
+// HandleGetDeviceSettings returns capability-gated settings with fresh readback.
 func (app *WebApp) HandleGetDeviceSettings(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
 	if !ok {
@@ -409,6 +444,7 @@ type clockDisplaySettingsRequest struct {
 	TimeZone string `json:"timeZone"`
 }
 
+// HandleSetClockDisplay updates supported display fields and verifies them.
 func (app *WebApp) HandleSetClockDisplay(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
 	if !ok {
@@ -477,6 +513,7 @@ func clockDisplayMatches(value *models.ClockDisplay, request clockDisplaySetting
 	return request.TimeZone == "" || value.TimeZone == strings.TrimSpace(request.TimeZone)
 }
 
+// HandleSetClockTime synchronizes the speaker clock and verifies its timestamp.
 func (app *WebApp) HandleSetClockTime(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
 	if !ok {
@@ -488,6 +525,7 @@ func (app *WebApp) HandleSetClockTime(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started := time.Now()
+
 	if err := device.Client.SetClockTimeNow(); err != nil {
 		app.sendError(w, err.Error(), http.StatusBadGateway)
 
@@ -508,6 +546,7 @@ type toggleSettingsRequest struct {
 	Enabled *bool `json:"enabled"`
 }
 
+// HandleSetSystemTimeout updates automatic standby and verifies readback.
 func (app *WebApp) HandleSetSystemTimeout(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
 	if !ok {
@@ -545,6 +584,7 @@ type languageSettingsRequest struct {
 	Code int `json:"code"`
 }
 
+// HandleSetSystemLanguage updates a validated firmware language code.
 func (app *WebApp) HandleSetSystemLanguage(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
 	if !ok {
@@ -588,6 +628,7 @@ type syncSettingsRequest struct {
 	Mode string `json:"mode"`
 }
 
+// HandleSetRebroadcastLatencyMode updates and verifies the sync priority.
 func (app *WebApp) HandleSetRebroadcastLatencyMode(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
 	if !ok {
@@ -627,6 +668,7 @@ func (app *WebApp) HandleSetRebroadcastLatencyMode(w http.ResponseWriter, r *htt
 	app.refreshDeviceSettings(w, device)
 }
 
+// HandleEnterBluetoothPairing requests and verifies discoverable mode.
 func (app *WebApp) HandleEnterBluetoothPairing(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
 	if !ok {
@@ -654,6 +696,7 @@ func (app *WebApp) HandleEnterBluetoothPairing(w http.ResponseWriter, r *http.Re
 	app.refreshDeviceSettings(w, device)
 }
 
+// HandleClearBluetoothPairings clears pairings without claiming unobservable success.
 func (app *WebApp) HandleClearBluetoothPairings(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
 	if !ok {
@@ -682,8 +725,10 @@ func (app *WebApp) HandleClearBluetoothPairings(w http.ResponseWriter, r *http.R
 	}
 
 	snapshot.Errors["bluetoothClear"] = "The speaker accepted the clear command but exposes no paired-list readback."
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
+
 	if err := json.NewEncoder(w).Encode(struct {
 		Success bool                    `json:"success"`
 		Outcome string                  `json:"outcome"`
@@ -705,6 +750,7 @@ type sourceNameSettingsRequest struct {
 	Name          string `json:"name"`
 }
 
+// HandleSetSourceName renames a supported source and verifies the new name.
 func (app *WebApp) HandleSetSourceName(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
 	if !ok {
@@ -717,6 +763,7 @@ func (app *WebApp) HandleSetSourceName(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
 	body.Name = strings.TrimSpace(body.Name)
 	if body.Name == "" {
 		app.sendError(w, "Source name must not be empty", http.StatusBadRequest)
@@ -735,8 +782,9 @@ func (app *WebApp) HandleSetSourceName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := device.Client.RenameSource(body.Source, body.SourceAccount, body.Name); err != nil {
-		app.sendError(w, err.Error(), http.StatusBadGateway)
+	renameErr := device.Client.RenameSource(body.Source, body.SourceAccount, body.Name)
+	if renameErr != nil {
+		app.sendError(w, renameErr.Error(), http.StatusBadGateway)
 
 		return
 	}

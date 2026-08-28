@@ -16,6 +16,7 @@ func (s *SystemTimeout) Validate() error {
 	if s == nil {
 		return fmt.Errorf("system timeout is nil")
 	}
+
 	return nil
 }
 
@@ -31,12 +32,14 @@ func (s *SystemTimeout) UnmarshalXML(d *xml.Decoder, start xml.StartElement) err
 	if err := d.DecodeElement(&wire, &start); err != nil {
 		return err
 	}
+
 	if wire.PowerSavingEnabled == nil {
 		return fmt.Errorf("systemtimeout is missing powersaving_enabled")
 	}
 
 	s.XMLName = start.Name
 	s.PowerSavingEnabled = *wire.PowerSavingEnabled
+
 	return nil
 }
 
@@ -44,7 +47,9 @@ func (s *SystemTimeout) UnmarshalXML(d *xml.Decoder, start xml.StartElement) err
 type RebroadcastLatencyModeValue string
 
 const (
+	// RebroadcastLatencySyncToRoom prioritizes the selected room for video sync.
 	RebroadcastLatencySyncToRoom RebroadcastLatencyModeValue = "SYNC_TO_ROOM"
+	// RebroadcastLatencySyncToZone prioritizes synchronization across the zone.
 	RebroadcastLatencySyncToZone RebroadcastLatencyModeValue = "SYNC_TO_ZONE"
 )
 
@@ -71,6 +76,7 @@ func (r *RebroadcastLatencyMode) Validate() error {
 	if r == nil {
 		return fmt.Errorf("rebroadcast latency mode is nil")
 	}
+
 	return r.Mode.Validate()
 }
 
@@ -87,12 +93,15 @@ func (r *RebroadcastLatencyMode) UnmarshalXML(d *xml.Decoder, start xml.StartEle
 	if err := d.DecodeElement(&wire, &start); err != nil {
 		return err
 	}
+
 	if wire.Mode == nil {
 		return fmt.Errorf("rebroadcastlatencymode is missing mode")
 	}
+
 	if wire.Controllable == nil {
 		return fmt.Errorf("rebroadcastlatencymode is missing controllable")
 	}
+
 	if err := wire.Mode.Validate(); err != nil {
 		return err
 	}
@@ -100,6 +109,7 @@ func (r *RebroadcastLatencyMode) UnmarshalXML(d *xml.Decoder, start xml.StartEle
 	r.XMLName = start.Name
 	r.Mode = *wire.Mode
 	r.Controllable = *wire.Controllable
+
 	return nil
 }
 
@@ -114,12 +124,14 @@ func (r *RebroadcastLatencyModeRequest) Validate() error {
 	if r == nil {
 		return fmt.Errorf("rebroadcast latency mode request is nil")
 	}
+
 	return r.Mode.Validate()
 }
 
 // LanguageCode is a SoundTouch system-language identifier.
 type LanguageCode int
 
+// Supported system language codes match the set exposed by Stockholm.
 const (
 	LanguageDanish             LanguageCode = 1
 	LanguageGerman             LanguageCode = 2
@@ -181,6 +193,7 @@ var SystemLanguageNames = func() map[LanguageCode]string {
 	for code, name := range knownSystemLanguageNames {
 		names[code] = name
 	}
+
 	return names
 }()
 
@@ -189,6 +202,7 @@ func (l LanguageCode) Validate() error {
 	if _, ok := knownSystemLanguageNames[l]; !ok {
 		return fmt.Errorf("unknown system language code %d", l)
 	}
+
 	return nil
 }
 
@@ -204,6 +218,7 @@ func (l *SystemLanguage) Validate() error {
 	if l == nil {
 		return fmt.Errorf("system language is nil")
 	}
+
 	return l.Code.Validate()
 }
 
@@ -216,11 +231,13 @@ type BluetoothInfo struct {
 // Validate requires the adapter address returned by the firmware.
 func (b *BluetoothInfo) Validate() error {
 	if b == nil {
-		return fmt.Errorf("Bluetooth info is nil")
+		return fmt.Errorf("bluetooth info is nil")
 	}
+
 	if b.BluetoothMACAddress == "" {
-		return fmt.Errorf("BluetoothInfo is missing BluetoothMACAddress")
+		return fmt.Errorf("bluetooth info is missing BluetoothMACAddress")
 	}
+
 	return nil
 }
 
@@ -236,8 +253,10 @@ func (b *BluetoothInfo) UnmarshalXML(d *xml.Decoder, start xml.StartElement) err
 	if err := d.DecodeElement(&wire, &start); err != nil {
 		return err
 	}
+
 	b.XMLName = start.Name
 	b.BluetoothMACAddress = wire.BluetoothMACAddress
+
 	return b.Validate()
 }
 
@@ -254,11 +273,14 @@ func (r *SourceRenameRequest) Validate() error {
 	if r == nil {
 		return fmt.Errorf("source rename request is nil")
 	}
+
 	if r.Source == "" {
 		return fmt.Errorf("source is required")
 	}
+
 	if r.ItemName == "" {
 		return fmt.Errorf("item name is required")
 	}
+
 	return nil
 }

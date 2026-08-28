@@ -1051,6 +1051,7 @@ func (c *Client) GetSystemTimeout() (*models.SystemTimeout, error) {
 	if err := c.get("/systemtimeout", &setting); err != nil {
 		return nil, fmt.Errorf("failed to get system timeout: %w", err)
 	}
+
 	return &setting, nil
 }
 
@@ -1060,9 +1061,11 @@ func (c *Client) SetSystemTimeout(setting *models.SystemTimeout) error {
 	if err := setting.Validate(); err != nil {
 		return fmt.Errorf("invalid system timeout request: %w", err)
 	}
+
 	if err := c.post("/systemtimeout", setting); err != nil {
 		return fmt.Errorf("failed to set system timeout: %w", err)
 	}
+
 	return nil
 }
 
@@ -1072,6 +1075,7 @@ func (c *Client) GetRebroadcastLatencyMode() (*models.RebroadcastLatencyMode, er
 	if err := c.get("/rebroadcastlatencymode", &setting); err != nil {
 		return nil, fmt.Errorf("failed to get rebroadcast latency mode: %w", err)
 	}
+
 	return &setting, nil
 }
 
@@ -1082,9 +1086,11 @@ func (c *Client) SetRebroadcastLatencyMode(mode models.RebroadcastLatencyModeVal
 	if err := request.Validate(); err != nil {
 		return fmt.Errorf("invalid rebroadcast latency mode request: %w", err)
 	}
+
 	if err := c.post("/rebroadcastlatencymode", request); err != nil {
 		return fmt.Errorf("failed to set rebroadcast latency mode: %w", err)
 	}
+
 	return nil
 }
 
@@ -1095,6 +1101,7 @@ func (c *Client) GetLanguage() (*models.SystemLanguage, error) {
 	if err := c.get("/language", &language); err != nil {
 		return nil, fmt.Errorf("failed to get system language: %w", err)
 	}
+
 	return &language, nil
 }
 
@@ -1105,9 +1112,11 @@ func (c *Client) SetLanguage(code models.LanguageCode) error {
 	if err := request.Validate(); err != nil {
 		return fmt.Errorf("invalid system language request: %w", err)
 	}
+
 	if err := c.post("/language", request); err != nil {
 		return fmt.Errorf("failed to set system language: %w", err)
 	}
+
 	return nil
 }
 
@@ -1117,6 +1126,7 @@ func (c *Client) GetBluetoothInfo() (*models.BluetoothInfo, error) {
 	if err := c.get("/bluetoothInfo", &info); err != nil {
 		return nil, fmt.Errorf("failed to get Bluetooth info: %w", err)
 	}
+
 	return &info, nil
 }
 
@@ -1131,9 +1141,11 @@ func (c *Client) RenameSource(source, sourceAccount, itemName string) error {
 	if err := request.Validate(); err != nil {
 		return fmt.Errorf("invalid source rename request: %w", err)
 	}
+
 	if err := c.post("/nameSource", request); err != nil {
 		return fmt.Errorf("failed to rename source: %w", err)
 	}
+
 	return nil
 }
 
@@ -1147,6 +1159,7 @@ func (c *Client) EnterPairingMode() error {
 	if err := c.mutatingGet("/enterPairingMode", &response); err != nil {
 		return fmt.Errorf("failed to enter pairing mode: %w", err)
 	}
+
 	return nil
 }
 
@@ -1160,6 +1173,7 @@ func (c *Client) ClearPairedList() error {
 	if err := c.mutatingGet("/clearPairedList", &response); err != nil {
 		return fmt.Errorf("failed to clear paired list: %w", err)
 	}
+
 	return nil
 }
 

@@ -279,6 +279,7 @@ func (s *Session) SetLanguage(ctx context.Context, code int) error {
 	}
 
 	body := fmt.Sprintf(`<sysLanguage>%d</sysLanguage>`, code)
+
 	return s.sendStep(ctx, "language", "POST", body)
 }
 

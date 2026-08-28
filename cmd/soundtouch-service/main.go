@@ -483,6 +483,14 @@ var serviceFlags = []cli.Flag{
 	},
 }
 
+func stockholmOnboardingURL(handler *stockholm.Handler) string {
+	if handler == nil {
+		return ""
+	}
+
+	return "/setup/"
+}
+
 func main() {
 	updateBuildInfo()
 
@@ -663,10 +671,9 @@ func main() {
 			}
 
 			internalURL := "http://" + net.JoinHostPort(loopbackHost, config.port)
+
 			webApp := newEmbeddedWebApp(server, config.serverURL, internalURL, ds)
-			if stockholmHandler != nil {
-				webApp.OnboardingURL = "/setup/"
-			}
+			webApp.OnboardingURL = stockholmOnboardingURL(stockholmHandler)
 
 			r := setupRouter(server, stockholmHandler, webApp)
 
