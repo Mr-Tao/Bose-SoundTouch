@@ -444,6 +444,49 @@ type clockDisplaySettingsRequest struct {
 	TimeZone string `json:"timeZone"`
 }
 
+func (app *WebApp) requireClockDisplayReadback(
+	w http.ResponseWriter,
+	device *webtypes.DeviceConnection,
+	request clockDisplaySettingsRequest,
+) bool {
+	snapshot, err := app.readDeviceSettings(device)
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusBadGateway)
+
+		return false
+	}
+
+	if !snapshot.Support.ClockDisplay {
+		app.sendError(w, "Clock display is not supported by this device", http.StatusConflict)
+
+		return false
+	}
+
+	if snapshot.ClockDisplay == nil {
+		message := "Clock display readback is unavailable"
+		if readErr := snapshot.Errors["clockDisplay"]; readErr != "" {
+			message += ": " + readErr
+		}
+		app.sendError(w, message, http.StatusBadGateway)
+
+		return false
+	}
+
+	if request.Format != "" && snapshot.ClockDisplay.Format == "" {
+		app.sendError(w, "Time format is not reported as supported by this device", http.StatusConflict)
+
+		return false
+	}
+
+	if request.TimeZone != "" && strings.TrimSpace(snapshot.ClockDisplay.TimeZone) == "" {
+		app.sendError(w, "Timezone is not reported as supported by this device", http.StatusConflict)
+
+		return false
+	}
+
+	return true
+}
+
 // HandleSetClockDisplay updates supported display fields and verifies them.
 func (app *WebApp) HandleSetClockDisplay(w http.ResponseWriter, r *http.Request) {
 	device, ok := app.settingsDevice(w, r)
@@ -477,7 +520,7 @@ func (app *WebApp) HandleSetClockDisplay(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if !app.requireSetting(w, device, func(s settingsSupport) bool { return s.ClockDisplay }, "Clock display") {
+	if !app.requireClockDisplayReadback(w, device, body) {
 		return
 	}
 
@@ -520,7 +563,32 @@ func (app *WebApp) HandleSetClockTime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !app.requireSetting(w, device, func(s settingsSupport) bool { return s.ClockTime }, "Clock synchronization") {
+	snapshot, err := app.readDeviceSettings(device)
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	if !snapshot.Support.ClockTime {
+		app.sendError(w, "Clock synchronization is not supported by this device", http.StatusConflict)
+
+		return
+	}
+
+	if snapshot.ClockTime == nil {
+		message := "Clock time readback is unavailable"
+		if readErr := snapshot.Errors["clockTime"]; readErr != "" {
+			message += ": " + readErr
+		}
+		app.sendError(w, message, http.StatusBadGateway)
+
+		return
+	}
+
+	if snapshot.ClockTime.UTC == 0 && strings.TrimSpace(snapshot.ClockTime.Value) == "" {
+		app.sendError(w, "Current time is not reported as supported by this device", http.StatusConflict)
+
 		return
 	}
 

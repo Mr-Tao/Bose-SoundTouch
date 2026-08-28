@@ -1,6 +1,10 @@
 import { h, htm, useEffect, useRef, useState } from '../dependencies.js';
 import { api } from '../api.js';
-import { settingsSections } from '../settingsPresentation.mjs';
+import {
+    clockControls,
+    clockDisplayPatch,
+    settingsSections,
+} from '../settingsPresentation.mjs';
 
 const html = htm.bind(h);
 
@@ -181,8 +185,15 @@ export function Settings({ deviceId }) {
     const sections = settingsSections(snapshot);
     const support = snapshot?.support || {};
     const clock = snapshot?.clockDisplay || {};
+    const clockControl = clockControls(snapshot);
     const interfaces = networkInterfaces(snapshot?.network);
     const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+    function updateClockDisplay(field, value, fallback) {
+        const patch = clockDisplayPatch(snapshot, field, value);
+        if (!patch) return;
+        mutate('clock', () => api.setClockDisplay(deviceId, patch), fallback);
+    }
 
     return html`
         <details class="settings-section" onToggle=${onToggle}>
@@ -208,51 +219,54 @@ export function Settings({ deviceId }) {
                     <section class="settings-group">
                         <h4>Clock</h4>
                         <${SectionErrors} snapshot=${snapshot} section="clock" actionError=${actionErrors.clock} />
-                        ${support.clockDisplay && snapshot.clockDisplay ? html`
+                        ${clockControl.display ? html`
                             <${Toggle}
                                 checked=${clock.enabled}
                                 disabled=${busy === 'clock'}
                                 label="Show clock display"
-                                onChange=${enabled => mutate(
-                                    'clock',
-                                    () => api.setClockDisplay(deviceId, { enabled }),
+                                onChange=${enabled => updateClockDisplay(
+                                    'enabled',
+                                    enabled,
                                     'Could not update the clock display.',
                                 )}
                             />
+                        ` : null}
+                        ${clockControl.format ? html`
                             <label class="settings-field">
                                 <span>Time format</span>
                                 <select
-                                    value=${clock.format || '24'}
+                                    value=${clock.format}
                                     disabled=${busy === 'clock'}
-                                    onChange=${event => mutate(
-                                        'clock',
-                                        () => api.setClockDisplay(deviceId, { format: event.target.value }),
+                                    onChange=${event => updateClockDisplay(
+                                        'format',
+                                        event.target.value,
                                         'Could not update the time format.',
                                     )}
                                 >
                                     <option value="12">12-hour</option>
                                     <option value="24">24-hour</option>
+                                    <option value="auto">Automatic</option>
                                 </select>
                             </label>
+                        ` : null}
+                        ${clockControl.timeZone ? html`
                             <div class="settings-command-row">
                                 <div>
                                     <span class="settings-command-label">Timezone</span>
-                                    <span class="settings-value">${clock.timeZone || 'Not reported'}</span>
+                                    <span class="settings-value">${clock.timeZone}</span>
                                 </div>
                                 <button
                                     class="btn-secondary settings-action"
                                     disabled=${busy === 'clock' || !browserTimeZone}
-                                    onClick=${() => mutate(
-                                        'clock',
-                                        () => api.setClockDisplay(deviceId, {
-                                            timeZone: browserTimeZone,
-                                        }),
+                                    onClick=${() => updateClockDisplay(
+                                        'timeZone',
+                                        browserTimeZone,
                                         'Could not update the timezone.',
                                     )}
                                 >Use browser timezone</button>
                             </div>
                         ` : null}
-                        ${support.clockTime ? html`
+                        ${clockControl.currentTime ? html`
                             <button
                                 class="btn-secondary settings-action"
                                 disabled=${busy === 'clock'}

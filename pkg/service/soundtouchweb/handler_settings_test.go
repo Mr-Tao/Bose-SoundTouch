@@ -25,14 +25,18 @@ type settingsSpeakerFixture struct {
 	clockEnabled   bool
 	clockFormat    string
 	clockTimeZone  string
+	clockHasFormat bool
+	clockHasZone   bool
+	clockHasTime   bool
 	timeoutEnabled bool
 	language       int
 	syncMode       string
 	sourceName     string
 	discoverable   bool
 
-	clockPosts atomic.Int32
-	clearGets  atomic.Int32
+	clockPosts     atomic.Int32
+	clockTimePosts atomic.Int32
+	clearGets      atomic.Int32
 }
 
 func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSpeakerFixture {
@@ -42,6 +46,9 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 		clockEnabled:   false,
 		clockFormat:    "TIME_FORMAT_24HOUR_ID",
 		clockTimeZone:  "Europe/Prague",
+		clockHasFormat: true,
+		clockHasZone:   true,
+		clockHasTime:   true,
 		timeoutEnabled: true,
 		language:       15,
 		syncMode:       "SYNC_TO_ZONE",
@@ -103,10 +110,23 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 				}
 			}
 
-			_, _ = fmt.Fprintf(w, `<clockDisplay><clockConfig timezoneInfo="%s" userEnable="%t" timeFormat="%s" brightnessLevel="70"/></clockDisplay>`,
-				fixture.clockTimeZone, fixture.clockEnabled, fixture.clockFormat)
+			attributes := []string{fmt.Sprintf(`userEnable="%t"`, fixture.clockEnabled), `brightnessLevel="70"`}
+			if fixture.clockHasZone {
+				attributes = append(attributes, fmt.Sprintf(`timezoneInfo="%s"`, fixture.clockTimeZone))
+			}
+			if fixture.clockHasFormat {
+				attributes = append(attributes, fmt.Sprintf(`timeFormat="%s"`, fixture.clockFormat))
+			}
+			_, _ = fmt.Fprintf(w, `<clockDisplay><clockConfig %s/></clockDisplay>`, strings.Join(attributes, " "))
 		case "/clockTime":
-			_, _ = fmt.Fprintf(w, `<clockTime utcTime="%d"/>`, time.Now().Unix())
+			if r.Method == http.MethodPost {
+				fixture.clockTimePosts.Add(1)
+			}
+			if fixture.clockHasTime {
+				_, _ = fmt.Fprintf(w, `<clockTime utcTime="%d"/>`, time.Now().Unix())
+			} else {
+				_, _ = io.WriteString(w, `<clockTime/>`)
+			}
 		case "/systemtimeout":
 			if r.Method == http.MethodPost {
 				body, _ := io.ReadAll(r.Body)
@@ -231,6 +251,13 @@ func TestHandleGetDeviceSettingsProjectsOnlyAdvertisedControls(t *testing.T) {
 	if !support.ClockDisplay || !support.ClockTime || !support.SystemTimeout || !support.Language || !support.Sync {
 		t.Fatalf("missing supported system controls: %+v", support)
 	}
+	if response.Data.ClockDisplay == nil || response.Data.ClockDisplay.Enabled ||
+		response.Data.ClockDisplay.Format != "24" || response.Data.ClockDisplay.TimeZone != "Europe/Prague" {
+		t.Fatalf("unexpected clock-display projection: %+v", response.Data.ClockDisplay)
+	}
+	if response.Data.ClockTime == nil || response.Data.ClockTime.UTC == 0 {
+		t.Fatalf("unexpected clock-time projection: %+v", response.Data.ClockTime)
+	}
 	if !support.Bluetooth || !support.BluetoothPair || !support.BluetoothClear || !support.SourceNaming {
 		t.Fatalf("missing supported source controls: %+v", support)
 	}
@@ -310,6 +337,57 @@ func TestHandleSetClockDisplayRequiresCapabilityAndReadback(t *testing.T) {
 			t.Fatalf("unsupported clock control sent %d POSTs", fixture.clockPosts.Load())
 		}
 	})
+
+	t.Run("format omitted from readback", func(t *testing.T) {
+		fixture := newSettingsSpeakerFixture(t, true)
+		fixture.clockHasFormat = false
+		app := settingsTestApp(fixture)
+		recorder := httptest.NewRecorder()
+
+		app.HandleSetClockDisplay(recorder, settingsRequest(http.MethodPatch,
+			"/api/control/devices/speaker/settings/clock-display", `{"format":"12"}`))
+
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		if fixture.clockPosts.Load() != 0 {
+			t.Fatalf("unsupported time format sent %d POSTs", fixture.clockPosts.Load())
+		}
+	})
+
+	t.Run("timezone omitted from readback", func(t *testing.T) {
+		fixture := newSettingsSpeakerFixture(t, true)
+		fixture.clockHasZone = false
+		app := settingsTestApp(fixture)
+		recorder := httptest.NewRecorder()
+
+		app.HandleSetClockDisplay(recorder, settingsRequest(http.MethodPatch,
+			"/api/control/devices/speaker/settings/clock-display", `{"timeZone":"Europe/Berlin"}`))
+
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		if fixture.clockPosts.Load() != 0 {
+			t.Fatalf("unsupported timezone sent %d POSTs", fixture.clockPosts.Load())
+		}
+	})
+}
+
+func TestHandleSetClockTimeRequiresCurrentTimeReadback(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.clockHasTime = false
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+
+	app.HandleSetClockTime(recorder, settingsRequest(http.MethodPost,
+		"/api/control/devices/speaker/settings/clock-time", ""))
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if fixture.clockTimePosts.Load() != 0 {
+		t.Fatalf("unsupported current-time control sent %d POSTs", fixture.clockTimePosts.Load())
+	}
 }
 
 func TestSettingsMutationsConfirmReadback(t *testing.T) {
