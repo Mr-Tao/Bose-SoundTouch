@@ -56,7 +56,7 @@ func enterBluetoothPairingAndConfirm(
 	strategy bluetoothPairingPollStrategy,
 ) (*models.NowPlaying, error) {
 	if err := mutate(); err != nil {
-		return nil, fmt.Errorf("Bluetooth pairing request failed: %w", err)
+		return nil, fmt.Errorf("bluetooth pairing request failed: %w", err)
 	}
 
 	attempts := strategy.Attempts
@@ -65,12 +65,14 @@ func enterBluetoothPairingAndConfirm(
 	}
 
 	var terminalReadErr error
+
 	for attempt := 0; attempt < attempts; attempt++ {
 		nowPlaying, err := read()
 		if err != nil {
 			terminalReadErr = err
 		} else {
 			terminalReadErr = nil
+
 			if nowPlaying != nil && nowPlaying.Source == "BLUETOOTH" && nowPlaying.ConnectionStatusInfo.IsDiscoverable() {
 				return nowPlaying, nil
 			}
@@ -78,13 +80,13 @@ func enterBluetoothPairingAndConfirm(
 
 		if attempt+1 < attempts && strategy.Wait != nil {
 			if err := strategy.Wait(); err != nil {
-				return nil, fmt.Errorf("%w: confirmation wait failed: %v", errBluetoothPairingUnverified, err)
+				return nil, fmt.Errorf("%w: confirmation wait failed: %w", errBluetoothPairingUnverified, err)
 			}
 		}
 	}
 
 	if terminalReadErr != nil {
-		return nil, fmt.Errorf("%w: failed to read Bluetooth pairing state: %v", errBluetoothPairingUnverified, terminalReadErr)
+		return nil, fmt.Errorf("%w: failed to read Bluetooth pairing state: %w", errBluetoothPairingUnverified, terminalReadErr)
 	}
 
 	return nil, errBluetoothPairingUnverified
@@ -942,6 +944,7 @@ func (app *WebApp) HandleEnterBluetoothPairing(w http.ResponseWriter, r *http.Re
 
 		return
 	}
+
 	if err != nil {
 		app.sendError(w, err.Error(), http.StatusBadGateway)
 
@@ -949,6 +952,7 @@ func (app *WebApp) HandleEnterBluetoothPairing(w http.ResponseWriter, r *http.Re
 	}
 
 	device.UpdateStatus(func(status *webtypes.DeviceStatus) { status.NowPlaying = nowPlaying })
+
 	snapshot, err := app.readDeviceSettings(device)
 	if err != nil {
 		writeSettingsMutationUnverified(w,
