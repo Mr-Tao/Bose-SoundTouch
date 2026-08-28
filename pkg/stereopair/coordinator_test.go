@@ -81,7 +81,7 @@ func (f *fakeClient) GetZone() (*models.ZoneInfo, error) {
 		return nil, f.zoneErr
 	}
 	if f.zone == nil {
-		return nil, nil
+		return nil, errors.New("fake zone response is nil")
 	}
 	result := *f.zone
 	result.Members = append([]models.Member(nil), f.zone.Members...)

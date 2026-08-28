@@ -519,12 +519,14 @@ func validateCreateZones(states []memberState) {
 	}
 
 	topologies := make([]createZoneTopology, len(states))
+
 	standalone := make([]bool, len(states))
 	for i := range states {
 		var err error
+
 		topologies[i], standalone[i], err = parseCreateZone(states[i].zone, states[i].info.DeviceID)
 		if err != nil {
-			setPreflightError(&states[i], fmt.Errorf("%w: invalid zone view: %v", ErrConflict, err))
+			setPreflightError(&states[i], fmt.Errorf("%w: invalid zone view: %w", ErrConflict, err))
 		}
 	}
 
@@ -568,6 +570,7 @@ func parseCreateZone(zone *models.ZoneInfo, deviceID string) (createZoneTopology
 	if zone == nil {
 		return topology, false, errors.New("zone response is nil")
 	}
+
 	if zone.Master == "" && len(zone.Members) == 0 {
 		return topology, true, nil
 	}
@@ -578,12 +581,14 @@ func parseCreateZone(zone *models.ZoneInfo, deviceID string) (createZoneTopology
 	}
 
 	topology.devices = map[string]struct{}{topology.master: {}}
+
 	listed := make(map[string]struct{}, len(zone.Members))
 	for i := range zone.Members {
 		memberID := strings.TrimSpace(zone.Members[i].DeviceID)
 		if memberID == "" {
 			return createZoneTopology{}, false, errors.New("zone member device ID is empty")
 		}
+
 		if _, duplicate := listed[memberID]; duplicate {
 			return createZoneTopology{}, false, fmt.Errorf("zone repeats member %q", memberID)
 		}
@@ -1200,6 +1205,7 @@ func (c *Coordinator) preflightCreate(state *memberState) {
 		state.result.PreflightError = wrapUnavailable("get zone", errors.New("nil response"))
 		return
 	}
+
 	state.zone = cloneZone(zone)
 
 	state.group, err = client.GetGroup()
@@ -1437,8 +1443,10 @@ func verifyPair(states []memberState, verify func(*models.Group) error) {
 
 func verifyCreatedPairZones(states []memberState) bool {
 	verified := true
+
 	for i := range states {
 		zone, err := states[i].client.GetZone()
+
 		states[i].zone = cloneZone(zone)
 		if err != nil {
 			states[i].result.VerificationError = fmt.Errorf("get zone after verified group mutation: %w", err)
