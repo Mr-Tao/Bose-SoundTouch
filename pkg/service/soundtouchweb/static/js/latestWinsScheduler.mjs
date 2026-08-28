@@ -85,13 +85,13 @@ export function createLatestWinsScheduler({
         }
     }
 
-    function queue(value, { force = false } = {}) {
+    function queue(value, { force = false, ...requestMetadata } = {}) {
         if (disposed) return sequence;
         if (!force && value === latestValue) return sequence;
 
         sequence += 1;
         latestValue = value;
-        pending = { sequence, value, final: force };
+        pending = { ...requestMetadata, sequence, value, final: force };
         pump();
         emitState();
 

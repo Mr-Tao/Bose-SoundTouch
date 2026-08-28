@@ -9,7 +9,13 @@ import {
 
 const html = htm.bind(h);
 
-export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, volume }) {
+export function ZoneMemberVolumeControl({
+    zoneMasterId,
+    memberId,
+    ariaLabel,
+    volume,
+    previewVolume = null,
+}) {
     const projectedVolume = clampVolume(volume);
     const projectedVolumeRef = useRef(projectedVolume);
     const draggingRef = useRef(false);
@@ -23,6 +29,10 @@ export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, vol
         .replace(/[^a-zA-Z0-9_-]/g, '-');
 
     projectedVolumeRef.current = projectedVolume;
+    const displayedVolume = Number.isFinite(previewVolume) &&
+        !draggingRef.current && !schedulerRef.current?.isActive()
+        ? clampVolume(previewVolume)
+        : localVolume;
 
     if (schedulerRef.current === null) {
         schedulerRef.current = createLatestWinsScheduler({
@@ -91,7 +101,7 @@ export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, vol
             <div class="zone-member-volume-row">
                 <label class="zone-member-volume-label" for=${inputID}>Volume</label>
                 <input id=${inputID} type="range" class="zone-member-volume-slider"
-                    min="0" max="100" value=${localVolume} aria-label=${ariaLabel}
+                    min="0" max="100" value=${displayedVolume} aria-label=${ariaLabel}
                     onPointerDown=${() => {
                         draggingRef.current = true;
                         interactionDirtyRef.current = false;
@@ -102,7 +112,7 @@ export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, vol
                     onChange=${finishVolume}
                     onBlur=${finishVolume} />
                 <output class="zone-member-volume-value" for=${inputID}>
-                    ${localVolume}
+                    ${displayedVolume}
                 </output>
             </div>
             ${failure ? html`<div class="zone-member-volume-failure" role="status">${failure}</div>` : null}

@@ -150,19 +150,19 @@ test('marks only the response for the newest desired level as latest', async () 
         setTimer: clock.setTimer,
         clearTimer: clock.clearTimer,
         onResult(_response, metadata) {
-            results.push([metadata.value, metadata.isLatest]);
+            results.push([metadata.value, metadata.isLatest, metadata.interactionGeneration]);
         },
     });
 
-    scheduler.queue(25);
-    scheduler.queue(75);
+    scheduler.queue(25, { interactionGeneration: 4 });
+    scheduler.queue(75, { interactionGeneration: 5 });
     requests[0].request.resolve({ ok: true });
     await flushPromises();
     clock.advance(200);
     requests[1].request.resolve({ ok: true });
     await flushPromises();
 
-    assert.deepEqual(results, [[25, false], [75, true]]);
+    assert.deepEqual(results, [[25, false, 4], [75, true, 5]]);
 });
 
 test('surfaces failures only for the latest forced final request', () => {

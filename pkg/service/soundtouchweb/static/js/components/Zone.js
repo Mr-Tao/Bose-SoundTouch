@@ -37,7 +37,7 @@ function inferredPhysicalCount(members) {
         total + Math.max(1, member?.physicalMembers?.length || 0), 0);
 }
 
-export function Zone({ deviceId, devices }) {
+export function Zone({ deviceId, devices, volumePreview = null }) {
     const [zone, setZone] = useState(null);
     const [loading, setLoading] = useState(true);
     const [showPicker, setShowPicker] = useState(false);
@@ -111,6 +111,8 @@ export function Zone({ deviceId, devices }) {
         const member = resolved.member;
         const metadata = zoneMemberMetadata(member);
         const isStereoPair = member?.kind === 'stereoPair';
+        const previewVolume = volumePreview?.[resolved.controlId];
+        const displayedVolume = Number.isFinite(previewVolume) ? previewVolume : metadata.volume;
 
         return html`
             <div class="zone-logical-member" key=${resolved.controlId}>
@@ -130,10 +132,10 @@ export function Zone({ deviceId, devices }) {
                     </div>
                 </div>
 
-                ${member?.available && metadata.volume !== null ? html`
+                ${member?.available && displayedVolume !== null ? html`
                     <${ZoneMemberVolumeControl} zoneMasterId=${zoneMasterId}
                         memberId=${resolved.controlId} ariaLabel=${metadata.volumeAriaLabel}
-                        volume=${metadata.volume} />
+                        volume=${metadata.volume} previewVolume=${previewVolume} />
                 ` : null}
 
                 ${isStereoPair ? html`

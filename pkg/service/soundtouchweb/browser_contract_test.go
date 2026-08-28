@@ -62,8 +62,9 @@ type contractControlCall struct {
 }
 
 type contractControlRecorder struct {
-	mu    sync.Mutex
-	calls []contractControlCall
+	mu                   sync.Mutex
+	calls                []contractControlCall
+	nextGroupVolumeDelay time.Duration
 }
 
 func TestPlayerBrowserContract(t *testing.T) {
@@ -357,6 +358,9 @@ func serveBrowserContractControlResponse(
 
 	switch call.kind {
 	case "group-volume":
+		if delay := recorder.takeNextGroupVolumeDelay(); delay > 0 {
+			time.Sleep(delay)
+		}
 		members := applyBrowserContractGroupVolume(app, controlID, value)
 		app.BroadcastDeviceList()
 		writeBrowserContractJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
@@ -445,7 +449,24 @@ func writeBrowserContractError(w http.ResponseWriter, message string, status int
 func (recorder *contractControlRecorder) reset() {
 	recorder.mu.Lock()
 	recorder.calls = nil
+	recorder.nextGroupVolumeDelay = 0
 	recorder.mu.Unlock()
+}
+
+func (recorder *contractControlRecorder) delayNextGroupVolume(delay time.Duration) {
+	recorder.mu.Lock()
+	recorder.nextGroupVolumeDelay = delay
+	recorder.mu.Unlock()
+}
+
+func (recorder *contractControlRecorder) takeNextGroupVolumeDelay() time.Duration {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+
+	delay := recorder.nextGroupVolumeDelay
+	recorder.nextGroupVolumeDelay = 0
+
+	return delay
 }
 
 func (recorder *contractControlRecorder) record(call contractControlCall) {
@@ -723,7 +744,9 @@ func exerciseDetailGroupVolumeControl(
 
 	recorder.reset()
 	input := ".device-detail > .controls .volume-row .volume-slider"
+	recorder.delayNextGroupVolume(750 * time.Millisecond)
 	dispatchBrowserSliderSequence(t, ctx, input, 34, 36)
+	assertOptimisticMemberVolumePreview(t, ctx, []string{"28", "36"})
 	waitForBrowserControl(t, ctx, input, ".volume-row", ".volume-value", 36)
 	assertContractControlCalls(t, recorder, "group-volume", []contractControlCall{
 		{kind: "group-volume", controlID: contractDegradedHost, value: 34},
@@ -731,6 +754,25 @@ func exerciseDetailGroupVolumeControl(
 	})
 	assertContractControlCalls(t, recorder, "balance", nil)
 	assertBrowserMemberVolumeReadback(t, ctx, app)
+}
+
+func assertOptimisticMemberVolumePreview(t *testing.T, ctx context.Context, want []string) {
+	t.Helper()
+
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("encode optimistic member-volume expectation: %v", err)
+	}
+	expression := fmt.Sprintf(
+		`JSON.stringify(Array.from(document.querySelectorAll('.zone-member-volume-slider')).map(node => node.value)) === %q`,
+		string(encoded),
+	)
+	var matched bool
+	if err := chromedp.Run(ctx, chromedp.Poll(expression, &matched,
+		chromedp.WithPollingInterval(10*time.Millisecond),
+		chromedp.WithPollingTimeout(300*time.Millisecond))); err != nil {
+		t.Fatalf("member sliders did not follow the group slider before its delayed response: %v", err)
+	}
 }
 
 func assertBrowserMemberVolumeReadback(t *testing.T, ctx context.Context, app *WebApp) {

@@ -44,7 +44,14 @@ function IconRepeat({ one = false }) {
     </svg>`;
 }
 
-export function Controls({ deviceId, device }) {
+export function Controls({
+    deviceId,
+    device,
+    onZoneVolumeStart = () => {},
+    onZoneVolumePreview = () => {},
+    onZoneVolumeReadback = () => {},
+    onZoneVolumeFailure = () => {},
+}) {
     const status = device?.status;
     const zone = device?.zone;
     const controlsLogicalZone = Boolean(zone && !zone.isStandalone && zone.masterControlId === deviceId);
@@ -62,6 +69,11 @@ export function Controls({ deviceId, device }) {
 
     const projectedVolumeRef = useRef(projectedVolume);
     const controlTargetRef = useRef({ deviceId, group: controlsLogicalZone });
+    const interactionGenerationRef = useRef(0);
+    const zoneCallbacksRef = useRef({
+        onReadback: onZoneVolumeReadback,
+        onFailure: onZoneVolumeFailure,
+    });
     const draggingRef = useRef(false);
     const interactionDirtyRef = useRef(false);
     const acceptedSequenceRef = useRef(0);
@@ -73,6 +85,10 @@ export function Controls({ deviceId, device }) {
 
     projectedVolumeRef.current = projectedVolume;
     controlTargetRef.current = { deviceId, group: controlsLogicalZone };
+    zoneCallbacksRef.current = {
+        onReadback: onZoneVolumeReadback,
+        onFailure: onZoneVolumeFailure,
+    };
 
     if (schedulerRef.current === null) {
         schedulerRef.current = createLatestWinsScheduler({
@@ -85,9 +101,13 @@ export function Controls({ deviceId, device }) {
                     : api.volume(target.deviceId, level);
             },
             onResult(response, metadata) {
-                if (!metadata.isLatest) return;
+                if (!metadata.isLatest ||
+                    metadata.interactionGeneration !== interactionGenerationRef.current) return;
 
                 if (!response?.success) {
+                    if (metadata.group) {
+                        zoneCallbacksRef.current.onFailure(metadata.interactionGeneration);
+                    }
                     if (shouldSurfaceLatestFinal(metadata)) {
                         setVolumeFailure(response?.error || 'Volume update failed.');
                     }
@@ -97,6 +117,7 @@ export function Controls({ deviceId, device }) {
                 if (metadata.group) {
                     const data = response.data;
                     if (data?.requested !== metadata.value) {
+                        zoneCallbacksRef.current.onFailure(metadata.interactionGeneration);
                         if (shouldSurfaceLatestFinal(metadata)) {
                             setVolumeFailure('Group volume update failed.');
                         }
@@ -104,6 +125,7 @@ export function Controls({ deviceId, device }) {
                     }
 
                     const confirmed = maxReadbackActual(data);
+                    zoneCallbacksRef.current.onReadback(data, metadata.interactionGeneration);
                     if (confirmed !== null) {
                         acceptedSequenceRef.current = metadata.sequence;
                         setLocalVolume(confirmed);
@@ -119,6 +141,10 @@ export function Controls({ deviceId, device }) {
                 if (shouldSurfaceLatestFinal(metadata)) setVolumeFailure('');
             },
             onError(_error, metadata) {
+                if (metadata.interactionGeneration !== interactionGenerationRef.current) return;
+                if (metadata.isLatest && metadata.group) {
+                    zoneCallbacksRef.current.onFailure(metadata.interactionGeneration);
+                }
                 if (shouldSurfaceLatestFinal(metadata)) {
                     setVolumeFailure(metadata.group ? 'Group volume update failed.' : 'Volume update failed.');
                 }
@@ -128,6 +154,9 @@ export function Controls({ deviceId, device }) {
                 if (!next.active && !draggingRef.current &&
                     acceptedSequenceRef.current !== next.latestSequence) {
                     setLocalVolume(projectedVolumeRef.current);
+                    if (controlTargetRef.current.group) {
+                        zoneCallbacksRef.current.onFailure(interactionGenerationRef.current);
+                    }
                 }
             },
         });
@@ -147,8 +176,14 @@ export function Controls({ deviceId, device }) {
         const level = clampVolume(parseInt(event.currentTarget.value, 10));
         if (!force) interactionDirtyRef.current = true;
         setLocalVolume(level);
+        if (controlsLogicalZone) {
+            onZoneVolumePreview(level, interactionGenerationRef.current);
+        }
         setVolumeFailure('');
-        schedulerRef.current.queue(level, { force });
+        schedulerRef.current.queue(level, {
+            force,
+            interactionGeneration: interactionGenerationRef.current,
+        });
     }
 
     function finishVolume(event) {
@@ -197,8 +232,12 @@ export function Controls({ deviceId, device }) {
                 <input type="range" class="volume-slider" min="0" max="100"
                     value=${localVolume} aria-label=${controlsLogicalZone ? 'Group volume' : 'Volume'}
                     onPointerDown=${() => {
+                        interactionGenerationRef.current += 1;
                         draggingRef.current = true;
                         interactionDirtyRef.current = false;
+                        if (controlsLogicalZone) {
+                            onZoneVolumeStart(localVolume, interactionGenerationRef.current);
+                        }
                     }}
                     onInput=${event => queueVolume(event, false)}
                     onPointerUp=${finishVolume}
