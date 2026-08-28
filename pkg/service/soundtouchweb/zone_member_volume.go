@@ -52,13 +52,13 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 	lock.Lock()
 	defer lock.Unlock()
 
-	zone, err := app.revalidateZone(masterDeviceID)
+	zoneTopology, err := app.revalidateZone(masterDeviceID)
 	if err != nil {
 		app.sendError(w, err.Error(), http.StatusConflict)
 		return
 	}
 
-	projection, projected := projectZoneInfo(zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
+	projection, projected := projectZoneInfo(zoneTopology.snapshot.Zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
 	if !projected || projection.MasterControlID != zoneMasterID {
 		app.sendError(w, "Zone topology changed during refresh", http.StatusConflict)
 		return
@@ -72,7 +72,7 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 
 	// Capture once more immediately before the write. Group events can change a
 	// stereo member while the authoritative zone refresh is in flight.
-	currentProjection, projected := projectZoneInfo(zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
+	currentProjection, projected := projectZoneInfo(zoneTopology.snapshot.Zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
 
 	currentMember, current := findLogicalZoneMember(currentProjection, memberID)
 	if !projected || !current || !sameLogicalZoneMember(member, currentMember) {
@@ -89,12 +89,13 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if !authoritativeVolumeControl(control) {
+	groupTopology, current := control.SnapshotGroupTopology()
+	if !current || !authoritativeVolumeTopology(control, groupTopology) {
 		app.sendError(w, "Stereo pair master is unavailable", http.StatusConflict)
 		return
 	}
 
-	result := app.applyZoneMemberVolume(control, member, requested)
+	result := app.applyZoneMemberVolume(control, member, groupTopology, &zoneTopology, requested)
 	app.BroadcastDeviceList()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -140,6 +141,8 @@ func sameLogicalZoneMember(left, right zoneMemberView) bool {
 func (app *WebApp) applyZoneMemberVolume(
 	control *webtypes.DeviceConnection,
 	member zoneMemberView,
+	groupTopology webtypes.GroupTopology,
+	zoneTopology *zoneVolumeTopology,
 	requested int,
 ) zoneMemberVolumeResult {
 	result := zoneMemberVolumeResult{
@@ -148,7 +151,15 @@ func (app *WebApp) applyZoneMemberVolume(
 		Members:   []zoneVolumeMemberResult{zoneVolumeResultForMember(&member)},
 	}
 	result.Members[0].Target = intPointer(requested)
-	result.Partial = !app.applyVolumeTarget(&result.Members[0], control, requested)
+	atTarget, _ := app.applyVolumeTarget(
+		&result.Members[0],
+		member.ControlID,
+		control,
+		groupTopology,
+		zoneTopology,
+		requested,
+	)
+	result.Partial = !atTarget
 
 	return result
 }

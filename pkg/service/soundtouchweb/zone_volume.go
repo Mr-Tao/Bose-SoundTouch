@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,9 +36,17 @@ type zoneVolumeResult struct {
 }
 
 type zoneVolumeTarget struct {
-	index  int
-	conn   *webtypes.DeviceConnection
-	before int
+	index         int
+	controlID     string
+	conn          *webtypes.DeviceConnection
+	groupTopology webtypes.GroupTopology
+	before        int
+}
+
+type zoneVolumeTopology struct {
+	controlID string
+	conn      *webtypes.DeviceConnection
+	snapshot  webtypes.ZoneTopology
 }
 
 // HandleZoneVolume applies one proportional volume move to a logical zone.
@@ -70,13 +79,13 @@ func (app *WebApp) HandleZoneVolume(w http.ResponseWriter, r *http.Request) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	zone, err := app.revalidateZone(masterDeviceID)
+	zoneTopology, err := app.revalidateZone(masterDeviceID)
 	if err != nil {
 		app.sendError(w, err.Error(), http.StatusConflict)
 		return
 	}
 
-	result, ok := app.applyZoneVolume(zone, requested)
+	result, ok := app.applyZoneVolume(zoneTopology.snapshot.Zone, &zoneTopology, requested)
 	if !ok {
 		app.sendError(w, "No zone member volume could be read", http.StatusBadGateway)
 		return
@@ -107,34 +116,47 @@ func (app *WebApp) zoneVolumeLock(masterDeviceID string) *sync.Mutex {
 	return lock
 }
 
-func (app *WebApp) revalidateZone(masterDeviceID string) (*models.ZoneInfo, error) {
+func (app *WebApp) revalidateZone(masterDeviceID string) (zoneVolumeTopology, error) {
 	masterIP := app.findIPByHwID(masterDeviceID)
 
 	master, ok := app.GetDevice(masterIP)
 	if !ok || master.Client == nil {
-		return nil, fmt.Errorf("zone master is unavailable")
+		return zoneVolumeTopology{}, fmt.Errorf("zone master is unavailable")
 	}
 
 	generation := master.BeginZoneRefresh()
 
 	zone, err := master.Client.GetZone()
 	if err != nil {
-		return nil, fmt.Errorf("refresh zone master: %w", err)
+		return zoneVolumeTopology{}, fmt.Errorf("refresh zone master: %w", err)
 	}
 
 	if !master.ApplyPolledZone(generation, masterDeviceID, zone) {
-		return nil, fmt.Errorf("zone topology changed during refresh")
+		return zoneVolumeTopology{}, fmt.Errorf("zone topology changed during refresh")
 	}
 
 	if zone.IsStandalone() {
 		app.BroadcastDeviceList()
-		return nil, fmt.Errorf("zone has been dissolved")
+		return zoneVolumeTopology{}, fmt.Errorf("zone has been dissolved")
 	}
 
-	return zone, nil
+	snapshot, current := master.SnapshotZoneTopology()
+	if !current || !reflect.DeepEqual(snapshot.Zone, zone) {
+		return zoneVolumeTopology{}, fmt.Errorf("zone topology changed after refresh")
+	}
+
+	return zoneVolumeTopology{
+		controlID: masterIP,
+		conn:      master,
+		snapshot:  snapshot,
+	}, nil
 }
 
-func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVolumeResult, bool) {
+func (app *WebApp) applyZoneVolume(
+	zone *models.ZoneInfo,
+	zoneTopology *zoneVolumeTopology,
+	requested int,
+) (zoneVolumeResult, bool) {
 	projected, ok := projectZoneInfo(zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
 	if !ok {
 		return zoneVolumeResult{Requested: requested}, false
@@ -167,7 +189,8 @@ func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVo
 				return
 			}
 
-			if !authoritativeVolumeControl(conn) {
+			groupTopology, current := conn.SnapshotGroupTopology()
+			if !current || !authoritativeVolumeTopology(conn, groupTopology) {
 				member.Error = "stereo pair master unavailable"
 				result.Members[index] = member
 
@@ -189,10 +212,22 @@ func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVo
 			before := volume.ActualVolume
 			member.Before = &before
 			result.Members[index] = member
+			if !app.volumeTargetCurrent(projectedMember.ControlID, conn, groupTopology, zoneTopology) {
+				member.Error = "speaker topology changed while reading volume"
+				result.Members[index] = member
+
+				return
+			}
 
 			targetsMu.Lock()
 
-			targets = append(targets, zoneVolumeTarget{index: index, conn: conn, before: before})
+			targets = append(targets, zoneVolumeTarget{
+				index:         index,
+				controlID:     projectedMember.ControlID,
+				conn:          conn,
+				groupTopology: groupTopology,
+				before:        before,
+			})
 			targetsMu.Unlock()
 		}()
 	}
@@ -227,7 +262,15 @@ func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVo
 			level := models.ClampVolumeLevel(target.before + result.Delta)
 			member.Target = &level
 
-			if !app.applyVolumeTarget(member, target.conn, level) {
+			atTarget, _ := app.applyVolumeTarget(
+				member,
+				target.controlID,
+				target.conn,
+				target.groupTopology,
+				zoneTopology,
+				level,
+			)
+			if !atTarget {
 				partial.Store(true)
 			}
 		}()
@@ -257,72 +300,173 @@ func zoneVolumeResultForMember(member *zoneMemberView) zoneVolumeMemberResult {
 // A registered stereo slave is not an independent volume target. If its
 // firmware master is unavailable, fail closed until the logical pair can be
 // projected through that master again.
-func authoritativeVolumeControl(conn *webtypes.DeviceConnection) bool {
+func authoritativeVolumeTopology(conn *webtypes.DeviceConnection, topology webtypes.GroupTopology) bool {
 	if conn == nil {
 		return false
 	}
 
 	info := conn.Info()
-	status := conn.Status()
 
 	if info == nil {
 		return false
 	}
 
-	if status == nil || status.Group == nil {
+	if topology.Group == nil {
 		return true
 	}
 
-	masterDeviceID := strings.TrimSpace(status.Group.MasterDeviceID)
+	masterDeviceID := strings.TrimSpace(topology.Group.MasterDeviceID)
 
 	return masterDeviceID == "" || masterDeviceID == strings.TrimSpace(info.DeviceID)
 }
 
 func (app *WebApp) applyVolumeTarget(
 	member *zoneVolumeMemberResult,
+	controlID string,
 	conn *webtypes.DeviceConnection,
+	groupTopology webtypes.GroupTopology,
+	zoneTopology *zoneVolumeTopology,
 	level int,
-) bool {
-	writeErr := conn.Client.SetVolume(level)
-	volumeGeneration := conn.BeginVolumeRefresh()
-	healthGeneration := conn.BeginHTTPPoll()
+) (bool, bool) {
+	atTarget := false
+	confirmed := false
 
-	volume, readErr := conn.Client.GetVolume()
-	if readErr != nil {
-		conn.CompleteHTTPPoll(healthGeneration, false, time.Now(), nil)
+	conn.WithVolumeOperation(func() {
+		var writeErr error
+		if !app.withCurrentVolumeWrite(controlID, conn, groupTopology, zoneTopology, func() {
+			writeErr = conn.Client.SetVolume(level)
+		}) {
+			appendZoneVolumeError(member, "speaker topology changed before volume update")
+
+			return
+		}
+
+		volumeGeneration := conn.BeginVolumeRefresh()
+		healthGeneration := conn.BeginHTTPPoll()
+
+		volume, readErr := conn.Client.GetVolume()
+		if readErr != nil || volume == nil {
+			conn.CompleteHTTPPoll(healthGeneration, false, time.Now(), nil)
+
+			if writeErr != nil {
+				appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
+			}
+
+			if readErr != nil {
+				appendZoneVolumeError(member, fmt.Sprintf("readback volume: %v", readErr))
+			} else {
+				appendZoneVolumeError(member, "readback volume: empty response")
+			}
+
+			return
+		}
+
+		actual := volume.ActualVolume
+		member.Actual = intPointer(actual)
+
+		confirmed = app.applyCurrentVolumeReadback(
+			controlID,
+			conn,
+			groupTopology,
+			zoneTopology,
+			volumeGeneration,
+			volume,
+		)
+		conn.CompleteHTTPPoll(healthGeneration, true, time.Now(), nil)
+		if !confirmed {
+			appendZoneVolumeError(member, "speaker topology or volume state changed during readback")
+
+			return
+		}
+
+		if volume.TargetVolume == level && actual == level {
+			atTarget = true
+
+			return
+		}
 
 		if writeErr != nil {
 			appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
 		}
 
-		appendZoneVolumeError(member, fmt.Sprintf("readback volume: %v", readErr))
+		appendZoneVolumeError(member, fmt.Sprintf(
+			"readback target %d actual %d does not both match requested %d",
+			volume.TargetVolume,
+			actual,
+			level,
+		))
+	})
 
-		return false
+	return atTarget, confirmed
+}
+
+func (app *WebApp) volumeTargetCurrent(
+	controlID string,
+	conn *webtypes.DeviceConnection,
+	topology webtypes.GroupTopology,
+	zoneTopology *zoneVolumeTopology,
+) bool {
+	app.devicesMu.RLock()
+	defer app.devicesMu.RUnlock()
+
+	return app.devices[controlID] == conn && conn.GroupTopologyCurrent(topology) &&
+		authoritativeVolumeTopology(conn, topology) && app.zoneTopologyCurrentLocked(zoneTopology)
+}
+
+func (app *WebApp) zoneTopologyCurrentLocked(topology *zoneVolumeTopology) bool {
+	return topology == nil ||
+		(app.devices[topology.controlID] == topology.conn && topology.conn.ZoneTopologyCurrent(topology.snapshot))
+}
+
+func (app *WebApp) withCurrentVolumeWrite(
+	controlID string,
+	conn *webtypes.DeviceConnection,
+	topology webtypes.GroupTopology,
+	zoneTopology *zoneVolumeTopology,
+	operation func(),
+) bool {
+	current := false
+
+	withZoneVolumeFence(zoneTopology, func() {
+		conn.WithGroupWriteFence(func() {
+			current = app.volumeTargetCurrent(controlID, conn, topology, zoneTopology)
+			if current {
+				operation()
+			}
+		})
+	})
+
+	return current
+}
+
+func (app *WebApp) applyCurrentVolumeReadback(
+	controlID string,
+	conn *webtypes.DeviceConnection,
+	topology webtypes.GroupTopology,
+	zoneTopology *zoneVolumeTopology,
+	volumeGeneration uint64,
+	volume *models.Volume,
+) bool {
+	applied := false
+
+	withZoneVolumeFence(zoneTopology, func() {
+		conn.WithGroupWriteFence(func() {
+			if app.volumeTargetCurrent(controlID, conn, topology, zoneTopology) {
+				applied = conn.ApplyPolledVolume(volumeGeneration, volume)
+			}
+		})
+	})
+
+	return applied
+}
+
+func withZoneVolumeFence(topology *zoneVolumeTopology, operation func()) {
+	if topology == nil {
+		operation()
+		return
 	}
 
-	actual := volume.ActualVolume
-	member.Actual = intPointer(actual)
-
-	if !conn.ApplyPolledVolume(volumeGeneration, volume) {
-		if current := conn.Status().Volume; current != nil {
-			actual = current.ActualVolume
-			member.Actual = intPointer(actual)
-		}
-	}
-
-	conn.CompleteHTTPPoll(healthGeneration, true, time.Now(), nil)
-
-	if actual == level {
-		return true
-	}
-
-	if writeErr != nil {
-		appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
-	}
-
-	appendZoneVolumeError(member, fmt.Sprintf("readback volume %d does not match target %d", actual, level))
-
-	return false
+	topology.conn.WithZoneWriteFence(operation)
 }
 
 func intPointer(value int) *int {

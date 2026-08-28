@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
@@ -18,15 +19,17 @@ import (
 )
 
 type volumeSpeaker struct {
-	server       *httptest.Server
-	mu           sync.Mutex
-	volume       int
-	zone         string
-	posts        []int
-	ignoreWrites bool
-	postError    bool
-	volumeGets   int
-	onVolumeGet  func(int)
+	server         *httptest.Server
+	mu             sync.Mutex
+	volume         int
+	zone           string
+	posts          []int
+	ignoreWrites   bool
+	postError      bool
+	volumeError    bool
+	reportedTarget *int
+	volumeGets     int
+	onVolumeGet    func(int)
 }
 
 func newVolumeSpeaker(t *testing.T, initial int, zone string) *volumeSpeaker {
@@ -40,6 +43,11 @@ func newVolumeSpeaker(t *testing.T, initial int, zone string) *volumeSpeaker {
 		case r.Method == http.MethodGet && r.URL.Path == "/volume":
 			speaker.mu.Lock()
 			volume := speaker.volume
+			target := volume
+			if speaker.reportedTarget != nil {
+				target = *speaker.reportedTarget
+			}
+			volumeError := speaker.volumeError
 			speaker.volumeGets++
 			volumeGets := speaker.volumeGets
 			onVolumeGet := speaker.onVolumeGet
@@ -47,7 +55,11 @@ func newVolumeSpeaker(t *testing.T, initial int, zone string) *volumeSpeaker {
 			if onVolumeGet != nil {
 				onVolumeGet(volumeGets)
 			}
-			_, _ = fmt.Fprintf(w, `<volume deviceID="speaker"><targetvolume>%d</targetvolume><actualvolume>%d</actualvolume><muteenabled>false</muteenabled></volume>`, volume, volume)
+			if volumeError {
+				http.Error(w, "readback failed", http.StatusBadGateway)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `<volume deviceID="speaker"><targetvolume>%d</targetvolume><actualvolume>%d</actualvolume><muteenabled>false</muteenabled></volume>`, target, volume)
 		case r.Method == http.MethodPost && r.URL.Path == "/volume":
 			var request models.VolumeRequest
 			if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -84,6 +96,18 @@ func (speaker *volumeSpeaker) setIgnoreWrites(ignore bool) {
 func (speaker *volumeSpeaker) setPostError(postError bool) {
 	speaker.mu.Lock()
 	speaker.postError = postError
+	speaker.mu.Unlock()
+}
+
+func (speaker *volumeSpeaker) setVolumeError(volumeError bool) {
+	speaker.mu.Lock()
+	speaker.volumeError = volumeError
+	speaker.mu.Unlock()
+}
+
+func (speaker *volumeSpeaker) setReportedTarget(target int) {
+	speaker.mu.Lock()
+	speaker.reportedTarget = intPointer(target)
 	speaker.mu.Unlock()
 }
 
@@ -228,7 +252,7 @@ func TestHandleZoneVolumeReportsReadbackMismatch(t *testing.T) {
 	}
 	if memberResult == nil || memberResult.Target == nil || *memberResult.Target != 40 ||
 		memberResult.Actual == nil || *memberResult.Actual != 35 ||
-		!strings.Contains(memberResult.Error, "does not match target") {
+		!strings.Contains(memberResult.Error, "does not both match requested") {
 		t.Fatalf("mismatch detail absent: %+v", memberResult)
 	}
 
@@ -238,6 +262,114 @@ func TestHandleZoneVolumeReportsReadbackMismatch(t *testing.T) {
 		t.Fatalf("mismatch readback cache incorrect: master=%d member=%d",
 			masterConn.Status().Volume.ActualVolume, memberConn.Status().Volume.ActualVolume)
 	}
+}
+
+func TestHandleZoneVolumeDoesNotConfirmRejectedFreshMismatchFromOlderCache(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">MEMBER</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.10"},
+		{DeviceID: "MEMBER", IP: "192.0.2.20"},
+	}}
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	member := newVolumeSpeaker(t, 35, zoneXML)
+	member.setIgnoreWrites(true)
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Kitchen", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Dining", member, 40, nil)
+	memberConn, _ := app.GetDevice("192.0.2.20")
+	member.setVolumeGetHook(func(request int) {
+		if request == 2 {
+			memberConn.ApplyVolumeEvent(
+				&models.Volume{TargetVolume: 40, ActualVolume: 40},
+				time.Now(),
+			)
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/zone/volume/40", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "volume": "40"})
+	response := httptest.NewRecorder()
+	app.HandleZoneVolume(response, req)
+
+	var payload struct {
+		Data zoneVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || !payload.Data.Partial {
+		t.Fatalf("rejected fresh mismatch was confirmed: status=%d data=%+v", response.Code, payload.Data)
+	}
+	for _, result := range payload.Data.Members {
+		if result.DeviceID != "MEMBER" {
+			continue
+		}
+		if result.Actual == nil || *result.Actual != 35 ||
+			!strings.Contains(result.Error, "state changed during readback") {
+			t.Fatalf("fresh mismatch was replaced by older cache: %+v", result)
+		}
+		if cached := memberConn.Status().Volume.ActualVolume; cached != 40 {
+			t.Fatalf("newer event cache = %d, want 40", cached)
+		}
+
+		return
+	}
+	t.Fatal("member result missing")
+}
+
+func TestHandleZoneVolumeRejectsZoneChangeDuringReadback(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">MEMBER</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.10"},
+		{DeviceID: "MEMBER", IP: "192.0.2.20"},
+	}}
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	member := newVolumeSpeaker(t, 35, zoneXML)
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Kitchen", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Dining", member, 35, nil)
+	masterConn, _ := app.GetDevice("192.0.2.10")
+	memberConn, _ := app.GetDevice("192.0.2.20")
+	member.setVolumeGetHook(func(request int) {
+		if request != 2 {
+			return
+		}
+		generation := masterConn.BeginZoneRefresh()
+		if !masterConn.ApplyPolledZone(generation, "MASTER", &models.ZoneInfo{}) {
+			t.Error("failed to apply concurrent zone dissolution")
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/zone/volume/40", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "volume": "40"})
+	response := httptest.NewRecorder()
+	app.HandleZoneVolume(response, req)
+
+	var payload struct {
+		Data zoneVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || !payload.Data.Partial {
+		t.Fatalf("zone dissolution was confirmed: status=%d data=%+v", response.Code, payload.Data)
+	}
+	for _, result := range payload.Data.Members {
+		if result.DeviceID != "MEMBER" {
+			continue
+		}
+		if result.Actual == nil || *result.Actual != 40 ||
+			!strings.Contains(result.Error, "topology") {
+			t.Fatalf("zone-invalid readback result = %+v", result)
+		}
+		if cached := memberConn.Status().Volume.ActualVolume; cached != 35 {
+			t.Fatalf("zone-invalid readback overwrote cache with %d", cached)
+		}
+		return
+	}
+	t.Fatal("member result missing")
 }
 
 func TestHandleZoneVolumeCachesReadbackAcrossUnrelatedSpeakerEvent(t *testing.T) {
@@ -553,4 +685,63 @@ func TestHandleZoneVolumeRefusesRegisteredStereoSlaveWithoutMaster(t *testing.T)
 	if !found {
 		t.Fatalf("missing explicit slave failure: %+v", payload.Data.Members)
 	}
+}
+
+func TestHandleZoneVolumeRejectsStereoMasterChangeBeforeWrite(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.5">MASTER</member><member ipaddress="192.0.2.10">LEFT</member><member ipaddress="192.0.2.11">RIGHT</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.5"},
+		{DeviceID: "LEFT", IP: "192.0.2.10"},
+		{DeviceID: "RIGHT", IP: "192.0.2.11"},
+	}}
+	group := &models.Group{
+		ID: "pair", Name: "Living Room", MasterDeviceID: "LEFT", Status: "GROUP_OK",
+		Roles: models.GroupRoles{Roles: []models.GroupRole{
+			{DeviceID: "LEFT", Role: "LEFT", IPAddress: "192.0.2.10"},
+			{DeviceID: "RIGHT", Role: "RIGHT", IPAddress: "192.0.2.11"},
+		}},
+	}
+	replacement := *group
+	replacement.MasterDeviceID = "RIGHT"
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	left := newVolumeSpeaker(t, 30, "")
+	right := newVolumeSpeaker(t, 30, "")
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.5", "MASTER", "Kitchen", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.10", "LEFT", "Living Room", left, 30, nil)
+	addVolumeDevice(app, "192.0.2.11", "RIGHT", "Living Room", right, 30, nil)
+	leftConn, _ := app.GetDevice("192.0.2.10")
+	rightConn, _ := app.GetDevice("192.0.2.11")
+	leftConn.UpdateStatus(func(status *webtypes.DeviceStatus) { status.Group = group })
+	rightConn.UpdateStatus(func(status *webtypes.DeviceStatus) { status.Group = group })
+	left.setVolumeGetHook(func(request int) {
+		if request == 1 {
+			leftConn.ApplyGroupEvent(&replacement, time.Now())
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.5/zone/volume/40", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.5", "volume": "40"})
+	response := httptest.NewRecorder()
+	app.HandleZoneVolume(response, req)
+
+	var payload struct {
+		Data zoneVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || !payload.Data.Partial {
+		t.Fatalf("master change was not degraded: status=%d data=%+v", response.Code, payload.Data)
+	}
+	if _, posts := left.values(); len(posts) != 0 {
+		t.Fatalf("former stereo master received write: %v", posts)
+	}
+	for _, result := range payload.Data.Members {
+		if result.DeviceID == "LEFT" && strings.Contains(result.Error, "topology changed") {
+			return
+		}
+	}
+	t.Fatalf("topology failure missing: %+v", payload.Data.Members)
 }

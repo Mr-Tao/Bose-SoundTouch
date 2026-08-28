@@ -74,9 +74,11 @@ type DeviceConnection struct {
 	bassCapabilitiesMu     sync.Mutex
 	bassCapabilitiesFlight *bassCapabilitiesFlight
 
+	volumeOperationMu  sync.Mutex
 	bassOperationMu    sync.Mutex
 	balanceOperationMu sync.Mutex
 	balanceWriteMu     sync.Mutex
+	zoneWriteMu        sync.RWMutex
 
 	nextPollGeneration  uint64
 	lastPollGeneration  uint64
@@ -102,8 +104,9 @@ type DeviceConnection struct {
 
 	// zoneMu protects the last topology confirmed by a zone master. Member
 	// responses and failed refreshes must not dissolve a logical zone.
-	zoneMu         sync.Mutex
-	zoneGeneration uint64
+	zoneMu                  sync.Mutex
+	zoneGeneration          uint64
+	confirmedZoneGeneration uint64
 
 	// done is closed by Close when the device is removed from the
 	// registry, signalling its background goroutines (the status poller
@@ -266,6 +269,15 @@ func (c *DeviceConnection) ApplyVolumeEvent(volume *models.Volume, activity time
 	})
 }
 
+// WithVolumeOperation serializes a volume write and its mandatory readback for
+// one physical speaker.
+func (c *DeviceConnection) WithVolumeOperation(operation func()) {
+	c.volumeOperationMu.Lock()
+	defer c.volumeOperationMu.Unlock()
+
+	operation()
+}
+
 // WithBassOperation serializes bass polling, writes, and events for this
 // physical speaker. The field generation still fences a fetched value until
 // it is committed after slower unrelated status reads finish.
@@ -346,6 +358,96 @@ func (c *DeviceConnection) WithBalanceWriteFence(operation func()) {
 	defer c.balanceWriteMu.Unlock()
 
 	operation()
+}
+
+// WithGroupWriteFence linearizes any group-owned control write with group
+// refresh/event invalidation. It shares the balance fence because both volume
+// and balance authority depend on the same physical group master.
+func (c *DeviceConnection) WithGroupWriteFence(operation func()) {
+	c.balanceWriteMu.Lock()
+	defer c.balanceWriteMu.Unlock()
+
+	operation()
+}
+
+// WithZoneWriteFence linearizes a zone-owned control write with the start of
+// a newer master /getZone refresh. Multiple member writes may share the fence;
+// the fence is released before network readback so a topology change can
+// invalidate that readback.
+func (c *DeviceConnection) WithZoneWriteFence(operation func()) {
+	c.zoneWriteMu.RLock()
+	defer c.zoneWriteMu.RUnlock()
+
+	operation()
+}
+
+// GroupTopology is an immutable snapshot of one confirmed group generation.
+type GroupTopology struct {
+	Group *models.Group
+
+	generation uint64
+}
+
+// ZoneTopology is an immutable snapshot of one confirmed zone generation.
+type ZoneTopology struct {
+	Zone *models.ZoneInfo
+
+	generation uint64
+}
+
+// SnapshotGroupTopology captures the currently confirmed group ownership.
+// An in-flight or failed /getGroup refresh makes group-owned writes unsafe.
+func (c *DeviceConnection) SnapshotGroupTopology() (GroupTopology, bool) {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	if c.groupGeneration != c.confirmedGroupGeneration {
+		return GroupTopology{}, false
+	}
+
+	return GroupTopology{
+		Group:      c.Status().Group,
+		generation: c.groupGeneration,
+	}, true
+}
+
+// GroupTopologyCurrent reports whether group ownership still matches the
+// confirmed generation captured before a control operation.
+func (c *DeviceConnection) GroupTopologyCurrent(topology GroupTopology) bool {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	return c.groupGeneration == c.confirmedGroupGeneration &&
+		topology.generation == c.groupGeneration &&
+		reflect.DeepEqual(topology.Group, c.Status().Group)
+}
+
+// SnapshotZoneTopology captures the last topology accepted from this zone
+// master. An in-flight or failed /getZone refresh makes zone-owned writes
+// unsafe until a newer response is confirmed.
+func (c *DeviceConnection) SnapshotZoneTopology() (ZoneTopology, bool) {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	if c.zoneGeneration != c.confirmedZoneGeneration {
+		return ZoneTopology{}, false
+	}
+
+	return ZoneTopology{
+		Zone:       c.Status().Zone,
+		generation: c.zoneGeneration,
+	}, true
+}
+
+// ZoneTopologyCurrent reports whether the confirmed zone still matches the
+// generation captured before a control operation.
+func (c *DeviceConnection) ZoneTopologyCurrent(topology ZoneTopology) bool {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	return c.zoneGeneration == c.confirmedZoneGeneration &&
+		topology.generation == c.zoneGeneration &&
+		reflect.DeepEqual(topology.Zone, c.Status().Zone)
 }
 
 // BalanceRefresh ties a /balance readback to one confirmed group generation.
@@ -976,12 +1078,18 @@ func normalizeGroup(group *models.Group) *models.Group {
 // BeginZoneRefresh starts a new generation for an asynchronous master
 // /getZone request. Starting a new refresh invalidates any older response.
 func (c *DeviceConnection) BeginZoneRefresh() uint64 {
+	var generation uint64
+
+	c.zoneWriteMu.Lock()
+	defer c.zoneWriteMu.Unlock()
+
 	c.zoneMu.Lock()
 	defer c.zoneMu.Unlock()
 
 	c.zoneGeneration++
+	generation = c.zoneGeneration
 
-	return c.zoneGeneration
+	return generation
 }
 
 // ApplyPolledZone stores topology only when it was returned by the queried
@@ -1009,6 +1117,7 @@ func (c *DeviceConnection) ApplyPolledZone(
 		return false
 	}
 
+	c.confirmedZoneGeneration = generation
 	c.replaceZone(normalizeZone(zone))
 
 	return true

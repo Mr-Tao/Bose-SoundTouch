@@ -315,6 +315,119 @@ func TestHandleAPIControl_VolumeValidation(t *testing.T) {
 	}
 }
 
+func TestHandleDirectVolumeControlRequiresMatchingAuthoritativeReadback(t *testing.T) {
+	t.Run("matching readback updates confirmed cache", func(t *testing.T) {
+		speaker := newVolumeSpeaker(t, 35, "")
+		app := NewWebApp()
+		addVolumeDevice(app, "192.0.2.10", "STANDALONE", "Kitchen", speaker, 35, nil)
+
+		request := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/volume/40", nil)
+		request = withChiParams(request, map[string]string{"id": "192.0.2.10", "volume": "40"})
+		response := httptest.NewRecorder()
+		app.HandleDirectVolumeControl(response, request)
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+		}
+		var payload webtypes.APIResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if !payload.Success {
+			t.Fatalf("matching readback failed: %+v", payload)
+		}
+		conn, _ := app.GetDevice("192.0.2.10")
+		if got := conn.Status().Volume; got == nil || got.ActualVolume != 40 || got.TargetVolume != 40 {
+			t.Fatalf("confirmed cache = %+v, want 40", got)
+		}
+		if volume, posts := speaker.values(); volume != 40 || fmt.Sprint(posts) != "[40]" || speaker.getCount() != 1 {
+			t.Fatalf("speaker operations = volume %d, posts %v, gets %d", volume, posts, speaker.getCount())
+		}
+	})
+
+	t.Run("mismatched readback cannot succeed", func(t *testing.T) {
+		speaker := newVolumeSpeaker(t, 35, "")
+		speaker.setIgnoreWrites(true)
+		app := NewWebApp()
+		addVolumeDevice(app, "192.0.2.10", "STANDALONE", "Kitchen", speaker, 35, nil)
+
+		request := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/volume/40", nil)
+		request = withChiParams(request, map[string]string{"id": "192.0.2.10", "volume": "40"})
+		response := httptest.NewRecorder()
+		app.HandleDirectVolumeControl(response, request)
+
+		if response.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: %s", response.Code, response.Body.String())
+		}
+		var payload webtypes.APIResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if payload.Success || !strings.Contains(payload.Error, "does not both match requested") {
+			t.Fatalf("mismatch response = %+v", payload)
+		}
+		conn, _ := app.GetDevice("192.0.2.10")
+		if got := conn.Status().Volume; got == nil || got.ActualVolume != 35 {
+			t.Fatalf("mismatch cache = %+v, want authoritative 35", got)
+		}
+	})
+
+	t.Run("matching actual with different target cannot succeed", func(t *testing.T) {
+		speaker := newVolumeSpeaker(t, 40, "")
+		speaker.setIgnoreWrites(true)
+		speaker.setReportedTarget(50)
+		app := NewWebApp()
+		addVolumeDevice(app, "192.0.2.10", "STANDALONE", "Kitchen", speaker, 40, nil)
+
+		request := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/volume/40", nil)
+		request = withChiParams(request, map[string]string{"id": "192.0.2.10", "volume": "40"})
+		response := httptest.NewRecorder()
+		app.HandleDirectVolumeControl(response, request)
+
+		if response.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: %s", response.Code, response.Body.String())
+		}
+		var payload webtypes.APIResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if payload.Success || !strings.Contains(payload.Error, "target 50 actual 40") {
+			t.Fatalf("different speaker target was confirmed: %+v", payload)
+		}
+		conn, _ := app.GetDevice("192.0.2.10")
+		if got := conn.Status().Volume; got == nil || got.TargetVolume != 50 || got.ActualVolume != 40 {
+			t.Fatalf("authoritative mismatched readback not retained: %+v", got)
+		}
+	})
+
+	t.Run("missing readback cannot succeed", func(t *testing.T) {
+		speaker := newVolumeSpeaker(t, 35, "")
+		speaker.setVolumeError(true)
+		app := NewWebApp()
+		addVolumeDevice(app, "192.0.2.10", "STANDALONE", "Kitchen", speaker, 35, nil)
+
+		request := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/volume/40", nil)
+		request = withChiParams(request, map[string]string{"id": "192.0.2.10", "volume": "40"})
+		response := httptest.NewRecorder()
+		app.HandleDirectVolumeControl(response, request)
+
+		if response.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: %s", response.Code, response.Body.String())
+		}
+		var payload webtypes.APIResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if payload.Success || !strings.Contains(payload.Error, "readback volume") {
+			t.Fatalf("missing readback response = %+v", payload)
+		}
+		conn, _ := app.GetDevice("192.0.2.10")
+		if got := conn.Status().Volume; got == nil || got.ActualVolume != 35 {
+			t.Fatalf("failed readback changed cache: %+v", got)
+		}
+	})
+}
+
 func TestHandleAPIControl_BassValidation(t *testing.T) {
 	app := createTestApp()
 

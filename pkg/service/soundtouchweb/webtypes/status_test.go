@@ -306,13 +306,36 @@ func TestZoneCacheRequiresAuthoritativeMaster(t *testing.T) {
 	if !conn.ApplyPolledZone(refresh, "MASTER", zone) {
 		t.Fatal("master-confirmed zone was not stored")
 	}
+	topology, current := conn.SnapshotZoneTopology()
+	if !current || topology.Zone == nil || topology.Zone.Master != "MASTER" ||
+		!conn.ZoneTopologyCurrent(topology) {
+		t.Fatalf("confirmed zone snapshot = %+v, current=%v", topology, current)
+	}
 
 	memberRefresh := conn.BeginZoneRefresh()
+	if _, current := conn.SnapshotZoneTopology(); current {
+		t.Fatal("in-flight zone refresh remained writable")
+	}
 	if conn.ApplyPolledZone(memberRefresh, "MEMBER", zone) {
 		t.Fatal("member response was accepted as authoritative")
 	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("rejected member response confirmed stale zone: %+v, current=%v", snapshot, current)
+	}
+	if conn.ZoneTopologyCurrent(topology) {
+		t.Fatal("older confirmed zone remained current after rejected refresh")
+	}
 	if conn.Status().Zone == nil || conn.Status().Zone.Master != "MASTER" {
 		t.Fatalf("member response cleared cached topology: %+v", conn.Status().Zone)
+	}
+
+	recovery := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(recovery, "MASTER", zone) {
+		t.Fatal("authoritative recovery zone was not stored")
+	}
+	if recovered, current := conn.SnapshotZoneTopology(); !current || recovered.Zone == nil ||
+		recovered.Zone.Master != "MASTER" || !conn.ZoneTopologyCurrent(recovered) {
+		t.Fatalf("recovered zone snapshot = %+v, current=%v", recovered, current)
 	}
 }
 
