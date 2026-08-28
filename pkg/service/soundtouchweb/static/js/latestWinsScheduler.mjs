@@ -10,10 +10,12 @@ export function createLatestWinsScheduler({
 }) {
     let sequence = 0;
     let latestValue;
+    let latestInteraction;
     let pending = null;
     let inFlight = null;
     let timer = null;
     let lastStartedAt = -Infinity;
+    let lastSettled = null;
     let disposed = false;
 
     function state() {
@@ -38,6 +40,8 @@ export function createLatestWinsScheduler({
             ...request,
             isLatest: request.sequence === sequence && pending === null,
         };
+
+        lastSettled = { kind, value, request: { ...request } };
 
         if (kind === 'result') onResult(value, metadata);
         else onError(value, metadata);
@@ -87,10 +91,47 @@ export function createLatestWinsScheduler({
 
     function queue(value, { force = false, ...requestMetadata } = {}) {
         if (disposed) return sequence;
-        if (!force && value === latestValue) return sequence;
+
+        const sameInteraction = requestMetadata.interactionGeneration !== undefined &&
+            requestMetadata.interactionGeneration === latestInteraction;
+
+        // Pointer release makes the last update final; it must not repeat the
+        // write, but a later gesture with the same value remains a real retry.
+        if (force && value === latestValue && sameInteraction) {
+            if (pending?.value === value) {
+                Object.assign(pending, requestMetadata, { final: true });
+                emitState();
+                return pending.sequence;
+            }
+
+            if (inFlight?.value === value && pending === null) {
+                Object.assign(inFlight, requestMetadata, { final: true });
+                emitState();
+                return inFlight.sequence;
+            }
+
+            if (inFlight === null && pending === null &&
+                lastSettled?.request.sequence === sequence &&
+                lastSettled.request.value === value) {
+                const request = {
+                    ...lastSettled.request,
+                    ...requestMetadata,
+                    final: true,
+                };
+                const metadata = { ...request, isLatest: true };
+
+                if (lastSettled.kind === 'result') onResult(lastSettled.value, metadata);
+                else onError(lastSettled.value, metadata);
+                emitState();
+                return sequence;
+            }
+        }
+
+        if (!force && value === latestValue && sameInteraction) return sequence;
 
         sequence += 1;
         latestValue = value;
+        latestInteraction = requestMetadata.interactionGeneration;
         pending = { ...requestMetadata, sequence, value, final: force };
         pump();
         emitState();
@@ -101,6 +142,7 @@ export function createLatestWinsScheduler({
     function dispose() {
         disposed = true;
         pending = null;
+        lastSettled = null;
         if (timer !== null) clearTimer(timer);
         timer = null;
     }

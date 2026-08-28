@@ -566,8 +566,8 @@ func TestHandleZoneVolumeUsesRightRoleStereoMaster(t *testing.T) {
 
 	app := NewWebApp()
 	addVolumeDevice(app, "192.0.2.5", "MASTER", "Kitchen", master, 20, zone)
-	addVolumeDevice(app, "192.0.2.10", "LEFT", "Living Room", left, 80, nil)
-	addVolumeDevice(app, "192.0.2.11", "RIGHT", "Living Room", right, 30, nil)
+	addVolumeDevice(app, "192.0.2.10", "LEFT", "Living Room left", left, 80, nil)
+	addVolumeDevice(app, "192.0.2.11", "RIGHT", "Living Room right", right, 30, nil)
 	for _, controlID := range []string{"192.0.2.10", "192.0.2.11"} {
 		conn, _ := app.GetDevice(controlID)
 		conn.UpdateStatus(func(status *webtypes.DeviceStatus) { status.Group = group })
@@ -596,6 +596,11 @@ func TestHandleZoneVolumeUsesRightRoleStereoMaster(t *testing.T) {
 	}
 	if right.getCount() != 2 || left.getCount() != 0 {
 		t.Fatalf("pair reads: RIGHT control=%d LEFT member=%d", right.getCount(), left.getCount())
+	}
+	for _, result := range payload.Data.Members {
+		if result.ControlID == "192.0.2.11" && result.Name != "Living Room" {
+			t.Fatalf("logical pair result name = %q, want %q", result.Name, "Living Room")
+		}
 	}
 }
 

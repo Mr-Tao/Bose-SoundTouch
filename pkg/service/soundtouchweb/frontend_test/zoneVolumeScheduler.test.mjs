@@ -112,7 +112,98 @@ test('never starts a second request while one is in flight', async () => {
     assert.deepEqual(requests.map(({ value }) => value), [15, 65]);
 });
 
-test('forced final input queues the same level again', async () => {
+test('forced final input promotes the same in-flight level without another request', async () => {
+    const clock = fakeClock();
+    const requests = [];
+    const results = [];
+    const scheduler = createLatestWinsScheduler({
+        send(value) {
+            const request = deferred();
+            requests.push({ value, request });
+            return request.promise;
+        },
+        now: clock.now,
+        setTimer: clock.setTimer,
+        clearTimer: clock.clearTimer,
+        onResult(_response, metadata) {
+            results.push([metadata.value, metadata.final, metadata.isLatest]);
+        },
+    });
+
+    scheduler.queue(40, { interactionGeneration: 3 });
+    scheduler.queue(40, { force: true, interactionGeneration: 3 });
+    requests[0].request.resolve({ ok: true });
+    await flushPromises();
+
+    assert.deepEqual(requests.map(({ value }) => value), [40]);
+    assert.deepEqual(results, [[40, true, true]]);
+});
+
+test('forced final input promotes the same pending level without another request', async () => {
+    const clock = fakeClock();
+    const requests = [];
+    const results = [];
+    const scheduler = createLatestWinsScheduler({
+        send(value) {
+            const request = deferred();
+            requests.push({ value, request });
+            return request.promise;
+        },
+        now: clock.now,
+        setTimer: clock.setTimer,
+        clearTimer: clock.clearTimer,
+        onResult(_response, metadata) {
+            results.push([metadata.value, metadata.final, metadata.isLatest]);
+        },
+    });
+
+    scheduler.queue(10, { interactionGeneration: 3 });
+    scheduler.queue(40, { interactionGeneration: 3 });
+    scheduler.queue(40, { force: true, interactionGeneration: 3 });
+    requests[0].request.resolve({ ok: true });
+    await flushPromises();
+    clock.advance(200);
+    requests[1].request.resolve({ ok: true });
+    await flushPromises();
+
+    assert.deepEqual(requests.map(({ value }) => value), [10, 40]);
+    assert.deepEqual(results, [
+        [10, false, false],
+        [40, true, true],
+    ]);
+});
+
+test('forced final input reuses an already settled result without another request', async () => {
+    const clock = fakeClock();
+    const requests = [];
+    const results = [];
+    const scheduler = createLatestWinsScheduler({
+        send(value) {
+            const request = deferred();
+            requests.push({ value, request });
+            return request.promise;
+        },
+        now: clock.now,
+        setTimer: clock.setTimer,
+        clearTimer: clock.clearTimer,
+        onResult(response, metadata) {
+            results.push([response.ok, metadata.value, metadata.final, metadata.isLatest]);
+        },
+    });
+
+    scheduler.queue(40, { interactionGeneration: 3 });
+    requests[0].request.resolve({ ok: true });
+    await flushPromises();
+    scheduler.queue(40, { force: true, interactionGeneration: 3 });
+
+    assert.deepEqual(requests.map(({ value }) => value), [40]);
+    assert.deepEqual(results, [
+        [true, 40, false, true],
+        [true, 40, true, true],
+    ]);
+});
+
+test('a new interaction retries the same value with a fresh request', async () => {
     const clock = fakeClock();
     const requests = [];
     const scheduler = createLatestWinsScheduler({
@@ -126,14 +217,46 @@ test('forced final input queues the same level again', async () => {
         clearTimer: clock.clearTimer,
     });
 
-    scheduler.queue(40);
+    scheduler.queue(40, { interactionGeneration: 3 });
     requests[0].request.resolve({ ok: true });
     await flushPromises();
-    scheduler.queue(40);
-    scheduler.queue(40, { force: true });
+    scheduler.queue(40, { force: true, interactionGeneration: 3 });
+    scheduler.queue(40, { interactionGeneration: 4 });
     clock.advance(200);
 
     assert.deepEqual(requests.map(({ value }) => value), [40, 40]);
+});
+
+test('a settled failure is surfaced at release but remains retryable next interaction', async () => {
+    const clock = fakeClock();
+    const requests = [];
+    const errors = [];
+    const scheduler = createLatestWinsScheduler({
+        send(value) {
+            const request = deferred();
+            requests.push({ value, request });
+            return request.promise;
+        },
+        now: clock.now,
+        setTimer: clock.setTimer,
+        clearTimer: clock.clearTimer,
+        onError(error, metadata) {
+            errors.push([error.message, metadata.interactionGeneration, metadata.final]);
+        },
+    });
+
+    scheduler.queue(40, { interactionGeneration: 3 });
+    requests[0].request.reject(new Error('offline'));
+    await flushPromises();
+    scheduler.queue(40, { force: true, interactionGeneration: 3 });
+    scheduler.queue(40, { interactionGeneration: 4 });
+    clock.advance(200);
+
+    assert.deepEqual(requests.map(({ value }) => value), [40, 40]);
+    assert.deepEqual(errors, [
+        ['offline', 3, false],
+        ['offline', 3, true],
+    ]);
 });
 
 test('marks only the response for the newest desired level as latest', async () => {

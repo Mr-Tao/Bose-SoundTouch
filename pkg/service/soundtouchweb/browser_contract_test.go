@@ -149,7 +149,7 @@ func TestPlayerBrowserContract(t *testing.T) {
 			assertBrowserDetailLayout(t, runContext)
 			assertNoHorizontalDocumentOverflow(t, runContext, "open member disclosure")
 			exerciseDetailGroupVolumeControl(t, runContext, controls, app)
-			exerciseLogicalMemberControls(t, runContext, controls)
+			exerciseLogicalMemberControls(t, runContext, controls, app)
 		})
 	}
 }
@@ -407,6 +407,10 @@ func serveBrowserContractControlResponse(
 	}
 	call.value = value
 	recorder.record(call)
+	if call.kind == "member-volume" && value == 49 {
+		writeBrowserContractError(w, "simulated member volume failure", http.StatusBadGateway)
+		return true
+	}
 
 	switch call.kind {
 	case "group-volume":
@@ -1008,6 +1012,34 @@ func exerciseGroupVolumeControl(t *testing.T, ctx context.Context, recorder *con
 		{kind: "group-volume", controlID: contractDegradedHost, value: 48},
 		{kind: "group-volume", controlID: contractDegradedHost, value: 52},
 	})
+
+	recorder.reset()
+	dispatchBrowserSliderSequence(t, ctx, input, 53, 53)
+	waitForBrowserControl(t, ctx, input, ".zone-card", ".zone-volume-value", 53)
+	assertContractControlCalls(t, recorder, "group-volume", []contractControlCall{
+		{kind: "group-volume", controlID: contractDegradedHost, value: 53},
+	})
+
+	recorder.reset()
+	evaluateBrowserContract(t, ctx, fmt.Sprintf(`(() => {
+        const input = document.querySelector(%q);
+        if (!input) throw new Error('slider is missing');
+        const pointer = {bubbles: true, pointerId: 3, pointerType: 'touch', isPrimary: true};
+        input.dispatchEvent(new PointerEvent('pointerdown', pointer));
+        input.value = '54';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+    })()`, input), nil)
+	waitForBrowserControl(t, ctx, input, ".zone-card", ".zone-volume-value", 54)
+	evaluateBrowserContract(t, ctx, fmt.Sprintf(`(() => {
+        const input = document.querySelector(%q);
+        const pointer = {bubbles: true, pointerId: 3, pointerType: 'touch', isPrimary: true};
+        input.dispatchEvent(new PointerEvent('pointerup', pointer));
+        input.dispatchEvent(new Event('change', {bubbles: true}));
+    })()`, input), nil)
+	time.Sleep(300 * time.Millisecond)
+	assertContractControlCalls(t, recorder, "group-volume", []contractControlCall{
+		{kind: "group-volume", controlID: contractDegradedHost, value: 54},
+	})
 }
 
 func exerciseDetailGroupVolumeControl(
@@ -1075,7 +1107,7 @@ func assertBrowserMemberVolumeReadback(t *testing.T, ctx context.Context, app *W
 		})`, expected)
 }
 
-func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *contractControlRecorder) {
+func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *contractControlRecorder, app *WebApp) {
 	t.Helper()
 
 	memberInput := fmt.Sprintf(`input.zone-member-volume-slider[aria-label=%q]`, contractPairName+" volume")
@@ -1087,6 +1119,8 @@ func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *
 	})
 	recorder.reset()
 	exerciseRetainedFinalVolumeFailure(t, ctx, recorder, memberInput)
+	recorder.reset()
+	exerciseKeyboardFinalVolumeFailure(t, ctx, recorder, app, memberInput)
 
 	recorder.reset()
 	pairSoundSettings := ".zone-logical-member:nth-child(2) > .member-settings-section .sound-settings-group"
@@ -1167,8 +1201,8 @@ func exerciseRetainedFinalVolumeFailure(t *testing.T, ctx context.Context, recor
 	}
 
 	beforeBlur := recorder.callsFor("member-volume")
-	if len(beforeBlur) < 1 || len(beforeBlur) > 2 {
-		t.Fatalf("member-volume calls before blur = %+v, want one coalesced final or one intermediate plus final", beforeBlur)
+	if len(beforeBlur) != 1 {
+		t.Fatalf("member-volume calls before blur = %+v, want one promoted final request", beforeBlur)
 	}
 	for _, call := range beforeBlur {
 		if call != (contractControlCall{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairRightHost, value: 47}) {
@@ -1186,6 +1220,60 @@ func exerciseRetainedFinalVolumeFailure(t *testing.T, ctx context.Context, recor
 		selector,
 		"1 member failed: "+contractPairName,
 	))
+}
+
+func exerciseKeyboardFinalVolumeFailure(
+	t *testing.T,
+	ctx context.Context,
+	recorder *contractControlRecorder,
+	app *WebApp,
+	selector string,
+) {
+	t.Helper()
+
+	connection, ok := app.GetDevice(contractPairRightHost)
+	if !ok || connection.Status().Volume == nil {
+		t.Fatal("keyboard failure fixture is missing the authoritative pair volume")
+	}
+	authoritative := strconv.Itoa(connection.Status().Volume.ActualVolume)
+	evaluateBrowserContract(t, ctx, fmt.Sprintf(`(() => {
+        const input = document.querySelector(%q);
+        if (!input) throw new Error('slider is missing');
+        input.focus();
+        input.value = '49';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+    })()`, selector), nil)
+
+	var retained bool
+	retainedExpression := fmt.Sprintf(`(() => {
+        const input = document.querySelector(%q);
+        const control = input?.closest('.zone-member-volume-control');
+        return input?.value === '49' && control?.getAttribute('aria-busy') === 'false' &&
+            !control?.querySelector('.zone-member-volume-failure');
+    })()`, selector)
+	if err := chromedp.Run(ctx, chromedp.Poll(retainedExpression, &retained, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+		t.Fatalf("keyboard volume intent rolled back before finalization: %v", err)
+	}
+
+	assertContractControlCalls(t, recorder, "member-volume", []contractControlCall{
+		{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairRightHost, value: 49},
+	})
+	evaluateBrowserContract(t, ctx, fmt.Sprintf(
+		`document.querySelector(%q).dispatchEvent(new Event('change', {bubbles: true}))`, selector), nil)
+
+	var finalized bool
+	finalizedExpression := fmt.Sprintf(`(() => {
+        const input = document.querySelector(%q);
+        const control = input?.closest('.zone-member-volume-control');
+        return input?.value === %q && control?.getAttribute('aria-busy') === 'false' &&
+            control?.querySelector('.zone-member-volume-failure')?.textContent.trim() === 'simulated member volume failure';
+    })()`, selector, authoritative)
+	if err := chromedp.Run(ctx, chromedp.Poll(finalizedExpression, &finalized, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+		t.Fatalf("keyboard volume failure did not finalize with authoritative rollback: %v", err)
+	}
+	assertContractControlCalls(t, recorder, "member-volume", []contractControlCall{
+		{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairRightHost, value: 49},
+	})
 }
 
 func dispatchBrowserSliderSequence(t *testing.T, ctx context.Context, selector string, inputValue, finalValue int) {

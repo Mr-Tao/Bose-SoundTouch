@@ -77,7 +77,8 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
     const hasProjectedVolume = Number.isFinite(zone.volume);
     const projectedVolume = clampVolume(zone.volume);
     const projectedVolumeRef = useRef(projectedVolume);
-    const draggingRef = useRef(false);
+    const interactionActiveRef = useRef(false);
+    const interactionGenerationRef = useRef(0);
     const interactionDirtyRef = useRef(false);
     const acceptedSequenceRef = useRef(0);
     const schedulerRef = useRef(null);
@@ -118,7 +119,7 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
             },
             onStateChange(next) {
                 setIsBusy(next.active);
-                if (!next.active && !draggingRef.current &&
+                if (!next.active && !interactionActiveRef.current &&
                     acceptedSequenceRef.current !== next.latestSequence) {
                     setLocalVolume(projectedVolumeRef.current);
                 }
@@ -128,24 +129,40 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
 
     useEffect(() => () => schedulerRef.current.dispose(), []);
     useEffect(() => {
-        if (!draggingRef.current && !schedulerRef.current.isActive()) {
+        if (!interactionActiveRef.current && !schedulerRef.current.isActive()) {
             setLocalVolume(projectedVolume);
         }
     }, [projectedVolume]);
 
+    function beginVolumeInteraction() {
+        if (interactionActiveRef.current) return;
+
+        interactionGenerationRef.current += 1;
+        interactionActiveRef.current = true;
+        interactionDirtyRef.current = false;
+    }
+
     function queueVolume(event, force) {
         const level = clampVolume(parseInt(event.currentTarget.value, 10));
-        if (!force) interactionDirtyRef.current = true;
+        if (!force) {
+            beginVolumeInteraction();
+            interactionDirtyRef.current = true;
+        }
         setLocalVolume(level);
         setFailure('');
-        schedulerRef.current.queue(level, { force });
+        schedulerRef.current.queue(level, {
+            force,
+            interactionGeneration: interactionGenerationRef.current,
+        });
     }
 
     function finishVolume(event) {
-        const level = clampVolume(parseInt(event.currentTarget.value, 10));
-        draggingRef.current = false;
-        if (!interactionDirtyRef.current) return;
+        if (!interactionDirtyRef.current) {
+            interactionActiveRef.current = false;
+            return;
+        }
         interactionDirtyRef.current = false;
+        interactionActiveRef.current = false;
         queueVolume(event, true);
     }
 
@@ -171,8 +188,7 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
                     min="0" max="100" value=${localVolume}
                     disabled=${zone.availableMemberCount === 0 || !hasProjectedVolume}
                     onPointerDown=${() => {
-                        draggingRef.current = true;
-                        interactionDirtyRef.current = false;
+                        beginVolumeInteraction();
                     }}
                     onInput=${event => queueVolume(event, false)}
                     onPointerUp=${finishVolume}

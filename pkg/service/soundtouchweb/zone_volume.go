@@ -197,7 +197,7 @@ func (app *WebApp) applyZoneVolume(
 				return
 			}
 
-			if info := conn.Info(); info != nil {
+			if info := conn.Info(); member.Name == "" && info != nil {
 				member.Name = info.Name
 			}
 

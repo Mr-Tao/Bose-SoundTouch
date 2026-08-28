@@ -18,7 +18,8 @@ export function ZoneMemberVolumeControl({
 }) {
     const projectedVolume = clampVolume(volume);
     const projectedVolumeRef = useRef(projectedVolume);
-    const draggingRef = useRef(false);
+    const interactionActiveRef = useRef(false);
+    const interactionGenerationRef = useRef(0);
     const interactionDirtyRef = useRef(false);
     const acceptedSequenceRef = useRef(0);
     const schedulerRef = useRef(null);
@@ -30,7 +31,7 @@ export function ZoneMemberVolumeControl({
 
     projectedVolumeRef.current = projectedVolume;
     const displayedVolume = Number.isFinite(previewVolume) &&
-        !draggingRef.current && !schedulerRef.current?.isActive()
+        !interactionActiveRef.current && !schedulerRef.current?.isActive()
         ? clampVolume(previewVolume)
         : localVolume;
 
@@ -65,7 +66,7 @@ export function ZoneMemberVolumeControl({
             },
             onStateChange(next) {
                 setIsBusy(next.active);
-                if (!next.active && !draggingRef.current &&
+                if (!next.active && !interactionActiveRef.current &&
                     acceptedSequenceRef.current !== next.latestSequence) {
                     setLocalVolume(projectedVolumeRef.current);
                 }
@@ -75,24 +76,40 @@ export function ZoneMemberVolumeControl({
 
     useEffect(() => () => schedulerRef.current.dispose(), []);
     useEffect(() => {
-        if (!draggingRef.current && !schedulerRef.current.isActive()) {
+        if (!interactionActiveRef.current && !schedulerRef.current.isActive()) {
             setLocalVolume(projectedVolume);
         }
     }, [projectedVolume]);
 
+    function beginVolumeInteraction() {
+        if (interactionActiveRef.current) return;
+
+        interactionGenerationRef.current += 1;
+        interactionActiveRef.current = true;
+        interactionDirtyRef.current = false;
+    }
+
     function queueVolume(event, force) {
         const level = clampVolume(parseInt(event.currentTarget.value, 10));
-        if (!force) interactionDirtyRef.current = true;
+        if (!force) {
+            beginVolumeInteraction();
+            interactionDirtyRef.current = true;
+        }
         setLocalVolume(level);
         setFailure('');
-        schedulerRef.current.queue(level, { force });
+        schedulerRef.current.queue(level, {
+            force,
+            interactionGeneration: interactionGenerationRef.current,
+        });
     }
 
     function finishVolume(event) {
-        const level = clampVolume(parseInt(event.currentTarget.value, 10));
-        draggingRef.current = false;
-        if (!interactionDirtyRef.current) return;
+        if (!interactionDirtyRef.current) {
+            interactionActiveRef.current = false;
+            return;
+        }
         interactionDirtyRef.current = false;
+        interactionActiveRef.current = false;
         queueVolume(event, true);
     }
 
@@ -103,8 +120,7 @@ export function ZoneMemberVolumeControl({
                 <input id=${inputID} type="range" class="zone-member-volume-slider"
                     min="0" max="100" value=${displayedVolume} aria-label=${ariaLabel}
                     onPointerDown=${() => {
-                        draggingRef.current = true;
-                        interactionDirtyRef.current = false;
+                        beginVolumeInteraction();
                     }}
                     onInput=${event => queueVolume(event, false)}
                     onPointerUp=${finishVolume}
