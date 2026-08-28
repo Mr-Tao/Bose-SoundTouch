@@ -13,6 +13,7 @@ import { Library } from './components/Library.js';
 import { PlayURL } from './components/PlayURL.js';
 import { TTS } from './components/TTS.js';
 import { Announcements } from './components/Announcements.js';
+import { Settings } from './components/Settings.js';
 import { api } from './api.js';
 
 const html = htm.bind(h);
@@ -53,6 +54,7 @@ function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify, onR
             />
             <${Zone} deviceId=${deviceId} devices=${devices} />
             <${Recents} deviceId=${deviceId} />
+            <${Settings} deviceId=${deviceId} />
             ${!device.stereoPair ? html`
                 <div class="device-management-section">
                     <div class="section-title">Device management</div>
