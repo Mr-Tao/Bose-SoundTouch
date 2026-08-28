@@ -370,6 +370,10 @@ func TestHandleDirectVolumeControlRequiresMatchingAuthoritativeReadback(t *testi
 		if got := conn.Status().Volume; got == nil || got.ActualVolume != 35 {
 			t.Fatalf("mismatch cache = %+v, want authoritative 35", got)
 		}
+		if _, posts := speaker.values(); fmt.Sprint(posts) != "[40]" ||
+			speaker.getCount() != zoneVolumeReadbackAttempts {
+			t.Fatalf("bounded mismatch operations: posts=%v gets=%d", posts, speaker.getCount())
+		}
 	})
 
 	t.Run("matching actual with different target cannot succeed", func(t *testing.T) {

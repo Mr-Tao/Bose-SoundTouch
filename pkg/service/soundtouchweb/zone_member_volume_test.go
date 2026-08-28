@@ -336,6 +336,10 @@ func TestHandleZoneMemberVolumeReportsReadbackMismatch(t *testing.T) {
 		!strings.Contains(payload.Data.Members[0].Error, "does not both match requested") {
 		t.Fatalf("mismatch response: status=%d data=%+v", response.Code, payload.Data)
 	}
+	if _, posts, gets := member.values(); fmt.Sprint(posts) != "[44]" ||
+		gets != zoneVolumeReadbackAttempts {
+		t.Fatalf("bounded mismatch operations: posts=%v gets=%d", posts, gets)
+	}
 }
 
 func TestHandleZoneMemberVolumeRejectsInvalidNonmemberAndTopologyChange(t *testing.T) {

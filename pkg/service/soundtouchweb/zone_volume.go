@@ -49,7 +49,10 @@ type zoneVolumeTopology struct {
 	snapshot  webtypes.ZoneTopology
 }
 
-const zoneVolumeReadbackAttempts = 2
+const (
+	zoneVolumeReadbackAttempts   = 3
+	zoneVolumeReadbackRetryDelay = 50 * time.Millisecond
+)
 
 // HandleZoneVolume applies one proportional volume move to a logical zone.
 // The scalar is the highest current logical-member volume; every reachable
@@ -350,7 +353,17 @@ func (app *WebApp) applyVolumeTarget(
 			readErr error
 		)
 
-		for range zoneVolumeReadbackAttempts {
+		for attempt := range zoneVolumeReadbackAttempts {
+			if attempt > 0 {
+				app.waitForVolumeReadbackRetry()
+
+				if !app.volumeTargetCurrent(controlID, conn, groupTopology, zoneTopology) {
+					confirmed = false
+
+					break
+				}
+			}
+
 			volumeGeneration := conn.BeginVolumeRefresh()
 			healthGeneration := conn.BeginHTTPPoll()
 
@@ -371,15 +384,16 @@ func (app *WebApp) applyVolumeTarget(
 			)
 			conn.CompleteHTTPPoll(healthGeneration, true, time.Now(), nil)
 
-			if confirmed {
+			if confirmed && volume.TargetVolume == level && volume.ActualVolume == level {
+				atTarget = true
+
 				break
 			}
 
-			// SoundTouch commonly emits the volumeUpdated event caused by our
-			// write while the immediate /volume readback is in flight. Start
-			// one fresh read after that event instead of treating the expected
-			// ordering race as a failed member. A topology change still fails
-			// closed and no stale response is ever applied.
+			// SoundTouch can either invalidate the read with the volumeUpdated
+			// event caused by our write, or briefly return the previous request's
+			// volume. Retry only the readback, after a short convergence delay;
+			// the write itself remains exactly-once.
 			if !app.volumeTargetCurrent(controlID, conn, groupTopology, zoneTopology) {
 				break
 			}
@@ -408,9 +422,7 @@ func (app *WebApp) applyVolumeTarget(
 		actual := volume.ActualVolume
 		member.Actual = intPointer(actual)
 
-		if volume.TargetVolume == level && actual == level {
-			atTarget = true
-
+		if atTarget {
 			return
 		}
 
@@ -427,6 +439,16 @@ func (app *WebApp) applyVolumeTarget(
 	})
 
 	return atTarget, confirmed
+}
+
+func (app *WebApp) waitForVolumeReadbackRetry() {
+	if app.volumeReadbackRetryWait != nil {
+		app.volumeReadbackRetryWait(zoneVolumeReadbackRetryDelay)
+
+		return
+	}
+
+	time.Sleep(zoneVolumeReadbackRetryDelay)
 }
 
 func (app *WebApp) volumeTargetCurrent(

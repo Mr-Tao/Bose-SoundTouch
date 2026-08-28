@@ -99,6 +99,9 @@ type WebApp struct {
 	// zoneVolumeLocks serialize proportional volume batches per authoritative
 	// zone master while allowing unrelated zones to move independently.
 	zoneVolumeLocks sync.Map
+	// volumeReadbackRetryWait is an injectable wait used by deterministic race
+	// tests; production instances leave it nil and use the bounded real delay.
+	volumeReadbackRetryWait func(time.Duration)
 
 	discoveryStatus     atomic.Value // stores *webtypes.DiscoveryStatus
 	discoveryGeneration atomic.Uint64
