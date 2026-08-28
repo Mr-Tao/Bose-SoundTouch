@@ -112,7 +112,6 @@ export function Zone({ deviceId, devices, volumePreview = null }) {
         const metadata = zoneMemberMetadata(member);
         const isStereoPair = member?.kind === 'stereoPair';
         const previewVolume = volumePreview?.[resolved.controlId];
-        const displayedVolume = Number.isFinite(previewVolume) ? previewVolume : metadata.volume;
 
         return html`
             <div class="zone-logical-member" key=${resolved.controlId}>
@@ -132,11 +131,10 @@ export function Zone({ deviceId, devices, volumePreview = null }) {
                     </div>
                 </div>
 
-                ${member?.available && displayedVolume !== null ? html`
-                    <${ZoneMemberVolumeControl} zoneMasterId=${zoneMasterId}
-                        memberId=${resolved.controlId} ariaLabel=${metadata.volumeAriaLabel}
-                        volume=${metadata.volume} previewVolume=${previewVolume} />
-                ` : null}
+                <${ZoneMemberVolumeControl} zoneMasterId=${zoneMasterId}
+                    memberId=${resolved.controlId} ariaLabel=${metadata.volumeAriaLabel}
+                    available=${member?.available} volume=${metadata.volume}
+                    previewVolume=${previewVolume} />
 
                 ${isStereoPair ? html`
                     <div class="zone-physical-members">

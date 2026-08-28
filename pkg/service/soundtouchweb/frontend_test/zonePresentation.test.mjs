@@ -7,6 +7,9 @@ import {
     zoneMemberCountSummary,
     zoneMemberMetadata,
 } from '../static/js/zonePresentation.mjs';
+import {
+    memberVolumeControlState,
+} from '../static/js/components/ZoneMemberVolumeControl.js';
 
 test('healthy zone cards show only the logical group count', () => {
     assert.deepEqual(zoneCardPresentation({
@@ -103,4 +106,19 @@ test('physical metadata exposes stereo role without creating a control label', (
     assert.equal(metadata.statusAriaLabel, 'Living right: Offline');
     assert.equal(metadata.ip, '192.0.2.21');
     assert.equal(metadata.type, 'SoundTouch 10');
+});
+
+test('member volume controls disable unavailable and unknown readbacks', () => {
+    assert.deepEqual(memberVolumeControlState({ available: false, volume: 35 }), {
+        disabled: true,
+        readbackText: 'Volume unavailable.',
+    });
+    assert.deepEqual(memberVolumeControlState({ available: true, volume: null }), {
+        disabled: true,
+        readbackText: 'Volume readback unknown.',
+    });
+    assert.deepEqual(memberVolumeControlState({ available: true, volume: 0 }), {
+        disabled: false,
+        readbackText: '',
+    });
 });

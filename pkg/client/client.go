@@ -1149,9 +1149,8 @@ func (c *Client) RenameSource(source, sourceAccount, itemName string) error {
 	return nil
 }
 
-// EnterPairingMode requests Bluetooth pairing mode through the firmware's
-// state-changing GET endpoint. Callers must verify discoverability through a
-// subsequent now-playing read; HTTP success does not confirm physical state.
+// EnterPairingMode requests the firmware's legacy general pairing mode through
+// its state-changing GET endpoint.
 func (c *Client) EnterPairingMode() error {
 	var response struct {
 		XMLName xml.Name
@@ -1163,15 +1162,42 @@ func (c *Client) EnterPairingMode() error {
 	return nil
 }
 
-// ClearPairedList requests removal of Bluetooth pairings through the
-// firmware's state-changing GET endpoint. Callers must perform a device-state
-// readback; HTTP success does not confirm that the physical state changed.
+// EnterBluetoothPairing requests Bluetooth discoverable mode through the
+// Bluetooth-specific state-changing GET endpoint. Callers must verify
+// discoverability through a subsequent now-playing read.
+func (c *Client) EnterBluetoothPairing() error {
+	var response struct {
+		XMLName xml.Name
+	}
+	if err := c.mutatingGet("/enterBluetoothPairing", &response); err != nil {
+		return fmt.Errorf("failed to enter Bluetooth pairing mode: %w", err)
+	}
+
+	return nil
+}
+
+// ClearPairedList requests the firmware's legacy general paired-list clearing
+// through its state-changing GET endpoint.
 func (c *Client) ClearPairedList() error {
 	var response struct {
 		XMLName xml.Name
 	}
 	if err := c.mutatingGet("/clearPairedList", &response); err != nil {
 		return fmt.Errorf("failed to clear paired list: %w", err)
+	}
+
+	return nil
+}
+
+// ClearBluetoothPaired requests removal of Bluetooth pairings through the
+// Bluetooth-specific state-changing GET endpoint. The firmware exposes no
+// paired-list readback, so HTTP success alone does not verify physical state.
+func (c *Client) ClearBluetoothPaired() error {
+	var response struct {
+		XMLName xml.Name
+	}
+	if err := c.mutatingGet("/clearBluetoothPaired", &response); err != nil {
+		return fmt.Errorf("failed to clear Bluetooth paired devices: %w", err)
 	}
 
 	return nil

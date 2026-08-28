@@ -15,6 +15,81 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+const (
+	bluetoothPairingPollAttempts = 5
+	bluetoothPairingPollInterval = 200 * time.Millisecond
+)
+
+var errBluetoothPairingUnverified = errors.New("speaker accepted the Bluetooth pairing command but discoverability remains unconfirmed")
+
+type bluetoothPairingPollStrategy struct {
+	Attempts int
+	Wait     func() error
+}
+
+type bluetoothPairingPollStrategyKey struct{}
+
+func bluetoothPairingStrategy(r *http.Request) bluetoothPairingPollStrategy {
+	if strategy, ok := r.Context().Value(bluetoothPairingPollStrategyKey{}).(bluetoothPairingPollStrategy); ok {
+		return strategy
+	}
+
+	return bluetoothPairingPollStrategy{
+		Attempts: bluetoothPairingPollAttempts,
+		Wait: func() error {
+			timer := time.NewTimer(bluetoothPairingPollInterval)
+			defer timer.Stop()
+
+			select {
+			case <-r.Context().Done():
+				return r.Context().Err()
+			case <-timer.C:
+				return nil
+			}
+		},
+	}
+}
+
+func enterBluetoothPairingAndConfirm(
+	mutate func() error,
+	read func() (*models.NowPlaying, error),
+	strategy bluetoothPairingPollStrategy,
+) (*models.NowPlaying, error) {
+	if err := mutate(); err != nil {
+		return nil, fmt.Errorf("Bluetooth pairing request failed: %w", err)
+	}
+
+	attempts := strategy.Attempts
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var terminalReadErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		nowPlaying, err := read()
+		if err != nil {
+			terminalReadErr = err
+		} else {
+			terminalReadErr = nil
+			if nowPlaying != nil && nowPlaying.Source == "BLUETOOTH" && nowPlaying.ConnectionStatusInfo.IsDiscoverable() {
+				return nowPlaying, nil
+			}
+		}
+
+		if attempt+1 < attempts && strategy.Wait != nil {
+			if err := strategy.Wait(); err != nil {
+				return nil, fmt.Errorf("%w: confirmation wait failed: %v", errBluetoothPairingUnverified, err)
+			}
+		}
+	}
+
+	if terminalReadErr != nil {
+		return nil, fmt.Errorf("%w: failed to read Bluetooth pairing state: %v", errBluetoothPairingUnverified, terminalReadErr)
+	}
+
+	return nil, errBluetoothPairingUnverified
+}
+
 type settingsSupport struct {
 	ClockDisplay   bool `json:"clockDisplay"`
 	ClockTime      bool `json:"clockTime"`
@@ -434,8 +509,8 @@ func (app *WebApp) readDeviceSettings(device *webtypes.DeviceConnection) (*devic
 		SystemTimeout:  capabilities.HasCapability("systemtimeout") && supportedURLs.HasURL("/systemtimeout"),
 		Language:       supportedURLs.HasURL("/language"),
 		Bluetooth:      hasBluetooth && supportedURLs.HasURL("/bluetoothInfo"),
-		BluetoothPair:  hasBluetooth && supportedURLs.HasURL("/enterPairingMode"),
-		BluetoothClear: hasBluetooth && supportedURLs.HasURL("/clearPairedList"),
+		BluetoothPair:  hasBluetooth && supportedURLs.HasURL("/enterBluetoothPairing"),
+		BluetoothClear: hasBluetooth && supportedURLs.HasURL("/clearBluetoothPaired"),
 		Sync:           capabilities.HasCapability("rebroadcastlatencymode") && supportedURLs.HasURL("/rebroadcastlatencymode"),
 		SourceNaming:   len(renameableSources) > 0 && supportedURLs.HasURL("/nameSource"),
 		WiFiOnboarding: capabilities.HasHostedWifiConfig(),
@@ -461,6 +536,25 @@ func (app *WebApp) writeDeviceSettings(w http.ResponseWriter, snapshot *deviceSe
 	w.Header().Set("Content-Type", "application/json")
 
 	if err := json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true, Data: snapshot}); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+func writeSettingsMutationUnverified(w http.ResponseWriter, message string, snapshot *deviceSettingsSnapshot) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+
+	if err := json.NewEncoder(w).Encode(struct {
+		Success bool                    `json:"success"`
+		Outcome string                  `json:"outcome"`
+		Data    *deviceSettingsSnapshot `json:"data,omitempty"`
+		Error   string                  `json:"error"`
+	}{
+		Success: false,
+		Outcome: "unverified",
+		Data:    snapshot,
+		Error:   message,
+	}); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
 }
@@ -838,21 +932,32 @@ func (app *WebApp) HandleEnterBluetoothPairing(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if err := device.Client.EnterPairingMode(); err != nil {
+	nowPlaying, err := enterBluetoothPairingAndConfirm(
+		device.Client.EnterBluetoothPairing,
+		device.Client.GetNowPlaying,
+		bluetoothPairingStrategy(r),
+	)
+	if errors.Is(err, errBluetoothPairingUnverified) {
+		writeSettingsMutationUnverified(w, err.Error(), nil)
+
+		return
+	}
+	if err != nil {
 		app.sendError(w, err.Error(), http.StatusBadGateway)
 
 		return
 	}
 
-	nowPlaying, err := device.Client.GetNowPlaying()
-	if err != nil || nowPlaying.ConnectionStatusInfo == nil || nowPlaying.ConnectionStatusInfo.Status != "DISCOVERABLE" {
-		app.sendError(w, "Speaker did not confirm Bluetooth pairing mode", http.StatusBadGateway)
+	device.UpdateStatus(func(status *webtypes.DeviceStatus) { status.NowPlaying = nowPlaying })
+	snapshot, err := app.readDeviceSettings(device)
+	if err != nil {
+		writeSettingsMutationUnverified(w,
+			"speaker confirmed Bluetooth pairing mode but settings refresh failed: "+err.Error(), nil)
 
 		return
 	}
 
-	device.UpdateStatus(func(status *webtypes.DeviceStatus) { status.NowPlaying = nowPlaying })
-	app.refreshDeviceSettings(w, device)
+	app.writeDeviceSettings(w, snapshot)
 }
 
 // HandleClearBluetoothPairings clears pairings without claiming unobservable success.
@@ -866,7 +971,7 @@ func (app *WebApp) HandleClearBluetoothPairings(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if err := device.Client.ClearPairedList(); err != nil {
+	if err := device.Client.ClearBluetoothPaired(); err != nil {
 		app.sendError(w, err.Error(), http.StatusBadGateway)
 
 		return
@@ -874,7 +979,8 @@ func (app *WebApp) HandleClearBluetoothPairings(w http.ResponseWriter, r *http.R
 
 	snapshot, err := app.readDeviceSettings(device)
 	if err != nil {
-		app.sendError(w, err.Error(), http.StatusBadGateway)
+		writeSettingsMutationUnverified(w,
+			"speaker accepted the Bluetooth clear command but settings refresh failed: "+err.Error(), nil)
 
 		return
 	}
@@ -885,22 +991,7 @@ func (app *WebApp) HandleClearBluetoothPairings(w http.ResponseWriter, r *http.R
 
 	snapshot.Errors["bluetoothClear"] = "The speaker accepted the clear command but exposes no paired-list readback."
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-
-	if err := json.NewEncoder(w).Encode(struct {
-		Success bool                    `json:"success"`
-		Outcome string                  `json:"outcome"`
-		Data    *deviceSettingsSnapshot `json:"data"`
-		Error   string                  `json:"error"`
-	}{
-		Success: false,
-		Outcome: "unverified",
-		Data:    snapshot,
-		Error:   snapshot.Errors["bluetoothClear"],
-	}); err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-	}
+	writeSettingsMutationUnverified(w, snapshot.Errors["bluetoothClear"], snapshot)
 }
 
 type sourceNameSettingsRequest struct {

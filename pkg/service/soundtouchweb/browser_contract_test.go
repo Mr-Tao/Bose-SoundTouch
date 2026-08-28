@@ -145,11 +145,17 @@ func TestPlayerBrowserContract(t *testing.T) {
 			assertBrowserMemberSettings(t, runContext)
 			if viewport.name == "desktop-1440x900" {
 				assertBrowserEmbeddedSettingsGenerationFence(t, runContext)
+				assertBrowserEmbeddedSettingsMutationGenerationFence(t, runContext)
+				assertBrowserBluetoothClearConfirmation(t, runContext)
 			}
 			assertBrowserDetailLayout(t, runContext)
 			assertNoHorizontalDocumentOverflow(t, runContext, "open member disclosure")
 			exerciseDetailGroupVolumeControl(t, runContext, controls, app)
 			exerciseLogicalMemberControls(t, runContext, controls, app)
+			assertBrowserUnavailableMemberVolumeControl(t, runContext, controls)
+			if viewport.name == "desktop-1440x900" {
+				assertBrowserUnknownMemberVolumeControl(t, runContext)
+			}
 		})
 	}
 }
@@ -328,13 +334,17 @@ func newBrowserContractServer(t *testing.T, app *WebApp) (*httptest.Server, *con
 		case r.URL.Path == "/api/announcements":
 			writeBrowserContractJSON(w, map[string]interface{}{"announcements": []interface{}{}})
 		case strings.HasSuffix(r.URL.Path, "/zone") || strings.HasSuffix(r.URL.Path, "/zone/"):
+			zoneProjection := degradedZone
+			if strings.Contains(r.URL.Path, "/devices/"+contractUnavailableHost+"/zone") {
+				zoneProjection = projection[contractUnavailableHost].Zone
+			}
 			writeBrowserContractJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
-				"masterIp":            degradedZone.MasterControlID,
-				"masterHwId":          degradedZone.MasterDeviceID,
-				"masterName":          degradedZone.Members[0].Name,
-				"master":              degradedZone.Members[0],
-				"members":             degradedZone.Members[1:],
-				"physicalMemberCount": degradedZone.PhysicalMemberCount,
+				"masterIp":            zoneProjection.MasterControlID,
+				"masterHwId":          zoneProjection.MasterDeviceID,
+				"masterName":          zoneProjection.Members[0].Name,
+				"master":              zoneProjection.Members[0],
+				"members":             zoneProjection.Members[1:],
+				"physicalMemberCount": zoneProjection.PhysicalMemberCount,
 				"isMaster":            true,
 				"isSlave":             false,
 				"isStandalone":        false,
@@ -927,6 +937,240 @@ func assertBrowserEmbeddedSettingsGenerationFence(t *testing.T, ctx context.Cont
 	}
 }
 
+func assertBrowserEmbeddedSettingsMutationGenerationFence(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(async () => {
+			const [{ Settings }, { api }, { h, render }] = await Promise.all([
+				import('/app/static/js/components/Settings.js'),
+				import('/app/static/js/api.js'),
+				import('/app/static/js/dependencies.js'),
+			]);
+			const root = document.createElement('div');
+			root.id = 'settings-mutation-generation-contract';
+			document.body.append(root);
+			const loads = [];
+			const mutations = [];
+			const originalSettings = api.settings;
+			const originalSetSystemTimeout = api.setSystemTimeout;
+			api.settings = deviceId => new Promise((resolve, reject) => {
+				loads.push({ deviceId, resolve, reject });
+			});
+			api.setSystemTimeout = (deviceId, enabled) => new Promise((resolve, reject) => {
+				mutations.push({ deviceId, enabled, resolve, reject });
+			});
+			const response = (marker, enabled = true) => ({
+				success: true,
+				data: {
+					support: { systemTimeout: true },
+					systemTimeout: { enabled },
+					errors: { systemTimeout: marker },
+				},
+			});
+			window.__settingsMutationGenerationContract = {
+				loads,
+				mutations,
+				response,
+				renderDevice(deviceId) {
+					render(h(Settings, { deviceId, targetName: deviceId, embedded: true, active: true }), root);
+				},
+				startMutation() {
+					const input = root.querySelector('.settings-toggle input');
+					if (!input || input.disabled) throw new Error('standby toggle unavailable');
+					input.click();
+				},
+				cleanup() {
+					render(null, root);
+					root.remove();
+					api.settings = originalSettings;
+					api.setSystemTimeout = originalSetSystemTimeout;
+					delete window.__settingsMutationGenerationContract;
+				},
+			};
+			window.__settingsMutationGenerationContract.renderDevice('stale-success');
+		})()`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.loads.length === 1`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.loads[0].resolve(window.__settingsMutationGenerationContract.response('stale-success-loaded'))`, nil),
+		chromedp.Poll(`document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('stale-success-loaded')`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.startMutation()`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.mutations.length === 1`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.renderDevice('current-success')`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.loads.length === 2`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.loads[1].resolve(window.__settingsMutationGenerationContract.response('current-success-loaded'))`, nil),
+		chromedp.Poll(`document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('current-success-loaded')`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.startMutation()`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.mutations.length === 2`, nil),
+		chromedp.Evaluate(`(async () => {
+			window.__settingsMutationGenerationContract.mutations[0].resolve(window.__settingsMutationGenerationContract.response('stale mutation success'));
+			await new Promise(resolve => setTimeout(resolve, 20));
+		})()`, nil),
+	); err != nil {
+		t.Fatalf("exercise stale settings mutation success: %v", err)
+	}
+
+	assertBrowserExpression(t, ctx, "settings mutations retain their physical target IDs", `window.__settingsMutationGenerationContract.mutations[0]?.deviceId === 'stale-success' && window.__settingsMutationGenerationContract.mutations[1]?.deviceId === 'current-success'`)
+	assertBrowserExpression(t, ctx, "stale mutation success cannot replace the current target or clear its busy state", `(() => {
+		const root = document.querySelector('#settings-mutation-generation-contract');
+		const input = root?.querySelector('.settings-toggle input');
+		return root?.textContent.includes('current-success-loaded') &&
+			!root?.textContent.includes('stale mutation success') && input?.disabled === true;
+	})()`)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.mutations[1].resolve(window.__settingsMutationGenerationContract.response('current mutation success', false))`, nil),
+		chromedp.Poll(`(() => {
+			const root = document.querySelector('#settings-mutation-generation-contract');
+			return root?.textContent.includes('current mutation success') &&
+				root?.querySelector('.settings-toggle input')?.disabled === false;
+		})()`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.renderDevice('stale-error')`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.loads.length === 3`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.loads[2].resolve(window.__settingsMutationGenerationContract.response('stale-error-loaded'))`, nil),
+		chromedp.Poll(`document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('stale-error-loaded')`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.startMutation()`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.mutations.length === 3`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.renderDevice('current-after-error')`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.loads.length === 4`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.loads[3].resolve(window.__settingsMutationGenerationContract.response('current after stale error'))`, nil),
+		chromedp.Poll(`document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('current after stale error')`, nil),
+		chromedp.Evaluate(`(async () => {
+			window.__settingsMutationGenerationContract.mutations[2].reject(new Error('stale mutation rejection'));
+			await new Promise(resolve => setTimeout(resolve, 20));
+		})()`, nil),
+	); err != nil {
+		t.Fatalf("exercise stale settings mutation error: %v", err)
+	}
+
+	assertBrowserExpression(t, ctx, "stale rejection remains owned by its original target", `window.__settingsMutationGenerationContract.mutations[2]?.deviceId === 'stale-error'`)
+	assertBrowserExpression(t, ctx, "stale mutation error cannot appear under the current target", `document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('current after stale error') && !document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('stale mutation rejection')`)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.renderDevice('stale-unverified')`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.loads.length === 5`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.loads[4].resolve(window.__settingsMutationGenerationContract.response('stale-unverified-loaded'))`, nil),
+		chromedp.Poll(`document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('stale-unverified-loaded')`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.startMutation()`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.mutations.length === 4`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.renderDevice('current-after-unverified')`, nil),
+		chromedp.Poll(`window.__settingsMutationGenerationContract?.loads.length === 6`, nil),
+		chromedp.Evaluate(`window.__settingsMutationGenerationContract.loads[5].resolve(window.__settingsMutationGenerationContract.response('current after stale unverified'))`, nil),
+		chromedp.Poll(`document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('current after stale unverified')`, nil),
+		chromedp.Evaluate(`(async () => {
+			window.__settingsMutationGenerationContract.mutations[3].resolve({
+				success: false,
+				outcome: 'unverified',
+				error: 'stale unverified mutation',
+				data: window.__settingsMutationGenerationContract.response('stale unverified data').data,
+			});
+			await new Promise(resolve => setTimeout(resolve, 20));
+		})()`, nil),
+	); err != nil {
+		t.Fatalf("exercise stale unverified settings mutation: %v", err)
+	}
+
+	assertBrowserExpression(t, ctx, "stale unverified result remains owned by its original target", `window.__settingsMutationGenerationContract.mutations[3]?.deviceId === 'stale-unverified'`)
+	assertBrowserExpression(t, ctx, "stale unverified mutation cannot replace or annotate the current target", `document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('current after stale unverified') && !document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('stale unverified mutation') && !document.querySelector('#settings-mutation-generation-contract')?.textContent.includes('stale unverified data')`)
+
+	var staleControlVisible bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const contract = window.__settingsMutationGenerationContract;
+		contract.renderDevice('ownership-target');
+		const input = document.querySelector('#settings-mutation-generation-contract .settings-toggle input');
+		if (!input || input.disabled) return false;
+		input.click();
+		return true;
+	})()`, &staleControlVisible)); err != nil {
+		t.Fatalf("exercise immediate settings target switch: %v", err)
+	}
+	if staleControlVisible {
+		t.Fatal("old settings control remained actionable during an immediate target switch")
+	}
+	assertBrowserExpression(t, ctx, "immediate target switch sends no cross-target mutation", `window.__settingsMutationGenerationContract.mutations.length === 4`)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.__settingsMutationGenerationContract.cleanup()`, nil)); err != nil {
+		t.Fatalf("clean up settings mutation generation contract: %v", err)
+	}
+}
+
+func assertBrowserBluetoothClearConfirmation(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(async () => {
+			const [{ Settings }, { api }, { h, render }] = await Promise.all([
+				import('/app/static/js/components/Settings.js'),
+				import('/app/static/js/api.js'),
+				import('/app/static/js/dependencies.js'),
+			]);
+			const root = document.createElement('div');
+			root.id = 'settings-bluetooth-clear-contract';
+			document.body.append(root);
+			const snapshot = {
+				support: { bluetooth: true, bluetoothClear: true },
+				bluetooth: { connectionStatus: 'READY' },
+				errors: {},
+			};
+			const originalSettings = api.settings;
+			const originalClear = api.clearBluetoothPairings;
+			const originalConfirm = window.confirm;
+			let calls = 0;
+			api.settings = async () => ({ success: true, data: snapshot });
+			api.clearBluetoothPairings = async () => {
+				calls += 1;
+				return {
+					success: false,
+					outcome: 'unverified',
+					error: 'Pairing-list readback is unavailable.',
+					data: snapshot,
+				};
+			};
+			window.__settingsBluetoothClearContract = {
+				get calls() { return calls; },
+				setConfirmation(value) { window.confirm = () => value; },
+				click() {
+					const button = Array.from(root.querySelectorAll('button'))
+						.find(candidate => candidate.textContent.trim() === 'Clear all pairings');
+					if (!button) throw new Error('Bluetooth clear button unavailable');
+					button.click();
+				},
+				cleanup() {
+					render(null, root);
+					root.remove();
+					api.settings = originalSettings;
+					api.clearBluetoothPairings = originalClear;
+					window.confirm = originalConfirm;
+					delete window.__settingsBluetoothClearContract;
+				},
+			};
+			render(h(Settings, {
+				deviceId: 'bluetooth-clear-target',
+				targetName: 'Bluetooth clear target',
+				embedded: true,
+				active: true,
+			}), root);
+		})()`, nil),
+		chromedp.Poll(`Array.from(document.querySelectorAll('#settings-bluetooth-clear-contract button')).some(button => button.textContent.trim() === 'Clear all pairings')`, nil),
+		chromedp.Evaluate(`window.__settingsBluetoothClearContract.setConfirmation(false)`, nil),
+		chromedp.Evaluate(`window.__settingsBluetoothClearContract.click()`, nil),
+		chromedp.Evaluate(`new Promise(resolve => setTimeout(resolve, 20))`, nil),
+	); err != nil {
+		t.Fatalf("exercise cancelled Bluetooth clear confirmation: %v", err)
+	}
+	assertBrowserExpression(t, ctx, "cancelled Bluetooth clear sends no request", `window.__settingsBluetoothClearContract.calls === 0`)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__settingsBluetoothClearContract.setConfirmation(true)`, nil),
+		chromedp.Evaluate(`window.__settingsBluetoothClearContract.click()`, nil),
+		chromedp.Poll(`window.__settingsBluetoothClearContract.calls === 1`, nil),
+	); err != nil {
+		t.Fatalf("exercise confirmed Bluetooth clear: %v", err)
+	}
+	assertBrowserExpression(t, ctx, "confirmed Bluetooth clear sends exactly one request", `window.__settingsBluetoothClearContract.calls === 1`)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.__settingsBluetoothClearContract.cleanup()`, nil)); err != nil {
+		t.Fatalf("clean up Bluetooth clear confirmation contract: %v", err)
+	}
+}
+
 func assertBrowserListLayout(t *testing.T, ctx context.Context) {
 	t.Helper()
 
@@ -1176,6 +1420,145 @@ func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *
 		{kind: "balance", controlID: contractPairRightHost, value: 1},
 		{kind: "balance", controlID: contractPairRightHost, value: 0},
 	})
+}
+
+func assertBrowserUnavailableMemberVolumeControl(t *testing.T, ctx context.Context, recorder *contractControlRecorder) {
+	t.Helper()
+
+	recorder.reset()
+	card := contractZoneCardSelector(contractUnavailableHost)
+	if err := chromedp.Run(ctx,
+		chromedp.Click(".device-detail .back-btn", chromedp.ByQuery),
+		chromedp.WaitVisible(card, chromedp.ByQuery),
+		chromedp.Click(card+" .zone-card-open", chromedp.ByQuery),
+		chromedp.WaitVisible(".zone-member-details > summary", chromedp.ByQuery),
+		chromedp.Click(".zone-member-details > summary", chromedp.ByQuery),
+		chromedp.WaitVisible(".zone-member-volume-slider", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open ordinary unavailable group detail: %v", err)
+	}
+
+	assertBrowserExpression(t, ctx, "one member-volume control per ordinary logical member", `document.querySelectorAll('.zone-logical-member').length === 2 && document.querySelectorAll('.zone-member-volume-slider').length === 2`)
+	assertBrowserExpression(t, ctx, "available ordinary member volume remains enabled", `document.querySelector('input.zone-member-volume-slider[aria-label="Gallery volume"]')?.disabled === false`)
+	assertBrowserExpression(t, ctx, "unavailable ordinary member keeps a disabled described control", `(() => {
+		const input = document.querySelector('input.zone-member-volume-slider[aria-label="Gallery Annex volume"]');
+		const description = document.getElementById(input?.getAttribute('aria-describedby'));
+		const output = input?.closest('.zone-member-volume-control')?.querySelector('.zone-member-volume-value');
+		return input?.disabled === true && description?.textContent.trim() === 'Volume unavailable.' &&
+			output?.textContent.trim() === '17';
+	})()`)
+
+	evaluateBrowserContract(t, ctx, `(() => {
+		const input = document.querySelector('input.zone-member-volume-slider[aria-label="Gallery Annex volume"]');
+		input.value = '50';
+		input.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerId: 9, pointerType: 'touch', isPrimary: true}));
+		input.dispatchEvent(new Event('input', {bubbles: true}));
+		input.dispatchEvent(new PointerEvent('pointerup', {bubbles: true, pointerId: 9, pointerType: 'touch', isPrimary: true}));
+		input.dispatchEvent(new Event('change', {bubbles: true}));
+	})()`, nil)
+	time.Sleep(300 * time.Millisecond)
+	assertContractControlCalls(t, recorder, "member-volume", nil)
+}
+
+func assertBrowserUnknownMemberVolumeControl(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(async () => {
+			const [{ ZoneMemberVolumeControl }, { api }, { h, render }] = await Promise.all([
+				import('/app/static/js/components/ZoneMemberVolumeControl.js'),
+				import('/app/static/js/api.js'),
+				import('/app/static/js/dependencies.js'),
+			]);
+			const root = document.createElement('div');
+			root.id = 'unknown-member-volume-contract';
+			document.body.append(root);
+			const originalMemberVolume = api.zoneMemberVolume;
+			let calls = 0;
+			let resolveFirst;
+			api.zoneMemberVolume = (_zoneMasterId, memberId, level) => {
+				calls += 1;
+				const response = {
+					success: true,
+					data: {
+						requested: level,
+						controlId: memberId,
+						members: [{ controlId: memberId, actual: level }],
+					},
+				};
+				if (calls === 1) {
+					return new Promise(resolve => { resolveFirst = () => resolve(response); });
+				}
+				return Promise.resolve(response);
+			};
+			window.__unknownMemberVolumeContract = {
+				get calls() { return calls; },
+				renderVolume(volume) {
+					render(h(ZoneMemberVolumeControl, {
+						zoneMasterId: 'unknown-zone-master',
+						memberId: 'unknown-member',
+						ariaLabel: 'Unknown member volume',
+						available: true,
+						volume,
+					}), root);
+				},
+				resolveFirst() {
+					if (!resolveFirst) throw new Error('first member-volume request is not pending');
+					resolveFirst();
+				},
+				cleanup() {
+					render(null, root);
+					root.remove();
+					api.zoneMemberVolume = originalMemberVolume;
+					delete window.__unknownMemberVolumeContract;
+				},
+			};
+			window.__unknownMemberVolumeContract.renderVolume(20);
+		})()`, nil),
+		chromedp.Poll(`document.querySelector('#unknown-member-volume-contract input.zone-member-volume-slider')?.disabled === false`, nil),
+	); err != nil {
+		t.Fatalf("render initial known member-volume control: %v", err)
+	}
+
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(() => {
+			const input = document.querySelector('#unknown-member-volume-contract input.zone-member-volume-slider');
+			input.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerId: 10, pointerType: 'touch', isPrimary: true}));
+			input.value = '21';
+			input.dispatchEvent(new Event('input', {bubbles: true}));
+			input.value = '22';
+			input.dispatchEvent(new Event('input', {bubbles: true}));
+		})()`, nil),
+		chromedp.Poll(`window.__unknownMemberVolumeContract.calls === 1`, nil),
+		chromedp.Evaluate(`window.__unknownMemberVolumeContract.renderVolume(null)`, nil),
+		chromedp.Poll(`document.querySelector('#unknown-member-volume-contract .zone-member-volume-slider')?.tagName === 'DIV'`, nil),
+	); err != nil {
+		t.Fatalf("queue member volume before unknown readback: %v", err)
+	}
+
+	assertBrowserExpression(t, ctx, "unknown member readback is explicit and does not invent a numeric slider value", `(() => {
+		const root = document.querySelector('#unknown-member-volume-contract');
+		const group = root?.querySelector('.zone-member-volume-control');
+		const description = document.getElementById(group?.getAttribute('aria-describedby'));
+		const output = root?.querySelector('.zone-member-volume-value');
+		const visual = root?.querySelector('.zone-member-volume-slider-unknown');
+		return root?.querySelector('input[type="range"]') === null &&
+			root?.querySelector('[aria-valuenow]') === null &&
+			group?.getAttribute('role') === 'group' &&
+			group?.getAttribute('aria-label') === 'Unknown member volume' &&
+			description?.textContent.trim() === 'Volume readback unknown.' &&
+			visual?.getAttribute('aria-hidden') === 'true' && output?.textContent.trim() === 'Unknown';
+	})()`)
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__unknownMemberVolumeContract.resolveFirst()`, nil),
+		chromedp.Evaluate(`new Promise(resolve => setTimeout(resolve, 350))`, nil),
+	); err != nil {
+		t.Fatalf("settle queued member volume after unknown readback: %v", err)
+	}
+	assertBrowserExpression(t, ctx, "unknown transition suppresses the delayed queued request", `window.__unknownMemberVolumeContract.calls === 1`)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.__unknownMemberVolumeContract.cleanup()`, nil)); err != nil {
+		t.Fatalf("clean up unknown member-volume contract: %v", err)
+	}
 }
 
 func assertUntouchedButtonBlurDoesNotWrite(t *testing.T, ctx context.Context, recorder *contractControlRecorder, selector string) {

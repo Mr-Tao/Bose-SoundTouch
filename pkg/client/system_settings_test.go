@@ -267,6 +267,8 @@ func TestClientBluetoothMutatingGETs(t *testing.T) {
 	}{
 		{"enter pairing mode", "/enterPairingMode", func(client *Client) error { return client.EnterPairingMode() }},
 		{"clear paired list", "/clearPairedList", func(client *Client) error { return client.ClearPairedList() }},
+		{"enter Bluetooth pairing", "/enterBluetoothPairing", func(client *Client) error { return client.EnterBluetoothPairing() }},
+		{"clear Bluetooth paired", "/clearBluetoothPaired", func(client *Client) error { return client.ClearBluetoothPaired() }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			requests := 0
@@ -302,7 +304,7 @@ func TestClientMutatingGETDoesNotFollowRedirect(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
-		if r.URL.Path == "/enterPairingMode" {
+		if r.URL.Path == "/enterBluetoothPairing" {
 			http.Redirect(w, r, "/replayed", http.StatusTemporaryRedirect)
 			return
 		}
@@ -310,9 +312,9 @@ func TestClientMutatingGETDoesNotFollowRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := createTestClient(server.URL).EnterPairingMode()
+	err := createTestClient(server.URL).EnterBluetoothPairing()
 	if err == nil || !strings.Contains(err.Error(), "307") {
-		t.Fatalf("EnterPairingMode() error = %v, want status 307", err)
+		t.Fatalf("EnterBluetoothPairing() error = %v, want status 307", err)
 	}
 	if requests != 1 {
 		t.Fatalf("requests = %d, want 1", requests)

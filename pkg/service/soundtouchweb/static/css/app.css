@@ -1202,6 +1202,12 @@ img { display: block; max-width: 100%; }
     accent-color: var(--accent);
     touch-action: pan-y;
 }
+.zone-member-volume-slider-unknown {
+    height: .4rem;
+    border-radius: 999px;
+    background: var(--border);
+    opacity: .7;
+}
 .zone-member-volume-value {
     grid-column: 2;
     grid-row: 1;
@@ -1212,6 +1218,12 @@ img { display: block; max-width: 100%; }
     text-align: right;
 }
 .zone-member-volume-control[aria-busy="true"] .zone-member-volume-value { color: var(--text-dim); }
+.zone-member-volume-readback {
+    margin-top: .35rem;
+    color: var(--text-dim);
+    font-size: .75rem;
+    line-height: 1.35;
+}
 .zone-member-volume-failure {
     margin-top: .35rem;
     color: var(--danger);

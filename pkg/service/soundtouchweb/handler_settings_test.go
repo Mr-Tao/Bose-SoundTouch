@@ -1,6 +1,7 @@
 package soundtouchweb
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -21,27 +22,35 @@ import (
 type settingsSpeakerFixture struct {
 	server *httptest.Server
 
-	mu                 sync.Mutex
-	clockEnabled       bool
-	clockFormat        string
-	clockTimeZone      string
-	clockHasFormat     bool
-	clockHasZone       bool
-	clockHasTime       bool
-	timeoutEnabled     bool
-	language           int
-	syncMode           string
-	sourceName         string
-	discoverable       bool
-	netStatsAdvertised bool
-	netStatsStatus     int
-	netStatsBody       string
-	networkInfoSignal  string
+	mu                  sync.Mutex
+	clockEnabled        bool
+	clockFormat         string
+	clockTimeZone       string
+	clockHasFormat      bool
+	clockHasZone        bool
+	clockHasTime        bool
+	timeoutEnabled      bool
+	language            int
+	syncMode            string
+	sourceName          string
+	discoverable        bool
+	pairingConfirmAfter int32
+	nowPlayingSource    string
+	nowPlayingStatus    int
+	legacyBluetoothURLs bool
+	netStatsAdvertised  bool
+	netStatsStatus      int
+	netStatsBody        string
+	networkInfoSignal   string
 
-	clockPosts     atomic.Int32
-	clockTimePosts atomic.Int32
-	clearGets      atomic.Int32
-	netStatsGets   atomic.Int32
+	clockPosts          atomic.Int32
+	clockTimePosts      atomic.Int32
+	clearGets           atomic.Int32
+	capabilityGets      atomic.Int32
+	pairingGets         atomic.Int32
+	pairingReads        atomic.Int32
+	netStatsGets        atomic.Int32
+	capabilityFailAfter int32
 }
 
 func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSpeakerFixture {
@@ -58,6 +67,8 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 		language:           15,
 		syncMode:           "SYNC_TO_ZONE",
 		sourceName:         "Line in",
+		nowPlayingSource:   "BLUETOOTH",
+		nowPlayingStatus:   http.StatusOK,
 		netStatsAdvertised: advertiseSettings,
 		netStatsStatus:     http.StatusOK,
 		networkInfoSignal:  "POOR_SIGNAL",
@@ -77,6 +88,13 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 
 		switch r.URL.Path {
 		case "/capabilities":
+			capabilityGet := fixture.capabilityGets.Add(1)
+			if fixture.capabilityFailAfter > 0 && capabilityGet >= fixture.capabilityFailAfter {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `<error>capabilities unavailable</error>`)
+
+				return
+			}
 			if advertiseSettings {
 				_, _ = io.WriteString(w, `<capabilities><networkConfig>`+
 					`<hostedWifiConfigWebPage hostedBy="BCO" generation="1" port="80">true</hostedWifiConfigWebPage>`+
@@ -92,9 +110,13 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 			if advertiseSettings {
 				locations = append(locations,
 					"/clockDisplay", "/clockTime", "/systemtimeout", "/language",
-					"/rebroadcastlatencymode", "/bluetoothInfo", "/enterPairingMode",
-					"/clearPairedList", "/nameSource", "/networkInfo",
+					"/rebroadcastlatencymode", "/bluetoothInfo", "/nameSource", "/networkInfo",
 				)
+				if fixture.legacyBluetoothURLs {
+					locations = append(locations, "/enterPairingMode", "/clearPairedList")
+				} else {
+					locations = append(locations, "/enterBluetoothPairing", "/clearBluetoothPaired")
+				}
 				if fixture.netStatsAdvertised {
 					locations = append(locations, "/netStats")
 				}
@@ -168,18 +190,30 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 			_, _ = fmt.Fprintf(w, `<rebroadcastlatencymode mode="%s" controllable="true"/>`, fixture.syncMode)
 		case "/bluetoothInfo":
 			_, _ = io.WriteString(w, `<BluetoothInfo BluetoothMACAddress="AA:BB:CC:DD:EE:FF"/>`)
-		case "/enterPairingMode":
+		case "/enterBluetoothPairing":
+			fixture.pairingGets.Add(1)
 			fixture.discoverable = true
-			_, _ = io.WriteString(w, `<status>/enterPairingMode</status>`)
-		case "/clearPairedList":
+			_, _ = io.WriteString(w, `<status>/enterBluetoothPairing</status>`)
+		case "/clearBluetoothPaired":
 			fixture.clearGets.Add(1)
-			_, _ = io.WriteString(w, `<status>/clearPairedList</status>`)
+			_, _ = io.WriteString(w, `<status>/clearBluetoothPaired</status>`)
 		case "/now_playing":
+			if fixture.nowPlayingStatus != http.StatusOK {
+				w.WriteHeader(fixture.nowPlayingStatus)
+				_, _ = io.WriteString(w, `<error>now playing unavailable</error>`)
+
+				return
+			}
+
 			status := "DISCONNECTED"
-			if fixture.discoverable {
+			pairingRead := int32(0)
+			if fixture.pairingGets.Load() > 0 {
+				pairingRead = fixture.pairingReads.Add(1)
+			}
+			if fixture.discoverable && (fixture.pairingConfirmAfter == 0 || pairingRead >= fixture.pairingConfirmAfter) {
 				status = "DISCOVERABLE"
 			}
-			_, _ = fmt.Fprintf(w, `<nowPlaying source="BLUETOOTH"><connectionStatusInfo status="%s" deviceName="Test phone"/></nowPlaying>`, status)
+			_, _ = fmt.Fprintf(w, `<nowPlaying source="%s"><connectionStatusInfo status="%s" deviceName="Test phone"/></nowPlaying>`, fixture.nowPlayingSource, status)
 		case "/nameSource":
 			body, _ := io.ReadAll(r.Body)
 			var request models.SourceRenameRequest
@@ -233,6 +267,15 @@ func settingsRequest(method, path, body string) *http.Request {
 	request.Header.Set("Content-Type", "application/json")
 
 	return withChiParams(request, map[string]string{"id": "speaker"})
+}
+
+func withBluetoothPairingPoll(request *http.Request, attempts int) *http.Request {
+	strategy := bluetoothPairingPollStrategy{
+		Attempts: attempts,
+		Wait:     func() error { return nil },
+	}
+
+	return request.WithContext(context.WithValue(request.Context(), bluetoothPairingPollStrategyKey{}, strategy))
 }
 
 func decodeSettingsResponse(t *testing.T, recorder *httptest.ResponseRecorder) struct {
@@ -315,6 +358,26 @@ func TestHandleGetDeviceSettingsProjectsOnlyAdvertisedControls(t *testing.T) {
 	if !support.WiFiOnboarding || response.Data.OnboardingURL != "/setup/" {
 		t.Fatalf("unexpected Wi-Fi onboarding projection: support=%+v url=%q",
 			support, response.Data.OnboardingURL)
+	}
+}
+
+func TestHandleGetDeviceSettingsIgnoresGeneralPairingEndpoints(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.legacyBluetoothURLs = true
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+
+	app.HandleGetDeviceSettings(recorder, settingsRequest(http.MethodGet, "/api/control/devices/speaker/settings", ""))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	response := decodeSettingsResponse(t, recorder)
+	if !response.Data.Support.Bluetooth {
+		t.Fatal("Bluetooth information should remain supported")
+	}
+	if response.Data.Support.BluetoothPair || response.Data.Support.BluetoothClear {
+		t.Fatalf("general pairing endpoints enabled Bluetooth controls: %+v", response.Data.Support)
 	}
 }
 
@@ -662,6 +725,9 @@ func TestSettingsMutationsConfirmReadback(t *testing.T) {
 				if !fixture.discoverable {
 					t.Fatal("Bluetooth pairing did not reach discoverable state")
 				}
+				if fixture.pairingGets.Load() != 1 {
+					t.Fatalf("Bluetooth pairing GET count = %d, want 1", fixture.pairingGets.Load())
+				}
 			},
 		},
 		{
@@ -697,6 +763,107 @@ func TestSettingsMutationsConfirmReadback(t *testing.T) {
 				test.verify(t, fixture)
 			}
 		})
+	}
+}
+
+func TestHandleEnterBluetoothPairingPollsWithoutMutationReplay(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.pairingConfirmAfter = 3
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+	request := withBluetoothPairingPoll(settingsRequest(http.MethodPost,
+		"/api/control/devices/speaker/settings/bluetooth/pair", ""), 4)
+
+	app.HandleEnterBluetoothPairing(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if fixture.pairingGets.Load() != 1 {
+		t.Fatalf("Bluetooth pairing GET count = %d, want 1", fixture.pairingGets.Load())
+	}
+	if fixture.pairingReads.Load() < 3 {
+		t.Fatalf("post-mutation now-playing reads = %d, want at least 3", fixture.pairingReads.Load())
+	}
+}
+
+func TestHandleEnterBluetoothPairingRejectsDiscoverableWrongSource(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.nowPlayingSource = "AUX"
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+	request := withBluetoothPairingPoll(settingsRequest(http.MethodPost,
+		"/api/control/devices/speaker/settings/bluetooth/pair", ""), 3)
+
+	app.HandleEnterBluetoothPairing(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	response := decodeSettingsResponse(t, recorder)
+	if response.Success || response.Outcome != "unverified" || response.Error == "" {
+		t.Fatalf("wrong-source response = %+v, want explicit unverified outcome", response)
+	}
+	if fixture.pairingGets.Load() != 1 {
+		t.Fatalf("Bluetooth pairing GET count = %d, want 1", fixture.pairingGets.Load())
+	}
+	if fixture.pairingReads.Load() != 3 {
+		t.Fatalf("post-mutation now-playing reads = %d, want 3", fixture.pairingReads.Load())
+	}
+}
+
+func TestHandleEnterBluetoothPairingReportsAcceptedReadFailureAsUnverified(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.nowPlayingStatus = http.StatusServiceUnavailable
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+	request := withBluetoothPairingPoll(settingsRequest(http.MethodPost,
+		"/api/control/devices/speaker/settings/bluetooth/pair", ""), 3)
+
+	app.HandleEnterBluetoothPairing(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	response := decodeSettingsResponse(t, recorder)
+	if response.Success || response.Outcome != "unverified" {
+		t.Fatalf("accepted pairing read failure = %+v, want unverified", response)
+	}
+	if !strings.Contains(response.Error, "failed to read Bluetooth pairing state") {
+		t.Fatalf("read failure diagnostic was not preserved: %+v", response)
+	}
+	if fixture.pairingGets.Load() != 1 {
+		t.Fatalf("Bluetooth pairing GET count = %d, want 1", fixture.pairingGets.Load())
+	}
+}
+
+func TestHandleEnterBluetoothPairingReportsConfirmedRefreshFailureAsUnverified(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.capabilityFailAfter = 2
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+	request := withBluetoothPairingPoll(settingsRequest(http.MethodPost,
+		"/api/control/devices/speaker/settings/bluetooth/pair", ""), 3)
+
+	app.HandleEnterBluetoothPairing(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	response := decodeSettingsResponse(t, recorder)
+	if response.Success || response.Outcome != "unverified" {
+		t.Fatalf("confirmed pairing refresh failure = %+v, want unverified", response)
+	}
+	if !strings.Contains(response.Error, "confirmed Bluetooth pairing mode") ||
+		!strings.Contains(response.Error, "settings refresh failed") {
+		t.Fatalf("refresh failure diagnostic was not preserved: %+v", response)
+	}
+	if fixture.pairingGets.Load() != 1 || fixture.pairingReads.Load() != 1 {
+		t.Fatalf("pairing mutation/read counts = %d/%d, want 1/1",
+			fixture.pairingGets.Load(), fixture.pairingReads.Load())
+	}
+	if fixture.capabilityGets.Load() != 2 {
+		t.Fatalf("capability reads = %d, want preflight and failed refresh", fixture.capabilityGets.Load())
 	}
 }
 
@@ -750,5 +917,33 @@ func TestHandleClearBluetoothPairingsReportsUnverifiedReadback(t *testing.T) {
 	}
 	if fixture.clearGets.Load() != 1 {
 		t.Fatalf("clear GET count = %d, want 1", fixture.clearGets.Load())
+	}
+}
+
+func TestHandleClearBluetoothPairingsReportsAcceptedRefreshFailureAsUnverified(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.capabilityFailAfter = 2
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+
+	app.HandleClearBluetoothPairings(recorder, settingsRequest(http.MethodDelete,
+		"/api/control/devices/speaker/settings/bluetooth/pairings", ""))
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	response := decodeSettingsResponse(t, recorder)
+	if response.Success || response.Outcome != "unverified" {
+		t.Fatalf("accepted clear refresh failure = %+v, want unverified", response)
+	}
+	if !strings.Contains(response.Error, "settings refresh failed") ||
+		!strings.Contains(response.Error, "read device capabilities") {
+		t.Fatalf("refresh failure diagnostic was not preserved: %+v", response)
+	}
+	if fixture.clearGets.Load() != 1 {
+		t.Fatalf("clear GET count = %d, want 1", fixture.clearGets.Load())
+	}
+	if fixture.capabilityGets.Load() != 2 {
+		t.Fatalf("capability reads = %d, want preflight and failed refresh", fixture.capabilityGets.Load())
 	}
 }

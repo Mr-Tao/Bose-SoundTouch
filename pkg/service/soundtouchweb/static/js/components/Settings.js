@@ -116,7 +116,7 @@ export function Settings({
     embeddedCollapsible = false,
     active = false,
 }) {
-    const [snapshot, setSnapshot] = useState(null);
+    const [snapshotState, setSnapshotState] = useState({ deviceId, data: null });
     const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState('');
     const [busy, setBusy] = useState('');
@@ -124,6 +124,7 @@ export function Settings({
     const requested = useRef(false);
     const loadGeneration = useRef(0);
     const generationDeviceId = useRef(deviceId);
+    const snapshot = snapshotState.deviceId === deviceId ? snapshotState.data : null;
 
     if (generationDeviceId.current !== deviceId) {
         generationDeviceId.current = deviceId;
@@ -131,7 +132,7 @@ export function Settings({
     }
 
     useEffect(() => {
-        setSnapshot(null);
+        setSnapshotState({ deviceId, data: null });
         setLoading(false);
         setLoadError('');
         setBusy('');
@@ -151,7 +152,7 @@ export function Settings({
             if (!response?.success || !response.data) {
                 throw new Error(response?.error || 'The speaker did not return its settings.');
             }
-            setSnapshot(response.data);
+            setSnapshotState({ deviceId, data: response.data });
         } catch (error) {
             if (generation !== loadGeneration.current) return;
             setLoadError(errorText(error, 'Could not load settings. Check that the speaker is reachable.'));
@@ -167,25 +168,28 @@ export function Settings({
 
     async function mutate(section, action, fallback) {
         if (busy) return;
+        const generation = loadGeneration.current;
         setBusy(section);
         setActionErrors(previous => ({ ...previous, [section]: '' }));
         try {
             const response = await action();
+            if (generation !== loadGeneration.current) return;
             if (response?.outcome === 'unverified') {
-                if (response.data) setSnapshot(response.data);
+                if (response.data) setSnapshotState({ deviceId, data: response.data });
                 throw new Error(response.error || 'The speaker accepted the command, but its result could not be verified.');
             }
             if (!response?.success || !response.data || response.error) {
                 throw new Error(response?.error || fallback);
             }
-            setSnapshot(response.data);
+            setSnapshotState({ deviceId, data: response.data });
         } catch (error) {
+            if (generation !== loadGeneration.current) return;
             setActionErrors(previous => ({
                 ...previous,
                 [section]: errorText(error, fallback),
             }));
         } finally {
-            setBusy('');
+            if (generation === loadGeneration.current) setBusy('');
         }
     }
 
