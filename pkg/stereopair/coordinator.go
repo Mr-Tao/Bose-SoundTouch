@@ -1022,19 +1022,56 @@ func verifyCompensation(states []memberState) {
 		states[i].result.CompensationVerified = false
 		states[i].compensationVerificationError = nil
 
-		group, err := states[i].client.GetGroup()
+		group, groupErr := states[i].client.GetGroup()
 		states[i].group = group
 		states[i].result.Group = cloneGroup(group)
 
-		switch {
-		case err != nil:
-			states[i].compensationVerificationError = wrapUnavailable("verify compensation", err)
-		case group == nil || !group.IsEmpty():
-			states[i].compensationVerificationError = errors.New("compensation did not leave an empty group")
-		default:
+		var verificationErrors []error
+		if groupErr != nil {
+			verificationErrors = append(verificationErrors, wrapUnavailable("verify compensation group", groupErr))
+		} else if group == nil || !group.IsEmpty() {
+			verificationErrors = append(verificationErrors, errors.New("compensation did not leave an empty group"))
+		}
+
+		zone, zoneErr := states[i].client.GetZone()
+		if zoneErr != nil {
+			verificationErrors = append(verificationErrors, wrapUnavailable("verify compensation zone", zoneErr))
+		} else if err := verifyCompensationZone(states[i].zone, zone, states[i].result.DeviceID); err != nil {
+			verificationErrors = append(verificationErrors, err)
+		}
+
+		if len(verificationErrors) == 0 {
 			states[i].result.CompensationVerified = true
+		} else {
+			states[i].compensationVerificationError = errors.Join(verificationErrors...)
 		}
 	}
+}
+
+func verifyCompensationZone(expected, actual *models.ZoneInfo, deviceID string) error {
+	expectedTopology, expectedStandalone, err := parseCreateZone(expected, deviceID)
+	if err != nil {
+		return fmt.Errorf("invalid pre-compensation zone: %w", err)
+	}
+
+	actualTopology, actualStandalone, err := parseCreateZone(actual, deviceID)
+	if err != nil {
+		return fmt.Errorf("invalid zone after compensation: %w", err)
+	}
+
+	if expectedStandalone || actualStandalone {
+		if expectedStandalone && actualStandalone {
+			return nil
+		}
+
+		return errors.New("compensation did not restore the pre-pairing zone topology")
+	}
+
+	if !sameCreateZone(expectedTopology, actualTopology) {
+		return errors.New("compensation did not restore the pre-pairing zone topology")
+	}
+
+	return nil
 }
 
 func compensationVerified(states []memberState) bool {

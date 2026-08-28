@@ -426,6 +426,108 @@ func TestCreatePartialFailureIsCompensatedAndReported(t *testing.T) {
 	if !result.Members[0].CompensationVerified || !result.Members[1].CompensationVerified {
 		t.Fatalf("cleanup was not verified empty: %+v", result.Members)
 	}
+	if left.zoneCalls != 2 || right.zoneCalls != 2 {
+		t.Fatalf("fresh compensation zone reads LEFT=%d RIGHT=%d, want 2/2", left.zoneCalls, right.zoneCalls)
+	}
+}
+
+func TestCreateSameZonePartialFailureRequiresZoneTopologyRestoration(t *testing.T) {
+	left, right, coordinator := newCreateCoordinator()
+	left.zone = temporaryZone(leftID, leftID, rightID)
+	right.zone = temporaryZone(leftID, leftID, rightID)
+	right.addErr = errors.New("right add failed")
+	coordinator.uncertainOutcomeDelays = nil
+	left.getZone = func(call int, current *models.ZoneInfo) (*models.ZoneInfo, error) {
+		if call == 2 {
+			return &models.ZoneInfo{Master: leftID}, nil
+		}
+
+		return current, nil
+	}
+
+	result, err := coordinator.Create(CreateRequest{
+		LeftIPAddress: leftIP, RightIPAddress: rightIP, Name: "Pair",
+	})
+	if err == nil || result.Status != StatusDegraded || result.CompensationComplete {
+		t.Fatalf("result = %+v, err = %v; want degraded rollback proof", result, err)
+	}
+	if left.removeCalls != 1 || right.removeCalls != 0 {
+		t.Fatalf("remove calls LEFT=%d RIGHT=%d, want 1/0", left.removeCalls, right.removeCalls)
+	}
+	if result.Members[0].CompensationVerified || result.Members[0].CompensationError == nil {
+		t.Fatalf("changed LEFT zone topology was accepted: %+v", result.Members[0])
+	}
+	if !result.Members[1].CompensationVerified {
+		t.Fatalf("unchanged RIGHT zone topology was not verified: %+v", result.Members[1])
+	}
+	if left.zoneCalls != 2 || right.zoneCalls != 2 {
+		t.Fatalf("fresh compensation zone reads LEFT=%d RIGHT=%d, want 2/2", left.zoneCalls, right.zoneCalls)
+	}
+}
+
+func TestCreateCompensationRejectsUnprovenZonePostcondition(t *testing.T) {
+	tests := []struct {
+		name    string
+		getZone func(int, *models.ZoneInfo) (*models.ZoneInfo, error)
+	}{
+		{
+			name: "read failure",
+			getZone: func(call int, current *models.ZoneInfo) (*models.ZoneInfo, error) {
+				if call == 2 {
+					return nil, errors.New("zone unavailable")
+				}
+
+				return current, nil
+			},
+		},
+		{
+			name: "malformed response",
+			getZone: func(call int, current *models.ZoneInfo) (*models.ZoneInfo, error) {
+				if call == 2 {
+					return &models.ZoneInfo{Master: "  "}, nil
+				}
+
+				return current, nil
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			left, right, coordinator := newCreateCoordinator()
+			right.addErr = errors.New("right add failed")
+			coordinator.uncertainOutcomeDelays = nil
+			left.getZone = test.getZone
+
+			result, err := coordinator.Create(CreateRequest{
+				LeftIPAddress: leftIP, RightIPAddress: rightIP, Name: "Pair",
+			})
+			if err == nil || result.Status != StatusDegraded || result.CompensationComplete {
+				t.Fatalf("result = %+v, err = %v; want degraded rollback proof", result, err)
+			}
+			if result.Members[0].CompensationVerified || result.Members[0].CompensationError == nil {
+				t.Fatalf("unproven LEFT zone postcondition was accepted: %+v", result.Members[0])
+			}
+			if !result.Members[1].CompensationVerified {
+				t.Fatalf("RIGHT compensation was not verified: %+v", result.Members[1])
+			}
+			if left.zoneCalls != 2 || right.zoneCalls != 2 {
+				t.Fatalf("fresh compensation zone reads LEFT=%d RIGHT=%d, want 2/2", left.zoneCalls, right.zoneCalls)
+			}
+		})
+	}
+}
+
+func TestVerifyCompensationZoneAcceptsEquivalentStandaloneRepresentations(t *testing.T) {
+	empty := &models.ZoneInfo{}
+	explicit := &models.ZoneInfo{Master: leftID}
+
+	if err := verifyCompensationZone(empty, explicit, leftID); err != nil {
+		t.Fatalf("empty to explicit standalone rejected: %v", err)
+	}
+	if err := verifyCompensationZone(explicit, empty, leftID); err != nil {
+		t.Fatalf("explicit to empty standalone rejected: %v", err)
+	}
 }
 
 func TestCreateReverifiesUncertainTimeout(t *testing.T) {
