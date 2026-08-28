@@ -308,13 +308,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		})
 
 		wsClient.OnBassUpdated(func(event *models.BassUpdatedEvent) {
-			if !speakerConnectionEventMatches(conn, event.DeviceID) {
-				return
-			}
-
-			conn.WithBassOperation(func() {
-				conn.ApplyBassEvent(&event.Bass, time.Now())
-			})
+			app.applyBassUpdatedEvent(conn, event)
 		})
 
 		wsClient.OnGroupUpdated(func(event *models.GroupUpdatedEvent) {
@@ -616,6 +610,39 @@ func applyGroupUpdatedEvent(conn *webtypes.DeviceConnection, event *models.Group
 	conn.ApplyGroupEvent(&event.Group, time.Now())
 }
 
+func (app *WebApp) applyBassUpdatedEvent(
+	conn *webtypes.DeviceConnection,
+	event *models.BassUpdatedEvent,
+) {
+	if event == nil || !speakerConnectionEventMatches(conn, event.DeviceID) {
+		return
+	}
+
+	applied := false
+
+	conn.WithBassOperation(func() {
+		if conn.Client == nil {
+			return
+		}
+
+		generation := conn.BeginBassRefresh()
+
+		bass, err := conn.Client.GetBass()
+		if err != nil || bass == nil {
+			return
+		}
+
+		applied = conn.ApplyPolledBass(generation, bass)
+		if applied {
+			conn.MarkEventStreamActivity(time.Now())
+		}
+	})
+
+	if applied {
+		app.BroadcastDeviceList()
+	}
+}
+
 func (app *WebApp) applyBalanceUpdatedEvent(
 	deviceID string,
 	conn *webtypes.DeviceConnection,
@@ -628,7 +655,7 @@ func (app *WebApp) applyBalanceUpdatedEvent(
 	applied := false
 
 	conn.WithBalanceOperation(func() {
-		if !app.confirmedStereoBalanceTarget(deviceID, conn) {
+		if conn.Client == nil || !app.confirmedStereoBalanceTarget(deviceID, conn) {
 			return
 		}
 
@@ -637,14 +664,9 @@ func (app *WebApp) applyBalanceUpdatedEvent(
 			return
 		}
 
-		balance := &event.Balance
-		if _, _, _, _, capabilityKnown := balance.Capability(); !capabilityKnown {
-			var err error
-
-			balance, err = conn.Client.GetBalance()
-			if err != nil || balance == nil {
-				return
-			}
+		balance, err := conn.Client.GetBalance()
+		if err != nil || balance == nil {
+			return
 		}
 
 		applied = app.applyBalanceReadback(deviceID, conn, refresh, balance)
@@ -652,6 +674,7 @@ func (app *WebApp) applyBalanceUpdatedEvent(
 
 	if applied {
 		conn.MarkEventStreamActivity(time.Now())
+		app.BroadcastDeviceList()
 	}
 }
 

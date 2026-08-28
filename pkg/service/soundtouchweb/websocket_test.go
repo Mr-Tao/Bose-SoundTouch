@@ -1,8 +1,10 @@
 package soundtouchweb
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
+	"github.com/gorilla/websocket"
 )
 
 type recordingWebSocketWriter struct {
@@ -57,6 +60,78 @@ func (writer *recordingWebSocketWriter) lastDeadline() (time.Time, bool) {
 	}
 
 	return writer.deadlines[len(writer.deadlines)-1], true
+}
+
+func registerBroadcastWebSocket(t *testing.T, app *WebApp) *websocket.Conn {
+	t.Helper()
+
+	serverConn := make(chan *websocket.Conn, 1)
+	release := make(chan struct{})
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade broadcast test WebSocket: %v", err)
+
+			return
+		}
+
+		serverConn <- conn
+		<-release
+		_ = conn.Close()
+	}))
+	clientConn, response, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(server.URL, "http"), nil,
+	)
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if err != nil {
+		server.Close()
+		t.Fatalf("dial broadcast test WebSocket: %v", err)
+	}
+	remoteConn := <-serverConn
+
+	app.WSMutex.Lock()
+	app.WSClients[remoteConn] = true
+	app.WSMutex.Unlock()
+
+	t.Cleanup(func() {
+		app.WSMutex.Lock()
+		delete(app.WSClients, remoteConn)
+		app.WSMutex.Unlock()
+		_ = clientConn.Close()
+		close(release)
+		server.Close()
+	})
+
+	return clientConn
+}
+
+func readBroadcastDevices(t *testing.T, conn *websocket.Conn) map[string]deviceView {
+	t.Helper()
+
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set broadcast read deadline: %v", err)
+	}
+
+	var message struct {
+		Type string          `json:"type"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := conn.ReadJSON(&message); err != nil {
+		t.Fatalf("read immediate device broadcast: %v", err)
+	}
+	if message.Type != "devices" {
+		t.Fatalf("broadcast type = %q, want devices", message.Type)
+	}
+
+	var projected map[string]deviceView
+	if err := json.Unmarshal(message.Data, &projected); err != nil {
+		t.Fatalf("decode broadcast device projection: %v", err)
+	}
+
+	return projected
 }
 
 func TestUpdateDeviceStatusRefreshesGroup(t *testing.T) {
@@ -727,31 +802,186 @@ func TestBalancePollSerializesWithPOSTAndPOSTWins(t *testing.T) {
 	}
 }
 
-func TestBalanceUpdatedEventProjectsConfirmedMasterImmediately(t *testing.T) {
-	speaker := newBalanceTestSpeaker(t, 0)
-	app := NewWebApp()
-	master, _ := addStereoBalancePair(app, speaker, "LEFT")
-	event := &models.BalanceUpdatedEvent{
-		DeviceID: "LEFT",
-		Balance: models.Balance{
-			DeviceID:         "LEFT",
-			BalanceAvailable: true,
-			BalanceMin:       -7,
-			BalanceMax:       7,
-			BalanceDefault:   0,
-			TargetBalance:    5,
-			ActualBalance:    5,
-			CapabilityKnown:  true,
+func TestBalanceUpdatedEventReadsAndBroadcastsAuthoritativeBalance(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "captured empty event",
+			raw:  `<updates deviceID='LEFT'><balanceUpdated></balanceUpdated></updates>`,
+		},
+		{
+			name: "stale populated event",
+			raw: `<updates deviceID='LEFT'><balanceUpdated><balance deviceID='LEFT'>` +
+				`<balanceAvailable>true</balanceAvailable><balanceMin>-7</balanceMin>` +
+				`<balanceMax>7</balanceMax><balanceDefault>0</balanceDefault>` +
+				`<targetBalance>-4</targetBalance><actualBalance>-4</actualBalance>` +
+				`</balance></balanceUpdated></updates>`,
 		},
 	}
 
-	app.applyBalanceUpdatedEvent("192.0.2.10", master, event)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			speaker := newBalanceTestSpeaker(t, 0)
+			app := NewWebApp()
+			master, _ := addStereoBalancePair(app, speaker, "LEFT")
+			speaker.mu.Lock()
+			speaker.balance = 5
+			speaker.mu.Unlock()
+			browser := registerBroadcastWebSocket(t, app)
 
-	if got := master.Status().Balance; got == nil || got.ActualBalance != 5 || got.TargetBalance != 5 {
-		t.Fatalf("balance event was not projected: %+v", got)
+			parsed, err := models.ParseWebSocketEvent([]byte(test.raw))
+			if err != nil || parsed.BalanceUpdated == nil {
+				t.Fatalf("parse balance event: event=%+v err=%v", parsed, err)
+			}
+
+			app.applyBalanceUpdatedEvent("192.0.2.10", master, parsed.BalanceUpdated)
+
+			status := master.Status()
+			if status.Balance == nil || status.Balance.ActualBalance != 5 ||
+				status.Balance.TargetBalance != 5 || status.BalanceRevision != 31 {
+				t.Fatalf("authoritative balance was not projected: balance=%+v revision=%d", status.Balance, status.BalanceRevision)
+			}
+			if gets := speaker.getCount(); gets != 1 {
+				t.Fatalf("balance GETs = %d, want 1", gets)
+			}
+
+			projected := readBroadcastDevices(t, browser)
+			view := projected["192.0.2.10"]
+			if view.Status == nil || view.Status.Balance == nil ||
+				view.Status.Balance.ActualBalance != 5 || view.Status.BalanceRevision != 31 {
+				t.Fatalf("immediate balance broadcast = %+v", view.Status)
+			}
+		})
 	}
-	if gets := speaker.getCount(); gets != 0 {
-		t.Fatalf("complete balance event triggered %d fallback GETs, want 0", gets)
+}
+
+func TestEmptyBassUpdatedEventRefreshesAuthoritativeBass(t *testing.T) {
+	var gets atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bass" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		gets.Add(1)
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<bass deviceID="MASTER"><targetbass>-3</targetbass><actualbass>-3</actualbass></bass>`))
+	}))
+	defer server.Close()
+
+	group := &models.Group{
+		ID:             "pair-1",
+		Name:           "Living pair",
+		MasterDeviceID: "MASTER",
+		Roles: models.GroupRoles{Roles: []models.GroupRole{
+			{DeviceID: "MEMBER", Role: "LEFT", IPAddress: "192.0.2.10"},
+			{DeviceID: "MASTER", Role: "RIGHT", IPAddress: "192.0.2.20"},
+		}},
+		Status: "GROUP_OK",
+	}
+	conn := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(server.URL),
+		&models.DeviceInfo{DeviceID: "MASTER", Name: "Right", Type: "SoundTouch 10", IPAddress: "192.0.2.20"},
+	)
+	conn.SetStatus(&webtypes.DeviceStatus{
+		Bass:         &models.Bass{DeviceID: "MASTER", TargetBass: -2, ActualBass: -2},
+		BassRevision: 10,
+		Group:        group,
+		IsConnected:  true,
+		Connectivity: webtypes.ConnectivityOnline,
+	})
+	member := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
+		DeviceID: "MEMBER", Name: "Left", Type: "SoundTouch 10", IPAddress: "192.0.2.10",
+	})
+	member.SetStatus(&webtypes.DeviceStatus{
+		Group: group, IsConnected: true, Connectivity: webtypes.ConnectivityOnline,
+	})
+	zone := &models.ZoneInfo{
+		Master: "ZONE",
+		Members: []models.Member{
+			{DeviceID: "ZONE", IP: "192.0.2.30"},
+			{DeviceID: "MEMBER", IP: "192.0.2.10"},
+			{DeviceID: "MASTER", IP: "192.0.2.20"},
+		},
+	}
+	zoneMaster := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
+		DeviceID: "ZONE", Name: "Zone master", Type: "SoundTouch 20", IPAddress: "192.0.2.30",
+	})
+	zoneMaster.SetStatus(&webtypes.DeviceStatus{
+		Zone: zone, IsConnected: true, Connectivity: webtypes.ConnectivityOnline,
+	})
+
+	app := NewWebApp()
+	app.AddDevice("192.0.2.10", member)
+	app.AddDevice("192.0.2.20", conn)
+	app.AddDevice("192.0.2.30", zoneMaster)
+	browser := registerBroadcastWebSocket(t, app)
+
+	parsed, err := models.ParseWebSocketEvent([]byte(
+		`<updates deviceID='MASTER'><bassUpdated></bassUpdated></updates>`,
+	))
+	if err != nil || parsed.BassUpdated == nil {
+		t.Fatalf("parse captured empty bass event: event=%+v err=%v", parsed, err)
+	}
+
+	app.applyBassUpdatedEvent(conn, parsed.BassUpdated)
+
+	status := conn.Status()
+	if status.Bass == nil || status.Bass.TargetBass != -3 || status.Bass.ActualBass != -3 {
+		t.Fatalf("empty bass event did not refresh authoritative state: %+v", status.Bass)
+	}
+	if status.BassRevision != 11 {
+		t.Fatalf("bass revision = %d, want 11", status.BassRevision)
+	}
+	if got := gets.Load(); got != 1 {
+		t.Fatalf("bass GETs = %d, want 1", got)
+	}
+
+	assertProjectedBass := func(source string, projected map[string]deviceView) {
+		t.Helper()
+		view := projected["192.0.2.30"].Zone
+		if view == nil || len(view.Members) != 2 {
+			t.Fatalf("%s nested zone projection = %+v", source, view)
+		}
+		target := view.Members[1].DeviceSettingsTarget
+		if target == nil || target.ControlID != "192.0.2.20" || target.Bass == nil ||
+			target.Bass.ActualBass != -3 || target.BassRevision != 11 {
+			t.Fatalf("%s projected bass target = %+v, want authoritative -3 revision 11", source, target)
+		}
+	}
+	assertProjectedBass("fresh snapshot", app.deviceViewSnapshot())
+	assertProjectedBass("immediate broadcast", readBroadcastDevices(t, browser))
+
+	messages := app.periodicPlayerMessages()
+	projected, ok := messages[0].Data.(map[string]deviceView)
+	if !ok {
+		t.Fatalf("periodic devices payload type = %T", messages[0].Data)
+	}
+	assertProjectedBass("periodic websocket", projected)
+}
+
+func TestEmptyBassUpdatedEventRetainsVerifiedBassWhenReadbackFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	conn := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(server.URL),
+		&models.DeviceInfo{DeviceID: "MASTER"},
+	)
+	verified := &models.Bass{DeviceID: "MASTER", TargetBass: -2, ActualBass: -2}
+	conn.SetStatus(&webtypes.DeviceStatus{Bass: verified, BassRevision: 10})
+
+	NewWebApp().applyBassUpdatedEvent(conn, &models.BassUpdatedEvent{DeviceID: "MASTER"})
+
+	status := conn.Status()
+	if status.Bass != verified || status.BassRevision != 10 {
+		t.Fatalf("failed empty-event readback replaced verified bass: %+v revision=%d", status.Bass, status.BassRevision)
 	}
 }
 
