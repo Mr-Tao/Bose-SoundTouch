@@ -467,6 +467,7 @@ func (app *WebApp) requireClockDisplayReadback(
 		if readErr := snapshot.Errors["clockDisplay"]; readErr != "" {
 			message += ": " + readErr
 		}
+
 		app.sendError(w, message, http.StatusBadGateway)
 
 		return false
@@ -581,6 +582,7 @@ func (app *WebApp) HandleSetClockTime(w http.ResponseWriter, r *http.Request) {
 		if readErr := snapshot.Errors["clockTime"]; readErr != "" {
 			message += ": " + readErr
 		}
+
 		app.sendError(w, message, http.StatusBadGateway)
 
 		return
@@ -594,8 +596,8 @@ func (app *WebApp) HandleSetClockTime(w http.ResponseWriter, r *http.Request) {
 
 	started := time.Now()
 
-	if err := device.Client.SetClockTimeNow(); err != nil {
-		app.sendError(w, err.Error(), http.StatusBadGateway)
+	if setErr := device.Client.SetClockTimeNow(); setErr != nil {
+		app.sendError(w, setErr.Error(), http.StatusBadGateway)
 
 		return
 	}

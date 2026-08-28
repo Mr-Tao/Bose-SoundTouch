@@ -558,6 +558,7 @@ func (c *DeviceConnection) ApplySpeakerEventAt(at time.Time, mut func(*DeviceSta
 		if mut != nil {
 			mut(status)
 		}
+
 		c.applyConnectivityLocked(status, at)
 	})
 }
@@ -618,6 +619,7 @@ func (c *DeviceConnection) CompleteEventStreamObservation(generation uint64, con
 	}
 
 	c.lastEventStreamGeneration = generation
+
 	c.eventStreamConnected = connected
 	if connected {
 		c.recordDirectSuccessLocked(at)
@@ -638,10 +640,12 @@ func (c *DeviceConnection) ObserveEventStream(connected bool, at time.Time) bool
 
 	c.nextEventStreamGeneration++
 	c.lastEventStreamGeneration = c.nextEventStreamGeneration
+
 	c.eventStreamConnected = connected
 	if connected {
 		c.recordDirectSuccessLocked(at)
 	}
+
 	c.UpdateStatus(func(status *DeviceStatus) {
 		c.applyConnectivityLocked(status, at)
 	})
@@ -696,6 +700,7 @@ func (c *DeviceConnection) CompleteHTTPPoll(
 		}
 
 		c.applyConnectivityLocked(status, at)
+
 		if success {
 			status.LastActivity = at
 		}

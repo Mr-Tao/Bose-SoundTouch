@@ -255,6 +255,7 @@ func (app *WebApp) confirmedStereoBalanceTarget(controlID string, conn *webtypes
 	logicalDevices, _, _ := projectLogicalDeviceEntries(
 		captureDeviceProjectionEntries(app.DeviceSnapshot()),
 	)
+
 	view, exists := logicalDevices[controlID]
 	if !exists || view.StereoPair == nil || view.Info == nil ||
 		strings.TrimSpace(view.StereoPair.MasterDeviceID) != strings.TrimSpace(view.Info.DeviceID) {

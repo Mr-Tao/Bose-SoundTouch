@@ -179,7 +179,7 @@ func main() {
 				// discoveryService's PreferredDevices so a host that's offline
 				// right now still gets retried on every subsequent discovery pass.
 				for _, host := range manualHosts {
-					webApp.AddDeviceByHost(host, 8090, "manual")
+					webApp.AddDeviceByHostContext(ctx, host, 8090, "manual")
 				}
 
 				err := webApp.DiscoverDevicesWithResult(ctx, discoveryService)

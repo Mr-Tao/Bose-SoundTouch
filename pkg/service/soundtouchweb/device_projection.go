@@ -416,6 +416,7 @@ func newZoneMember(
 		member.Model = view.Info.Type
 		member.Type = view.Info.Type
 	}
+
 	member.IP = projectedIPAddress(logicalID, view.Info, member.IP)
 
 	member.Connectivity = projectedConnectivity(view.Status)
@@ -665,14 +666,16 @@ func newStereoPairView(group *models.Group, byDeviceID map[string][]deviceProjec
 
 func projectedDeviceInfo(controlID string, info *models.DeviceInfo, pair *stereoPairView) *models.DeviceInfo {
 	if info == nil {
-		return info
+		return nil
 	}
 
 	address := projectedIPAddress(controlID, info, "")
+
 	name := info.Name
 	if pair != nil && pair.Name != "" {
 		name = pair.Name
 	}
+
 	if address == info.IPAddress && name == info.Name {
 		return info
 	}

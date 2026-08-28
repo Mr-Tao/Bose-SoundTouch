@@ -66,10 +66,21 @@ func NewDiscoveryService(discoveryInterface string, configuredHosts ...string) *
 // mDNS/UPnP. If the host is already known, the existing entry's
 // LastSeen is bumped and the function returns without re-fetching.
 func (app *WebApp) AddDeviceByHost(host string, port int, source string) {
-	app.addDeviceByHost(host, port, source)
+	app.addDeviceByHost(context.Background(), host, port, source)
 }
 
-func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtypes.DeviceConnection {
+// AddDeviceByHostContext is AddDeviceByHost with caller-controlled DNS
+// cancellation for discovery paths that already own a bounded context.
+func (app *WebApp) AddDeviceByHostContext(ctx context.Context, host string, port int, source string) {
+	app.addDeviceByHost(ctx, host, port, source)
+}
+
+func (app *WebApp) addDeviceByHost(
+	ctx context.Context,
+	host string,
+	port int,
+	source string,
+) *webtypes.DeviceConnection {
 	// Fast path: skip the network call if we already know this host.
 	if app.TouchDevice(host) {
 		return nil
@@ -89,7 +100,7 @@ func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtyp
 
 	// Keep the registry key stable for controls, but expose the speaker's
 	// numeric address separately for presentation and sorting.
-	info.IPAddress = resolvedDeviceIPAddress(host, info)
+	info.IPAddress = resolvedDeviceIPAddress(ctx, host, info)
 
 	conn := webtypes.NewDeviceConnection(c, info)
 	conn.MarkHTTPSuccess(time.Now())
@@ -126,7 +137,7 @@ func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtyp
 	return conn
 }
 
-func resolvedDeviceIPAddress(host string, info *models.DeviceInfo) string {
+func resolvedDeviceIPAddress(ctx context.Context, host string, info *models.DeviceInfo) string {
 	if info != nil {
 		if address := numericIPAddress(info.IPAddress); address != "" {
 			return address
@@ -144,7 +155,7 @@ func resolvedDeviceIPAddress(host string, info *models.DeviceInfo) string {
 		return address
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", bareHost)
@@ -175,7 +186,7 @@ func numericIPAddress(address string) string {
 // out bounds the cost to roughly a single timeout regardless of how many
 // devices are offline. AddDeviceByHost is registry-safe under concurrency.
 func (app *WebApp) SeedExtraDevices() {
-	app.seedExtraDevices()
+	app.seedExtraDevices(context.Background())
 }
 
 type seededExtraDevice struct {
@@ -183,7 +194,7 @@ type seededExtraDevice struct {
 	conn *webtypes.DeviceConnection
 }
 
-func (app *WebApp) seedExtraDevices() []seededExtraDevice {
+func (app *WebApp) seedExtraDevices(ctx context.Context) []seededExtraDevice {
 	if app.ExtraDeviceHosts == nil {
 		return nil
 	}
@@ -203,7 +214,7 @@ func (app *WebApp) seedExtraDevices() []seededExtraDevice {
 		go func(h string) {
 			defer wg.Done()
 
-			if conn := app.addDeviceByHost(h, 8090, "service-store"); conn != nil {
+			if conn := app.addDeviceByHost(ctx, h, 8090, "service-store"); conn != nil {
 				inserted <- seededExtraDevice{host: h, conn: conn}
 			}
 		}(host)
@@ -227,7 +238,7 @@ func (app *WebApp) seedExtraDevices() []seededExtraDevice {
 // while the service is starting.
 func (app *WebApp) SeedExtraDevicesUntilReady(ctx context.Context, retryInterval time.Duration) {
 	retryUntilReady(ctx, retryInterval, func() bool {
-		inserted := app.seedExtraDevices()
+		inserted := app.seedExtraDevices(ctx)
 		desired := app.extraDeviceHostSet()
 
 		for _, device := range inserted {
@@ -335,7 +346,7 @@ func (app *WebApp) DiscoverDevicesWithResult(ctx context.Context, discoveryServi
 
 	// Re-sync from the external device source (embedded: the service datastore).
 	// No-op when ExtraDeviceHosts is unset.
-	app.SeedExtraDevices()
+	app.seedExtraDevices(ctx)
 
 	// Own mDNS/UPnP sweep — standalone only. The embedded build passes a nil
 	// discovery service and relies entirely on the host service's discovery.
@@ -354,7 +365,7 @@ func (app *WebApp) DiscoverDevicesWithResult(ctx context.Context, discoveryServi
 	log.Printf("Found %d devices", len(devices))
 
 	for _, device := range devices {
-		app.AddDeviceByHost(device.Host, device.Port, classifySource(device.DiscoveryMethod))
+		app.AddDeviceByHostContext(ctx, device.Host, device.Port, classifySource(device.DiscoveryMethod))
 	}
 
 	return nil

@@ -313,6 +313,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 		wsClient.OnZoneUpdated(func(event *models.ZoneUpdatedEvent) {
 			conn.MarkEventStreamActivity(time.Now())
+
 			go app.refreshZonesAfterEvent(event.DeviceID, event.Zone.Master)
 		})
 
@@ -359,6 +360,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 				return
 			case <-transportTicker.C:
 				observation := conn.BeginEventStreamObservation()
+
 				connected := wsClient.IsConnected()
 				if !conn.CompleteEventStreamObservation(observation, connected, time.Now()) {
 					continue
