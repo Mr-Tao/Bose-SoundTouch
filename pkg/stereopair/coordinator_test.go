@@ -604,6 +604,57 @@ func TestInspectReturnsCanonicalFreshPair(t *testing.T) {
 	}
 }
 
+func TestInspectAcceptsRightMemberAsGroupMaster(t *testing.T) {
+	group := configuredGroup("Pair")
+	group.MasterDeviceID = rightID
+	left := readyClient(leftID, "Left")
+	right := readyClient(rightID, "Right")
+	left.group = cloneGroup(group)
+	right.group = cloneGroup(group)
+	coordinator := New(factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}))
+
+	result, err := coordinator.Inspect(rightIP)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if result.Status != StatusSucceeded || result.Group == nil || result.Group.MasterDeviceID != rightID {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(result.Members) != 2 || !result.Members[0].Verified || !result.Members[1].Verified {
+		t.Fatalf("member reads were not verified: %+v", result.Members)
+	}
+}
+
+func TestInspectRejectsMalformedOrNonMemberGroupMaster(t *testing.T) {
+	tests := []struct {
+		name     string
+		masterID string
+	}{
+		{name: "empty", masterID: ""},
+		{name: "non-member", masterID: "OTHER-ID"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			group := configuredGroup("Pair")
+			group.MasterDeviceID = test.masterID
+			left := readyClient(leftID, "Left")
+			right := readyClient(rightID, "Right")
+			left.group = cloneGroup(group)
+			right.group = cloneGroup(group)
+			coordinator := New(factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}))
+
+			result, err := coordinator.Inspect(leftIP)
+			if err == nil || result.Status != StatusFailed {
+				t.Fatalf("result = %+v, err = %v", result, err)
+			}
+			if len(result.Members) != 1 || !errors.Is(result.Members[0].PreflightError, ErrConflict) {
+				t.Fatalf("invalid master was not rejected as a conflict: %+v", result.Members)
+			}
+		})
+	}
+}
+
 func TestInspectPreservesGenerationForPartialDissolveRecovery(t *testing.T) {
 	left := readyClient(leftID, "Left")
 	right := readyClient(rightID, "Right")
