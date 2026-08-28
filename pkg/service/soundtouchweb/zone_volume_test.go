@@ -305,9 +305,9 @@ func TestHandleZoneVolumeDoesNotConfirmRejectedFreshMismatchFromOlderCache(t *te
 		if result.DeviceID != "MEMBER" {
 			continue
 		}
-		if result.Actual == nil || *result.Actual != 35 ||
+		if result.Actual != nil ||
 			!strings.Contains(result.Error, "state changed during readback") {
-			t.Fatalf("fresh mismatch was replaced by older cache: %+v", result)
+			t.Fatalf("rejected stale readback was exposed as confirmed: %+v", result)
 		}
 		if cached := memberConn.Status().Volume.ActualVolume; cached != 40 {
 			t.Fatalf("newer event cache = %d, want 40", cached)
@@ -360,7 +360,7 @@ func TestHandleZoneVolumeRejectsZoneChangeDuringReadback(t *testing.T) {
 		if result.DeviceID != "MEMBER" {
 			continue
 		}
-		if result.Actual == nil || *result.Actual != 40 ||
+		if result.Actual != nil ||
 			!strings.Contains(result.Error, "topology") {
 			t.Fatalf("zone-invalid readback result = %+v", result)
 		}

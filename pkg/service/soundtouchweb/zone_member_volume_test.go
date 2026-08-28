@@ -516,6 +516,7 @@ func TestHandleZoneMemberVolumeRejectsStereoMasterChangeDuringWriteReadback(t *t
 		t.Fatalf("decode response: %v", err)
 	}
 	if response.Code != http.StatusOK || !payload.Data.Partial || len(payload.Data.Members) != 1 ||
+		payload.Data.Members[0].Actual != nil ||
 		!strings.Contains(payload.Data.Members[0].Error, "topology") {
 		t.Fatalf("master change was confirmed: status=%d data=%+v", response.Code, payload.Data)
 	}
@@ -559,6 +560,7 @@ func TestHandleZoneMemberVolumeRejectsZoneChangeDuringReadback(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if response.Code != http.StatusOK || !payload.Data.Partial || len(payload.Data.Members) != 1 ||
+		payload.Data.Members[0].Actual != nil ||
 		!strings.Contains(payload.Data.Members[0].Error, "topology") {
 		t.Fatalf("zone dissolution was confirmed: status=%d data=%+v", response.Code, payload.Data)
 	}

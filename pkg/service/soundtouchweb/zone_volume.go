@@ -363,9 +363,6 @@ func (app *WebApp) applyVolumeTarget(
 			return
 		}
 
-		actual := volume.ActualVolume
-		member.Actual = intPointer(actual)
-
 		confirmed = app.applyCurrentVolumeReadback(
 			controlID,
 			conn,
@@ -381,6 +378,9 @@ func (app *WebApp) applyVolumeTarget(
 
 			return
 		}
+
+		actual := volume.ActualVolume
+		member.Actual = intPointer(actual)
 
 		if volume.TargetVolume == level && actual == level {
 			atTarget = true
