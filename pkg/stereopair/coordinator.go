@@ -1436,8 +1436,8 @@ func pairMembers(group *models.Group) ([]models.GroupRole, error) {
 		return nil, errors.New("stereo pair requires distinct LEFT and RIGHT members")
 	}
 
-	if group.MasterDeviceID != left.DeviceID {
-		return nil, errors.New("LEFT member must be the group master")
+	if group.MasterDeviceID != left.DeviceID && group.MasterDeviceID != right.DeviceID {
+		return nil, errors.New("group master must be a stereo-pair member")
 	}
 
 	return []models.GroupRole{left, right}, nil
