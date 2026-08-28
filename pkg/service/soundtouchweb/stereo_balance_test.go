@@ -13,7 +13,6 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
-	"github.com/gorilla/websocket"
 )
 
 type balanceTestSpeaker struct {
@@ -202,7 +201,10 @@ func addStereoBalancePair(app *WebApp, speaker *balanceTestSpeaker, masterRole s
 	right := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
 		DeviceID: "RIGHT", Name: "Living Room Right", Type: "SoundTouch 10", IPAddress: "192.0.2.20",
 	})
-	left.SetStatus(&webtypes.DeviceStatus{Group: group, Balance: speaker.cachedBalance(), IsConnected: true, Connectivity: webtypes.ConnectivityOnline})
+	left.SetStatus(&webtypes.DeviceStatus{
+		Group: group, Balance: speaker.cachedBalance(), BalanceRevision: 30,
+		IsConnected: true, Connectivity: webtypes.ConnectivityOnline,
+	})
 	right.SetStatus(&webtypes.DeviceStatus{Group: group, IsConnected: true, Connectivity: webtypes.ConnectivityOnline})
 	app.AddDevice("192.0.2.10", left)
 	app.AddDevice("192.0.2.20", right)
@@ -231,43 +233,6 @@ func decodeStereoBalanceResponse(t *testing.T, recorder *httptest.ResponseRecord
 	return webtypes.APIResponse{Success: payload.Success, Error: payload.Error}, payload.Data
 }
 
-func addBalanceBroadcastClient(t *testing.T, app *WebApp) *websocket.Conn {
-	t.Helper()
-
-	serverConnection := make(chan *websocket.Conn, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := app.Upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade broadcast client: %v", err)
-			return
-		}
-		serverConnection <- conn
-	}))
-	clientConnection, response, err := websocket.DefaultDialer.Dial("ws"+server.URL[len("http"):], nil)
-	if response != nil {
-		_ = response.Body.Close()
-	}
-	if err != nil {
-		server.Close()
-		t.Fatalf("dial broadcast client: %v", err)
-	}
-	peer := <-serverConnection
-	app.WSMutex.Lock()
-	app.WSClients[peer] = true
-	app.WSMutex.Unlock()
-
-	t.Cleanup(func() {
-		app.WSMutex.Lock()
-		delete(app.WSClients, peer)
-		app.WSMutex.Unlock()
-		_ = peer.Close()
-		_ = clientConnection.Close()
-		server.Close()
-	})
-
-	return clientConnection
-}
-
 func TestHandleStereoBalanceSetsMasterReadsBackAndProjectsStatus(t *testing.T) {
 	speaker := newBalanceTestSpeaker(t, 0)
 	app := NewWebApp()
@@ -281,7 +246,8 @@ func TestHandleStereoBalanceSetsMasterReadsBackAndProjectsStatus(t *testing.T) {
 	}
 	payload, result := decodeStereoBalanceResponse(t, response)
 	if !payload.Success || result.Requested != 6 || result.Target == nil || result.Actual == nil ||
-		*result.Target != 6 || *result.Actual != 6 || !result.AtTarget {
+		*result.Target != 6 || *result.Actual != 6 || !result.AtTarget ||
+		result.Revision == nil || *result.Revision != 31 {
 		t.Fatalf("unexpected response: success=%v data=%+v error=%q", payload.Success, result, payload.Error)
 	}
 	if got := speaker.postedLevels(); fmt.Sprint(got) != "[6]" {
@@ -289,6 +255,9 @@ func TestHandleStereoBalanceSetsMasterReadsBackAndProjectsStatus(t *testing.T) {
 	}
 	if got := left.Status().Balance; got == nil || got.TargetBalance != 6 || got.ActualBalance != 6 {
 		t.Fatalf("cached balance = %+v, want confirmed readback 6", got)
+	}
+	if got := left.Status().BalanceRevision; got != 31 {
+		t.Fatalf("cached balance revision = %d, want 31", got)
 	}
 	view := app.deviceViewSnapshot()["192.0.2.10"]
 	if view.Status == nil || view.Status.Balance == nil || view.Status.Balance.ActualBalance != 6 {
@@ -477,11 +446,18 @@ func TestHandleStereoBalanceRequiresConfirmedMasterCard(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
 		}
+		_, result := decodeStereoBalanceResponse(t, response)
+		if result.Revision == nil || *result.Revision != 31 {
+			t.Fatalf("same-value RIGHT-role readback revision = %v, want 31", result.Revision)
+		}
 		if got := speaker.postedLevels(); fmt.Sprint(got) != "[0]" {
 			t.Fatalf("right-role master balance posts = %v, want [0]", got)
 		}
 		if got := master.Status().Balance; got == nil || got.TargetBalance != 0 || got.ActualBalance != 0 {
 			t.Fatalf("right-role master cached balance = %+v, want confirmed readback 0", got)
+		}
+		if got := master.Status().BalanceRevision; got != 31 {
+			t.Fatalf("same-value RIGHT-role balance revision = %d, want 31", got)
 		}
 	})
 }
@@ -497,7 +473,8 @@ func TestHandleStereoBalanceReportsWriteAndReadbackOutcomes(t *testing.T) {
 		app.HandleStereoBalance(response, stereoBalanceRequest("4"))
 		payload, result := decodeStereoBalanceResponse(t, response)
 		if response.Code != http.StatusOK || !payload.Success || result.Target == nil || result.Actual == nil ||
-			*result.Target != 4 || *result.Actual != 4 || !result.AtTarget {
+			*result.Target != 4 || *result.Actual != 4 || !result.AtTarget ||
+			result.Revision == nil || *result.Revision != 31 {
 			t.Fatalf("unexpected verified write error: status=%d success=%v data=%+v", response.Code, payload.Success, result)
 		}
 		if speaker.getCount() != 1 {
@@ -508,37 +485,23 @@ func TestHandleStereoBalanceReportsWriteAndReadbackOutcomes(t *testing.T) {
 		}
 	})
 
-	t.Run("unverified readback", func(t *testing.T) {
+	t.Run("unverified readback retains last verified balance", func(t *testing.T) {
 		speaker := newBalanceTestSpeaker(t, 0)
 		speaker.readStatus = http.StatusInternalServerError
 		app := NewWebApp()
 		left, _ := addStereoBalancePair(app, speaker, "LEFT")
-		broadcastClient := addBalanceBroadcastClient(t, app)
 		response := httptest.NewRecorder()
 		app.HandleStereoBalance(response, stereoBalanceRequest("4"))
 		payload, result := decodeStereoBalanceResponse(t, response)
-		if response.Code != http.StatusBadGateway || payload.Success || result.Target != nil || result.Actual != nil {
+		if response.Code != http.StatusBadGateway || payload.Success || result.Target != nil || result.Actual != nil ||
+			result.Revision != nil {
 			t.Fatalf("unexpected readback failure: status=%d success=%v data=%+v", response.Code, payload.Success, result)
 		}
-		if got := left.Status().Balance; got != nil {
-			t.Fatalf("unverified write retained cached balance: %+v", got)
+		if got := left.Status().Balance; got == nil || got.ActualBalance != 0 || !got.CapabilityKnown {
+			t.Fatalf("last verified balance was discarded: %+v", got)
 		}
-
-		if err := broadcastClient.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-			t.Fatalf("set broadcast deadline: %v", err)
-		}
-		var frame struct {
-			Type string `json:"type"`
-			Data map[string]struct {
-				Status *webtypes.DeviceStatus `json:"status"`
-			} `json:"data"`
-		}
-		if err := broadcastClient.ReadJSON(&frame); err != nil {
-			t.Fatalf("read balance invalidation broadcast: %v", err)
-		}
-		view := frame.Data["192.0.2.10"]
-		if frame.Type != "devices" || view.Status == nil || view.Status.Balance != nil {
-			t.Fatalf("broadcast retained unverified balance: type=%q status=%+v", frame.Type, view.Status)
+		if got := left.Status().BalanceRevision; got != 30 {
+			t.Fatalf("failed readback advanced balance revision to %d", got)
 		}
 	})
 
@@ -551,14 +514,15 @@ func TestHandleStereoBalanceReportsWriteAndReadbackOutcomes(t *testing.T) {
 		response := httptest.NewRecorder()
 		app.HandleStereoBalance(response, stereoBalanceRequest("4"))
 		payload, result := decodeStereoBalanceResponse(t, response)
-		if response.Code != http.StatusBadGateway || payload.Success || result.Target != nil || result.Actual != nil {
+		if response.Code != http.StatusBadGateway || payload.Success || result.Target != nil || result.Actual != nil ||
+			result.Revision != nil {
 			t.Fatalf("unexpected dual failure: status=%d success=%v data=%+v", response.Code, payload.Success, result)
 		}
 		if speaker.getCount() != 1 {
 			t.Fatal("write failure did not perform mandatory readback")
 		}
-		if got := left.Status().Balance; got != nil {
-			t.Fatalf("dual failure retained cached balance: %+v", got)
+		if got := left.Status().Balance; got == nil || got.ActualBalance != 0 || !got.CapabilityKnown {
+			t.Fatalf("dual failure discarded last verified balance: %+v", got)
 		}
 	})
 
@@ -571,7 +535,9 @@ func TestHandleStereoBalanceReportsWriteAndReadbackOutcomes(t *testing.T) {
 		response := httptest.NewRecorder()
 		app.HandleStereoBalance(response, stereoBalanceRequest("4"))
 		payload, result := decodeStereoBalanceResponse(t, response)
-		if response.Code != http.StatusOK || !payload.Success || result.AtTarget || result.Actual == nil || *result.Actual != 2 {
+		if response.Code != http.StatusOK || !payload.Success || result.AtTarget ||
+			result.Target == nil || *result.Target != 4 || result.Actual == nil || *result.Actual != 2 ||
+			result.Revision == nil || *result.Revision != 31 {
 			t.Fatalf("unexpected mismatch response: status=%d success=%v data=%+v", response.Code, payload.Success, result)
 		}
 		if got := left.Status().Balance; got == nil || got.ActualBalance != 2 {
@@ -613,7 +579,7 @@ func TestHandleStereoBalanceRejectsPreWriteTopologyInvalidation(t *testing.T) {
 		{
 			name: "group event",
 			invalidate: func(conn *webtypes.DeviceConnection) {
-				conn.ApplyGroupEvent(stereoBalanceGroup("LEFT"), time.Now())
+				conn.ApplyGroupEvent(&models.Group{}, time.Now())
 			},
 		},
 	}

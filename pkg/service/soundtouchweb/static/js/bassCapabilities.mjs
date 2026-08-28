@@ -18,7 +18,7 @@ function control(min, max, defaultValue, current) {
 
 export function bassControlForStatus(status) {
     const capabilities = status?.bassCapabilities;
-    const current = status?.bass?.TargetBass;
+    const current = status?.bass?.ActualBass;
 
     if (capabilities != null) {
         const min = integer(capabilities.BassMin);

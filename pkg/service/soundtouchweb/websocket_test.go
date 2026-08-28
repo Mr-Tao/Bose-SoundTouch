@@ -584,8 +584,40 @@ func TestUpdateDeviceStatusRequiresFreshMasterGroupBeforeBalance(t *testing.T) {
 		if gets := speaker.getCount(); gets != 0 {
 			t.Fatalf("balance GETs = %d, want 0 after failed group refresh", gets)
 		}
-		if got := left.Status().Balance; got != nil {
-			t.Fatalf("stale balance survived an unconfirmed group generation: %+v", got)
+		if got := left.Status().Balance; got == nil || got.ActualBalance != 3 || !got.CapabilityKnown {
+			t.Fatalf("failed refresh discarded last verified balance: %+v", got)
+		}
+		if _, ok := left.BeginBalanceRefresh(); ok {
+			t.Fatal("failed refresh allowed a balance operation against unconfirmed topology")
+		}
+	})
+
+	t.Run("in-flight unchanged group refresh keeps the verified projection", func(t *testing.T) {
+		speaker := newBalanceTestSpeaker(t, 3)
+		speaker.groupStarted = make(chan struct{}, 1)
+		speaker.releaseGroup = make(chan struct{})
+		app := NewWebApp()
+		left, _ := addStereoBalancePair(app, speaker, "LEFT")
+
+		done := make(chan struct{})
+		go func() {
+			app.UpdateDeviceStatus("192.0.2.10", left)
+			close(done)
+		}()
+		<-speaker.groupStarted
+
+		if got := left.Status().Balance; got == nil || got.ActualBalance != 3 || !got.CapabilityKnown {
+			t.Fatalf("in-flight group poll hid verified balance: %+v", got)
+		}
+		if _, ok := left.BeginBalanceRefresh(); ok {
+			t.Fatal("balance write became eligible before group refresh completed")
+		}
+
+		close(speaker.releaseGroup)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("status poll did not finish")
 		}
 	})
 
@@ -692,6 +724,34 @@ func TestBalancePollSerializesWithPOSTAndPOSTWins(t *testing.T) {
 	}
 	if gets := speaker.getCount(); gets != 2 {
 		t.Fatalf("balance GETs = %d, want poll plus POST", gets)
+	}
+}
+
+func TestBalanceUpdatedEventProjectsConfirmedMasterImmediately(t *testing.T) {
+	speaker := newBalanceTestSpeaker(t, 0)
+	app := NewWebApp()
+	master, _ := addStereoBalancePair(app, speaker, "LEFT")
+	event := &models.BalanceUpdatedEvent{
+		DeviceID: "LEFT",
+		Balance: models.Balance{
+			DeviceID:         "LEFT",
+			BalanceAvailable: true,
+			BalanceMin:       -7,
+			BalanceMax:       7,
+			BalanceDefault:   0,
+			TargetBalance:    5,
+			ActualBalance:    5,
+			CapabilityKnown:  true,
+		},
+	}
+
+	app.applyBalanceUpdatedEvent("192.0.2.10", master, event)
+
+	if got := master.Status().Balance; got == nil || got.ActualBalance != 5 || got.TargetBalance != 5 {
+		t.Fatalf("balance event was not projected: %+v", got)
+	}
+	if gets := speaker.getCount(); gets != 0 {
+		t.Fatalf("complete balance event triggered %d fallback GETs, want 0", gets)
 	}
 }
 

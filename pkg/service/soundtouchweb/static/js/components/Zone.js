@@ -6,7 +6,8 @@ import {
     zoneMemberCountSummary,
     zoneMemberMetadata,
 } from '../zonePresentation.mjs';
-import { StereoBalanceControl } from './StereoBalanceControl.js';
+import { Settings } from './Settings.js';
+import { SoundSettings } from './SoundSettings.js';
 import { ZoneMemberVolumeControl } from './ZoneMemberVolumeControl.js';
 
 const html = htm.bind(h);
@@ -139,8 +140,6 @@ export function Zone({ deviceId, devices, volumePreview = null }) {
                 ` : null}
 
                 ${isStereoPair ? html`
-                    <${StereoBalanceControl} id=${resolved.controlId} member=${member}
-                        ariaLabel=${`${metadata.name} balance`} />
                     <div class="zone-physical-members">
                         ${(member.physicalMembers || []).map(physical => {
                             const diagnostic = physicalMemberMetadata(physical);
@@ -161,6 +160,14 @@ export function Zone({ deviceId, devices, volumePreview = null }) {
                             `;
                         })}
                     </div>
+                ` : null}
+
+                <${SoundSettings} controlId=${resolved.controlId} member=${member} />
+                ${member?.deviceSettingsTarget?.controlId ? html`
+                    <${Settings}
+                        deviceId=${member.deviceSettingsTarget.controlId}
+                        targetName=${member.deviceSettingsTarget.name || metadata.name}
+                    />
                 ` : null}
             </div>
         `;

@@ -94,6 +94,7 @@ func TestPlayerBrowserContract(t *testing.T) {
 		viewport := viewport
 		t.Run(viewport.name, func(t *testing.T) {
 			controls.reset()
+			resetBrowserContractSoundSettings(t, app)
 			targetContext, cancelTarget := chromedp.NewContext(browserContext)
 			runContext, cancelTimeout := context.WithTimeout(targetContext, 30*time.Second)
 			defer func() {
@@ -139,12 +140,38 @@ func TestPlayerBrowserContract(t *testing.T) {
 				t.Fatalf("open member disclosure: %v", err)
 			}
 			assertBrowserMemberDisclosure(t, runContext)
+			assertBrowserSoundSettingsCollapsed(t, runContext)
+			openBrowserSoundSettings(t, runContext)
+			assertBrowserSoundSettings(t, runContext)
 			assertBrowserDetailLayout(t, runContext)
 			assertNoHorizontalDocumentOverflow(t, runContext, "open member disclosure")
 			exerciseDetailGroupVolumeControl(t, runContext, controls, app)
 			exerciseLogicalMemberControls(t, runContext, controls)
 		})
 	}
+}
+
+func resetBrowserContractSoundSettings(t *testing.T, app *WebApp) {
+	t.Helper()
+
+	pairMaster, ok := app.GetDevice(contractPairRightHost)
+	if !ok {
+		t.Fatalf("browser fixture lost pair master %q", contractPairRightHost)
+	}
+	pairMaster.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Bass = &models.Bass{TargetBass: -3, ActualBass: -3}
+		status.BassRevision++
+		status.Balance = &models.Balance{
+			BalanceAvailable: true,
+			BalanceMin:       -7,
+			BalanceMax:       7,
+			BalanceDefault:   0,
+			TargetBalance:    0,
+			ActualBalance:    0,
+			CapabilityKnown:  true,
+		}
+		status.BalanceRevision++
+	})
 }
 
 func newBrowserContractApp(t *testing.T) *WebApp {
@@ -194,6 +221,16 @@ func newBrowserContractApp(t *testing.T) *WebApp {
 	pairMaster := addBrowserContractDevice(t, app, contractPairRightHost, "pair-right", contractRightName,
 		contractPairModel, 41, webtypes.ConnectivityOnline, pair, nil)
 	pairMaster.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Bass = &models.Bass{
+			TargetBass: -3,
+			ActualBass: -3,
+		}
+		status.BassCapabilities = &models.BassCapabilities{
+			BassAvailable: true,
+			BassMin:       -9,
+			BassMax:       0,
+			BassDefault:   0,
+		}
 		status.Balance = &models.Balance{
 			BalanceAvailable: true,
 			BalanceMin:       -7,
@@ -330,7 +367,7 @@ func serveBrowserContractControlResponse(
 	}
 
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 7 || parts[0] != "api" || parts[1] != "control" || parts[2] != "devices" {
+	if len(parts) < 6 || parts[0] != "api" || parts[1] != "control" || parts[2] != "devices" {
 		return false
 	}
 
@@ -343,13 +380,25 @@ func serveBrowserContractControlResponse(
 		call = contractControlCall{kind: "member-volume", controlID: controlID, memberID: parts[6]}
 	case len(parts) == 7 && parts[4] == "stereo-pair" && parts[5] == "balance":
 		call = contractControlCall{kind: "balance", controlID: controlID}
+	case len(parts) == 6 && parts[4] == "action" && parts[5] == "bass":
+		var request webtypes.BassRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeBrowserContractError(w, "decode test bass request", http.StatusBadRequest)
+			return true
+		}
+		call = contractControlCall{kind: "bass", controlID: controlID, value: request.Level}
 	default:
 		return false
 	}
 
-	value, err := strconv.Atoi(parts[len(parts)-1])
+	value := call.value
+	var err error
+	if call.kind != "bass" {
+		value, err = strconv.Atoi(parts[len(parts)-1])
+	}
 	if err != nil || ((call.kind == "balance") && (value < -7 || value > 7)) ||
-		((call.kind != "balance") && (value < 0 || value > 100)) {
+		((call.kind == "bass") && (value < -9 || value > 0)) ||
+		((call.kind != "balance" && call.kind != "bass") && (value < 0 || value > 100)) {
 		writeBrowserContractError(w, "test control value outside fixture bounds", http.StatusBadRequest)
 		return true
 	}
@@ -390,10 +439,67 @@ func serveBrowserContractControlResponse(
 			},
 		}})
 	case "balance":
+		projectionValue := value
+		revisionAdvance := uint64(1)
+		if value == 1 {
+			projectionValue = 2
+			revisionAdvance = 2
+		}
+		projectionRevision := uint64(0)
+		if connection, ok := app.GetDevice(controlID); ok {
+			connection.UpdateStatus(func(status *webtypes.DeviceStatus) {
+				status.Balance = &models.Balance{
+					BalanceAvailable: true,
+					BalanceMin:       -7,
+					BalanceMax:       7,
+					BalanceDefault:   0,
+					TargetBalance:    projectionValue,
+					ActualBalance:    projectionValue,
+					CapabilityKnown:  true,
+				}
+				status.BalanceRevision += revisionAdvance
+				projectionRevision = status.BalanceRevision
+			})
+			app.BroadcastDeviceList()
+		}
+		responseRevision := projectionRevision
+		if revisionAdvance > 1 {
+			responseRevision--
+			time.Sleep(50 * time.Millisecond)
+		}
 		writeBrowserContractJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
 			"requested": value,
 			"target":    value,
 			"actual":    value,
+			"revision":  responseRevision,
+			"atTarget":  true,
+		}})
+	case "bass":
+		projectionValue := value
+		revisionAdvance := uint64(1)
+		if value == -4 {
+			projectionValue = -5
+			revisionAdvance = 2
+		}
+		projectionRevision := uint64(0)
+		if connection, ok := app.GetDevice(controlID); ok {
+			connection.UpdateStatus(func(status *webtypes.DeviceStatus) {
+				status.Bass = &models.Bass{TargetBass: projectionValue, ActualBass: projectionValue}
+				status.BassRevision += revisionAdvance
+				projectionRevision = status.BassRevision
+			})
+			app.BroadcastDeviceList()
+		}
+		responseRevision := projectionRevision
+		if revisionAdvance > 1 {
+			responseRevision--
+			time.Sleep(50 * time.Millisecond)
+		}
+		writeBrowserContractJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
+			"requested": value,
+			"target":    value,
+			"actual":    value,
+			"revision":  responseRevision,
 			"atTarget":  true,
 		}})
 	}
@@ -618,8 +724,49 @@ func assertBrowserMemberDisclosure(t *testing.T, ctx context.Context) {
 		contractPairName + " volume",
 	})
 	assertBrowserExpression(t, ctx, "physical LEFT/RIGHT rows have no independent volume sliders", `document.querySelectorAll('.zone-physical-member input[type="range"]').length === 0`)
-	assertBrowserExpression(t, ctx, "one enabled logical stereo balance control", fmt.Sprintf(`document.querySelectorAll('.zone-logical-member .stereo-balance-slider').length === 1 && (() => { const input = document.querySelector('.zone-logical-member .stereo-balance-slider'); return input.getAttribute('aria-label') === %q && !input.disabled && input.min === '-7' && input.max === '7' && input.value === '0' && input.closest('.stereo-balance-control').getAttribute('aria-disabled') === 'false'; })()`, contractPairName+" balance"))
-	assertBrowserExpression(t, ctx, "logical stereo balance keeps a touch-sized target", `document.querySelector('.zone-logical-member .stereo-balance-slider').getBoundingClientRect().height >= 44`)
+}
+
+func assertBrowserSoundSettingsCollapsed(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	pairMember := ".zone-logical-member:nth-child(2)"
+	assertBrowserExpression(t, ctx, "zone root has no implicit sound settings", `document.querySelector('.device-detail > .sound-settings-section') === null`)
+	assertBrowserExpression(t, ctx, "pair member owns one collapsed sound settings surface", fmt.Sprintf(`document.querySelectorAll(%q).length === 1 && document.querySelector(%q)?.open === false`, pairMember+" > .sound-settings-section", pairMember+" > .sound-settings-section"))
+	assertBrowserExpression(t, ctx, "old prominent acoustic controls are absent", `document.querySelectorAll('.device-card .stereo-balance-slider, .device-card .bass-row, .controls .stereo-balance-slider, .controls .bass-row').length === 0`)
+	assertBrowserExpression(t, ctx, "device settings identify the physical pair master", fmt.Sprintf(`document.querySelector(%q)?.textContent.trim() === %q`, pairMember+" > .settings-section .section-title", "Device settings · "+contractRightName))
+}
+
+func openBrowserSoundSettings(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	section := ".zone-logical-member:nth-child(2) > .sound-settings-section"
+	if err := chromedp.Run(ctx,
+		chromedp.Click(section+" > .settings-summary", chromedp.ByQuery),
+		chromedp.WaitVisible(section+" .stepped-setting-controls", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open pair sound settings: %v", err)
+	}
+}
+
+func assertBrowserSoundSettings(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	section := ".zone-logical-member:nth-child(2) > .sound-settings-section"
+	assertBrowserExpression(t, ctx, "sound settings opened", fmt.Sprintf(`document.querySelector(%q)?.open === true`, section))
+	assertBrowserStrings(t, ctx, "scoped acoustic settings", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(control => [control.querySelector('.stepped-setting-label').textContent.trim(), control.querySelector('.stepped-setting-scope').textContent.trim(), control.querySelector('.stepped-setting-value').textContent.trim(), control.querySelector('.stepped-setting-footer span').textContent.trim()].join('|'))`, section+" .stepped-setting"), []string{
+		strings.Join([]string{"Bass reduction", "Speaker · " + contractRightName, "-3", "Default 0"}, "|"),
+		strings.Join([]string{"Balance", "Stereo pair · " + contractPairName, "Centered", "Default Centered"}, "|"),
+	})
+	assertBrowserExpression(t, ctx, "discrete controls have stable touch targets", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).length === 4 && Array.from(document.querySelectorAll(%q)).every(button => { const rect = button.getBoundingClientRect(); return rect.width >= 44 && rect.height >= 44; })`, section+" .stepped-setting-step", section+" .stepped-setting-step"))
+	assertBrowserStrings(t, ctx, "scoped acoustic setting output labels", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(output => output.getAttribute('aria-label'))`, section+" .stepped-setting-value"), []string{
+		"Bass reduction for Speaker · " + contractRightName + ": -3",
+		"Balance for Stereo pair · " + contractPairName + ": Centered",
+	})
+	assertBrowserStrings(t, ctx, "scoped reset labels", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(button => button.getAttribute('aria-label'))`, section+" .stepped-setting-reset"), []string{
+		"Reset bass reduction for Speaker · " + contractRightName + " to 0",
+		"Reset balance for Stereo pair · " + contractPairName + " to Centered",
+	})
+	assertBrowserExpression(t, ctx, "range sliders are absent from sound settings", fmt.Sprintf(`document.querySelectorAll(%q).length === 0`, section+" input[type=range]"))
 }
 
 func assertBrowserListLayout(t *testing.T, ctx context.Context) {
@@ -652,8 +799,11 @@ func assertBrowserDetailLayout(t *testing.T, ctx context.Context) {
 		".zone-logical-metadata",
 		".zone-member-volume-row",
 		".zone-member-volume-slider",
-		".stereo-balance-row",
-		".stereo-balance-slider",
+		".sound-settings-section",
+		".stepped-setting",
+		".stepped-setting-controls",
+		".stepped-setting-step",
+		".stepped-setting-indicator",
 		".zone-physical-member",
 		".zone-physical-identity",
 		".zone-physical-metadata",
@@ -812,26 +962,56 @@ func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *
 	recorder.reset()
 	exerciseRetainedFinalVolumeFailure(t, ctx, recorder, memberInput)
 
-	balanceInput := fmt.Sprintf(`input.stereo-balance-slider[aria-label=%q]`, contractPairName+" balance")
-	assertUntouchedControlBlurDoesNotWrite(t, ctx, recorder, balanceInput)
-	dispatchBrowserSliderSequence(t, ctx, balanceInput, -2, 3)
-	waitForBrowserControl(t, ctx, balanceInput, ".stereo-balance-control", ".stereo-balance-value", 3)
+	recorder.reset()
+	pairSoundSettings := ".zone-logical-member:nth-child(2) > .sound-settings-section"
+	bassControl := pairSoundSettings + " .stepped-setting:nth-child(1)"
+	balanceControl := pairSoundSettings + " .stepped-setting:nth-child(2)"
+	assertUntouchedButtonBlurDoesNotWrite(t, ctx, recorder, balanceControl+` button[aria-label="Move balance one step right"]`)
+
+	clickBrowserSettingAndWait(t, ctx, bassControl, `button[aria-label="Reduce bass one step"]`, "-5")
+	clickBrowserSettingAndWait(t, ctx, bassControl, ".stepped-setting-reset", "0")
+	assertContractControlCalls(t, recorder, "bass", []contractControlCall{
+		{kind: "bass", controlID: contractPairRightHost, value: -4},
+		{kind: "bass", controlID: contractPairRightHost, value: 0},
+	})
+
+	clickBrowserSettingAndWait(t, ctx, balanceControl, `button[aria-label="Move balance one step right"]`, "+2 Right")
+	clickBrowserSettingAndWait(t, ctx, balanceControl, ".stepped-setting-reset", "Centered")
 	assertContractControlCalls(t, recorder, "balance", []contractControlCall{
-		{kind: "balance", controlID: contractPairRightHost, value: -2},
-		{kind: "balance", controlID: contractPairRightHost, value: 3},
+		{kind: "balance", controlID: contractPairRightHost, value: 1},
+		{kind: "balance", controlID: contractPairRightHost, value: 0},
 	})
 }
 
-func assertUntouchedControlBlurDoesNotWrite(t *testing.T, ctx context.Context, recorder *contractControlRecorder, selector string) {
+func assertUntouchedButtonBlurDoesNotWrite(t *testing.T, ctx context.Context, recorder *contractControlRecorder, selector string) {
 	t.Helper()
 
 	evaluateBrowserContract(t, ctx, fmt.Sprintf(`(() => {
         const input = document.querySelector(%q);
         input.focus();
         input.blur();
-    })()`, selector), nil)
+	})()`, selector), nil)
 	time.Sleep(300 * time.Millisecond)
 	assertContractControlCalls(t, recorder, "balance", nil)
+	assertContractControlCalls(t, recorder, "bass", nil)
+}
+
+func clickBrowserSettingAndWait(t *testing.T, ctx context.Context, controlSelector, buttonSelector, want string) {
+	t.Helper()
+
+	selector := controlSelector + " " + buttonSelector
+	if err := chromedp.Run(ctx, chromedp.Click(selector, chromedp.ByQuery)); err != nil {
+		t.Fatalf("click setting control %s: %v", selector, err)
+	}
+	expression := fmt.Sprintf(`(() => {
+		const control = document.querySelector(%q);
+		return control?.getAttribute('aria-busy') === 'false' &&
+			control?.querySelector('.stepped-setting-value')?.textContent.trim() === %q;
+	})()`, controlSelector, want)
+	var settled bool
+	if err := chromedp.Run(ctx, chromedp.Poll(expression, &settled, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+		t.Fatalf("wait for setting %s to report %q: %v", controlSelector, want, err)
+	}
 }
 
 func exerciseRetainedFinalVolumeFailure(t *testing.T, ctx context.Context, recorder *contractControlRecorder, selector string) {

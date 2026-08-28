@@ -65,6 +65,8 @@ type DeviceConnection struct {
 	nameGen    uint64
 	volumeMu   sync.Mutex
 	volumeGen  uint64
+	bassMu     sync.Mutex
+	bassGen    uint64
 	balanceMu  sync.Mutex
 	balanceGen uint64
 	healthMu   sync.Mutex
@@ -72,6 +74,7 @@ type DeviceConnection struct {
 	bassCapabilitiesMu     sync.Mutex
 	bassCapabilitiesFlight *bassCapabilitiesFlight
 
+	bassOperationMu    sync.Mutex
 	balanceOperationMu sync.Mutex
 	balanceWriteMu     sync.Mutex
 
@@ -115,9 +118,11 @@ type DeviceStatus struct {
 	NowPlaying             *models.NowPlaying       `json:"nowPlaying,omitempty"`
 	Volume                 *models.Volume           `json:"volume,omitempty"`
 	Balance                *models.Balance          `json:"balance,omitempty"`
+	BalanceRevision        uint64                   `json:"balanceRevision"`
 	Presets                *models.Presets          `json:"presets,omitempty"`
 	Sources                *models.Sources          `json:"sources,omitempty"`
 	Bass                   *models.Bass             `json:"bass,omitempty"`
+	BassRevision           uint64                   `json:"bassRevision"`
 	BassCapabilities       *models.BassCapabilities `json:"bassCapabilities,omitempty"`
 	Group                  *models.Group            `json:"group,omitempty"`
 	Zone                   *models.ZoneInfo         `json:"zone,omitempty"`
@@ -261,6 +266,69 @@ func (c *DeviceConnection) ApplyVolumeEvent(volume *models.Volume, activity time
 	})
 }
 
+// WithBassOperation serializes bass polling, writes, and events for this
+// physical speaker. The field generation still fences a fetched value until
+// it is committed after slower unrelated status reads finish.
+func (c *DeviceConnection) WithBassOperation(operation func()) {
+	c.bassOperationMu.Lock()
+	defer c.bassOperationMu.Unlock()
+
+	operation()
+}
+
+// BeginBassRefresh starts a field-specific generation for one /bass readback.
+func (c *DeviceConnection) BeginBassRefresh() uint64 {
+	c.bassMu.Lock()
+	defer c.bassMu.Unlock()
+
+	c.bassGen++
+
+	return c.bassGen
+}
+
+// ApplyPolledBass stores a /bass readback unless a newer readback or
+// bassUpdated event superseded it.
+func (c *DeviceConnection) ApplyPolledBass(generation uint64, bass *models.Bass) bool {
+	_, applied := c.ApplyPolledBassWithRevision(generation, bass)
+
+	return applied
+}
+
+// ApplyPolledBassWithRevision stores a confirmed /bass response and returns
+// the revision assigned to that exact accepted readback.
+func (c *DeviceConnection) ApplyPolledBassWithRevision(generation uint64, bass *models.Bass) (uint64, bool) {
+	c.bassMu.Lock()
+	defer c.bassMu.Unlock()
+
+	if generation != c.bassGen {
+		return 0, false
+	}
+
+	var revision uint64
+
+	c.UpdateStatus(func(status *DeviceStatus) {
+		status.Bass = bass
+		status.BassRevision++
+		revision = status.BassRevision
+	})
+
+	return revision, true
+}
+
+// ApplyBassEvent stores the newest bassUpdated event and invalidates all
+// in-flight /bass readbacks. It also participates in full-poll ordering.
+func (c *DeviceConnection) ApplyBassEvent(bass *models.Bass, activity time.Time) {
+	c.bassMu.Lock()
+	defer c.bassMu.Unlock()
+
+	c.bassGen++
+	c.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.Bass = bass
+		status.BassRevision++
+		status.LastActivity = activity
+	})
+}
+
 // WithBalanceOperation serializes balance endpoint traffic for this physical
 // speaker. Stereo-balance writes and periodic readbacks use this seam so only
 // the confirmed group master is accessed and operations cannot overlap.
@@ -330,6 +398,17 @@ func (c *DeviceConnection) BalanceRefreshCurrent(refresh BalanceRefresh) bool {
 // ApplyBalanceReadback stores a confirmed /balance response only while both
 // the group and balance generations captured by refresh remain current.
 func (c *DeviceConnection) ApplyBalanceReadback(refresh BalanceRefresh, balance *models.Balance) bool {
+	_, applied := c.ApplyBalanceReadbackWithRevision(refresh, balance)
+
+	return applied
+}
+
+// ApplyBalanceReadbackWithRevision stores a confirmed /balance response and
+// returns the revision assigned to that exact accepted readback.
+func (c *DeviceConnection) ApplyBalanceReadbackWithRevision(
+	refresh BalanceRefresh,
+	balance *models.Balance,
+) (uint64, bool) {
 	c.groupMu.Lock()
 	defer c.groupMu.Unlock()
 
@@ -337,14 +416,18 @@ func (c *DeviceConnection) ApplyBalanceReadback(refresh BalanceRefresh, balance 
 	defer c.balanceMu.Unlock()
 
 	if !c.balanceRefreshCurrentLocked(refresh) {
-		return false
+		return 0, false
 	}
+
+	var revision uint64
 
 	c.UpdateStatus(func(status *DeviceStatus) {
 		status.Balance = balance
+		status.BalanceRevision++
+		revision = status.BalanceRevision
 	})
 
-	return true
+	return revision, true
 }
 
 func (c *DeviceConnection) balanceRefreshCurrentLocked(refresh BalanceRefresh) bool {
@@ -801,7 +884,9 @@ func (c *DeviceConnection) UpdateStatus(mut func(*DeviceStatus)) {
 }
 
 // BeginGroupRefresh starts a new generation for an asynchronous /getGroup
-// request. Only the latest started request may later update Group.
+// request. Only the latest started request may later update Group. The last
+// verified balance remains visible while the topology is revalidated; the
+// generation fence still prevents balance writes until the refresh completes.
 func (c *DeviceConnection) BeginGroupRefresh() uint64 {
 	var generation uint64
 
@@ -814,9 +899,6 @@ func (c *DeviceConnection) BeginGroupRefresh() uint64 {
 
 		c.groupGeneration++
 		c.balanceGen++
-		c.UpdateStatus(func(status *DeviceStatus) {
-			status.Balance = nil
-		})
 		generation = c.groupGeneration
 	})
 
@@ -870,7 +952,11 @@ func (c *DeviceConnection) replaceGroup(group *models.Group, activity time.Time)
 	c.UpdateStatus(func(s *DeviceStatus) {
 		s.Group = group
 
-		s.Balance = nil
+		if changed {
+			s.Balance = nil
+			s.BalanceRevision++
+		}
+
 		if !activity.IsZero() {
 			s.LastActivity = activity
 		}

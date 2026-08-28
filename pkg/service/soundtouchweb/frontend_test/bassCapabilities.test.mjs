@@ -5,7 +5,7 @@ import { bassControlForStatus } from '../static/js/bassCapabilities.mjs';
 
 test('uses the reported SoundTouch -9 to 0 capability', () => {
     assert.deepEqual(bassControlForStatus({
-        bass: { TargetBass: -3 },
+        bass: { TargetBass: -2, ActualBass: -3 },
         bassCapabilities: {
             BassAvailable: true,
             BassMin: -9,
@@ -17,7 +17,7 @@ test('uses the reported SoundTouch -9 to 0 capability', () => {
 
 test('uses a different valid reported range and default', () => {
     assert.deepEqual(bassControlForStatus({
-        bass: { TargetBass: 12 },
+        bass: { TargetBass: 10, ActualBass: 12 },
         bassCapabilities: {
             BassAvailable: true,
             BassMin: -4,
@@ -29,7 +29,7 @@ test('uses a different valid reported range and default', () => {
 
 test('hides bass when the device reports it unavailable', () => {
     assert.deepEqual(bassControlForStatus({
-        bass: { TargetBass: 0 },
+        bass: { TargetBass: -1, ActualBass: 0 },
         bassCapabilities: {
             BassAvailable: false,
             BassMin: 0,
@@ -40,7 +40,7 @@ test('hides bass when the device reports it unavailable', () => {
 });
 
 test('uses only the conservative fallback while capabilities are unknown', () => {
-    assert.deepEqual(bassControlForStatus({ bass: { TargetBass: -2 } }), {
+    assert.deepEqual(bassControlForStatus({ bass: { TargetBass: -1, ActualBass: -2 } }), {
         available: true,
         min: -9,
         max: 0,
@@ -57,7 +57,7 @@ test('treats incomplete or invalid capabilities as unknown', () => {
         { BassAvailable: true, BassMin: 1, BassMax: 0, BassDefault: 0 },
     ]) {
         assert.deepEqual(bassControlForStatus({
-            bass: { TargetBass: -2 },
+            bass: { TargetBass: -1, ActualBass: -2 },
             bassCapabilities,
         }), {
             available: true,

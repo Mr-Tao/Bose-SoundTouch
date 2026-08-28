@@ -34,7 +34,7 @@ type balanceXML struct {
 // BalanceRequest represents the request for POST /balance endpoint
 type BalanceRequest struct {
 	XMLName xml.Name `xml:"balance"`
-	Level   int      `xml:",chardata"`
+	Level   int      `xml:"targetBalance"`
 }
 
 // Balance level constants are the conservative fallback used by callers that

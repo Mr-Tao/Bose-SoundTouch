@@ -1,12 +1,17 @@
 import { h, htm, useEffect, useRef, useState } from '../dependencies.js';
 import { api } from '../api.js';
-import { createLatestWinsScheduler, shouldSurfaceLatestFinal } from '../latestWinsScheduler.mjs';
 import {
     balanceControlState,
     balanceFailureMessage,
-    clampBalance,
-    confirmedBalanceActual,
+    confirmedBalanceReadback,
 } from '../stereoBalanceResult.mjs';
+import {
+    formatBalanceValue,
+    newerSettingProjection,
+    resetValue,
+    steppedValue,
+} from '../soundSettingsPresentation.mjs';
+import { SteppedSettingControl } from './SteppedSettingControl.js';
 
 const html = htm.bind(h);
 
@@ -17,115 +22,170 @@ function balanceDevice(device, member) {
         stereoPair: member?.stereoPair || {},
         status: {
             balance: member?.balance,
+            balanceRevision: member?.balanceRevision,
             connectivity: member?.connectivity,
             isConnected: member?.available,
         },
     };
 }
 
-export function StereoBalanceControl({ id, device, member, ariaLabel = 'Balance' }) {
+export function shouldClearBalanceFailure({
+    failedRevision,
+    projectionRevision,
+    enabled,
+    projectedBalance,
+    busy,
+}) {
+    return failedRevision !== null && Number.isSafeInteger(projectionRevision) &&
+        projectionRevision > failedRevision &&
+        enabled && Number.isSafeInteger(projectedBalance) &&
+        !busy;
+}
+
+export function StereoBalanceControl({ id, device, member, scopeLabel = 'Stereo pair' }) {
     const control = balanceControlState(balanceDevice(device, member));
     const projectedBalance = control.value;
+    const projectedRevision = control.revision;
     const projectedBalanceRef = useRef(projectedBalance);
-    const controlRef = useRef(control);
-    const draggingRef = useRef(false);
-    const interactionDirtyRef = useRef(false);
-    const acceptedSequenceRef = useRef(0);
-    const schedulerRef = useRef(null);
+    const projectionRevisionRef = useRef(projectedRevision);
+    const projectionEnabledRef = useRef(control.enabled);
+    const targetRef = useRef(id);
+    const displayedTargetRef = useRef(id);
+    const displayedRevisionRef = useRef(projectedRevision);
+    const busyRef = useRef(false);
+    const failedRevisionRef = useRef(null);
     const [localBalance, setLocalBalance] = useState(projectedBalance);
-    const [isBusy, setIsBusy] = useState(false);
+    const [busy, setBusy] = useState(false);
     const [failure, setFailure] = useState('');
-    const inputID = `stereo-balance-${id.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 
     projectedBalanceRef.current = projectedBalance;
-    controlRef.current = control;
+    projectionRevisionRef.current = projectedRevision;
+    projectionEnabledRef.current = control.enabled;
+    targetRef.current = id;
 
-    if (schedulerRef.current === null) {
-        schedulerRef.current = createLatestWinsScheduler({
-            send: level => api.stereoBalance(id, level),
-            onResult(response, metadata) {
-                if (!metadata.isLatest) return;
-
-                const current = controlRef.current;
-                const confirmed = confirmedBalanceActual(
-                    response, metadata.value, current.min, current.max);
-                if (confirmed === null) {
-                    if (shouldSurfaceLatestFinal(metadata)) {
-                        setFailure(balanceFailureMessage(response));
-                    }
-                    return;
-                }
-
-                acceptedSequenceRef.current = metadata.sequence;
-                setLocalBalance(confirmed);
-                if (shouldSurfaceLatestFinal(metadata)) {
-                    setFailure(balanceFailureMessage(response));
-                }
-            },
-            onError(_error, metadata) {
-                if (shouldSurfaceLatestFinal(metadata)) {
-                    setFailure('Stereo balance update failed.');
-                }
-            },
-            onStateChange(next) {
-                setIsBusy(next.active);
-                if (!next.active && !draggingRef.current &&
-                    acceptedSequenceRef.current !== next.latestSequence) {
-                    setLocalBalance(projectedBalanceRef.current);
-                }
-            },
-        });
-    }
-
-    useEffect(() => () => schedulerRef.current.dispose(), []);
     useEffect(() => {
-        if (!draggingRef.current && !schedulerRef.current.isActive()) {
+        if (displayedTargetRef.current !== id) {
+            displayedTargetRef.current = id;
+            displayedRevisionRef.current = projectedRevision;
+            failedRevisionRef.current = null;
+            setFailure('');
             setLocalBalance(projectedBalance);
+            return;
         }
-    }, [projectedBalance, control.min, control.max, control.enabled]);
+        if (busy || projectedRevision < displayedRevisionRef.current) return;
+        displayedRevisionRef.current = projectedRevision;
+        setLocalBalance(projectedBalance);
+        if (shouldClearBalanceFailure({
+            failedRevision: failedRevisionRef.current,
+            projectionRevision: projectedRevision,
+            enabled: control.enabled,
+            projectedBalance,
+            busy: false,
+        })) {
+            failedRevisionRef.current = null;
+            setFailure('');
+        }
+    }, [id, projectedRevision, projectedBalance, control.enabled, busy]);
 
-    function queueBalance(event, force) {
-        const current = controlRef.current;
-        const level = clampBalance(event.currentTarget.value, current.min, current.max);
-        if (!current.enabled || level === null) return;
-        if (!force) interactionDirtyRef.current = true;
-        setLocalBalance(level);
+    if (!control.available) return null;
+
+    function adoptReplacementTarget() {
+        displayedTargetRef.current = targetRef.current;
+        displayedRevisionRef.current = projectionRevisionRef.current;
+        failedRevisionRef.current = null;
         setFailure('');
-        schedulerRef.current.queue(level, { force });
+        setLocalBalance(projectedBalanceRef.current);
     }
 
-    function finishBalance(event) {
-        const current = controlRef.current;
-        const level = clampBalance(event.currentTarget.value, current.min, current.max);
-        draggingRef.current = false;
-        if (!current.enabled || level === null) return;
-        if (!interactionDirtyRef.current) return;
-        interactionDirtyRef.current = false;
-        queueBalance(event, true);
+    function adoptNewerProjection(afterRevision) {
+        const projection = newerSettingProjection({
+            projectionRevision: projectionRevisionRef.current,
+            projectedValue: projectedBalanceRef.current,
+            available: projectionEnabledRef.current,
+            afterRevision,
+        });
+        if (projection === null) return false;
+
+        displayedRevisionRef.current = projection.revision;
+        setLocalBalance(projection.actual);
+        if (shouldClearBalanceFailure({
+            failedRevision: failedRevisionRef.current,
+            projectionRevision: projection.revision,
+            enabled: true,
+            projectedBalance: projection.actual,
+            busy: false,
+        })) {
+            failedRevisionRef.current = null;
+            setFailure('');
+        }
+
+        return true;
     }
 
-    return html`
-        <div class="stereo-balance-control ${control.enabled ? '' : 'unavailable'}"
-             aria-busy=${isBusy ? 'true' : 'false'} aria-disabled=${control.enabled ? 'false' : 'true'}>
-            <div class="stereo-balance-row">
-                <label class="stereo-balance-label" for=${inputID}>Balance</label>
-                <input id=${inputID} type="range" class="stereo-balance-slider"
-                    min=${control.min} max=${control.max} value=${localBalance}
-                    disabled=${!control.enabled} aria-label=${ariaLabel}
-                    onPointerDown=${() => {
-                        draggingRef.current = true;
-                        interactionDirtyRef.current = false;
-                    }}
-                    onInput=${event => queueBalance(event, false)}
-                    onPointerUp=${finishBalance}
-                    onPointerCancel=${finishBalance}
-                    onChange=${finishBalance}
-                    onBlur=${finishBalance} />
-                <output class="stereo-balance-value" for=${inputID}>
-                    ${Number.isFinite(localBalance) ? localBalance : '–'}
-                </output>
-            </div>
-            ${failure ? html`<div class="stereo-balance-failure" role="status">${failure}</div>` : null}
-        </div>
-    `;
+    async function apply(level) {
+        if (busyRef.current || !control.enabled || !Number.isSafeInteger(level)) return;
+        const requestTarget = id;
+        const requestRevision = projectionRevisionRef.current;
+        busyRef.current = true;
+        setBusy(true);
+        setFailure('');
+        setLocalBalance(level);
+
+        try {
+            const response = await api.stereoBalance(requestTarget, level);
+            if (targetRef.current !== requestTarget) {
+                adoptReplacementTarget();
+                return;
+            }
+            const readback = confirmedBalanceReadback(
+                response, level, control.min, control.max, requestRevision);
+            if (readback === null) {
+                if (adoptNewerProjection(requestRevision)) return;
+                failedRevisionRef.current = requestRevision;
+                setLocalBalance(projectedBalanceRef.current);
+                setFailure(balanceFailureMessage(response));
+                return;
+            }
+            if (adoptNewerProjection(readback.revision)) return;
+
+            displayedRevisionRef.current = readback.revision;
+            setLocalBalance(readback.actual);
+            const message = balanceFailureMessage(response);
+            failedRevisionRef.current = message ? readback.revision : null;
+            setFailure(message);
+        } catch (_error) {
+            if (targetRef.current !== requestTarget) {
+                adoptReplacementTarget();
+                return;
+            }
+            if (adoptNewerProjection(requestRevision)) return;
+            failedRevisionRef.current = requestRevision;
+            setLocalBalance(projectedBalanceRef.current);
+            setFailure('Stereo balance update failed.');
+        } finally {
+            busyRef.current = false;
+            setBusy(false);
+        }
+    }
+
+    return html`<${SteppedSettingControl}
+        label="Balance"
+        scopeLabel=${scopeLabel}
+        value=${localBalance}
+        min=${control.min}
+        max=${control.max}
+        defaultValue=${control.defaultValue}
+        valueLabel=${formatBalanceValue(localBalance)}
+        defaultLabel=${formatBalanceValue(control.defaultValue)}
+        disabled=${!control.enabled}
+        busy=${busy}
+        decreaseSymbol="←"
+        increaseSymbol="→"
+        decreaseLabel="Move balance one step left"
+        increaseLabel="Move balance one step right"
+        onDecrease=${() => apply(steppedValue(localBalance, -1, control.min, control.max))}
+        onIncrease=${() => apply(steppedValue(localBalance, 1, control.min, control.max))}
+        onReset=${() => apply(resetValue(localBalance, control.defaultValue, control.min, control.max))}
+        failure=${failure}
+    />`;
 }

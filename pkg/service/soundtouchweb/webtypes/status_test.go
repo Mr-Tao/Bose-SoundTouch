@@ -690,6 +690,52 @@ func TestApplyVolumeEventSupersedesPolledVolume(t *testing.T) {
 	}
 }
 
+func TestApplyBassEventSupersedesPolledBass(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{BassRevision: 4})
+	generation := conn.BeginBassRefresh()
+	conn.ApplyBassEvent(&models.Bass{TargetBass: -2, ActualBass: -2}, time.Now())
+
+	if conn.ApplyPolledBass(generation, &models.Bass{TargetBass: -5, ActualBass: -5}) {
+		t.Fatal("older bass poll overwrote newer event")
+	}
+	if got := conn.Status(); got.Bass == nil || got.Bass.ActualBass != -2 || got.BassRevision != 5 {
+		t.Fatalf("bass event was not retained with one revision: %+v", got)
+	}
+}
+
+func TestSameValueBassReadbackAdvancesConfirmedRevision(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{
+		Bass:         &models.Bass{TargetBass: -3, ActualBass: -3},
+		BassRevision: 8,
+	})
+
+	generation := conn.BeginBassRefresh()
+	revision, applied := conn.ApplyPolledBassWithRevision(
+		generation,
+		&models.Bass{TargetBass: -3, ActualBass: -3},
+	)
+	if !applied || revision != 9 || conn.Status().BassRevision != 9 {
+		t.Fatalf("same-value bass readback applied=%v revision=%d status=%+v", applied, revision, conn.Status())
+	}
+}
+
+func TestApplyPolledBassSurvivesUnrelatedSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	generation := conn.BeginBassRefresh()
+	conn.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.Presets = &models.Presets{}
+	})
+
+	if !conn.ApplyPolledBass(generation, &models.Bass{TargetBass: -4, ActualBass: -4}) {
+		t.Fatal("unrelated event invalidated bass readback")
+	}
+	if got := conn.Status().Bass; got == nil || got.ActualBass != -4 {
+		t.Fatalf("bass readback was not stored: %+v", got)
+	}
+}
+
 func TestNewerBalanceReadbackSupersedesOlderPoll(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
 	conn.SetStatus(&DeviceStatus{Group: &models.Group{ID: "pair-1"}})
@@ -713,11 +759,33 @@ func TestNewerBalanceReadbackSupersedesOlderPoll(t *testing.T) {
 	}
 }
 
+func TestSameValueBalanceReadbackAdvancesConfirmedRevision(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{
+		Group:           &models.Group{ID: "pair-1"},
+		Balance:         &models.Balance{TargetBalance: 2, ActualBalance: 2},
+		BalanceRevision: 12,
+	})
+
+	refresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("balance refresh was rejected")
+	}
+	revision, applied := conn.ApplyBalanceReadbackWithRevision(
+		refresh,
+		&models.Balance{TargetBalance: 2, ActualBalance: 2},
+	)
+	if !applied || revision != 13 || conn.Status().BalanceRevision != 13 {
+		t.Fatalf("same-value balance readback applied=%v revision=%d status=%+v", applied, revision, conn.Status())
+	}
+}
+
 func TestBalanceReadbackRejectedAcrossTeardownAndRepair(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
 	conn.SetStatus(&DeviceStatus{
-		Group:   &models.Group{ID: "pair-1", MasterDeviceID: "left"},
-		Balance: &models.Balance{TargetBalance: 2, ActualBalance: 2},
+		Group:           &models.Group{ID: "pair-1", MasterDeviceID: "left"},
+		Balance:         &models.Balance{TargetBalance: 2, ActualBalance: 2},
+		BalanceRevision: 20,
 	})
 
 	staleRefresh, ok := conn.BeginBalanceRefresh()
@@ -733,6 +801,9 @@ func TestBalanceReadbackRejectedAcrossTeardownAndRepair(t *testing.T) {
 	if got := conn.Status().Balance; got != nil {
 		t.Fatalf("balance = %+v, want unknown after re-pair", got)
 	}
+	if got := conn.Status().BalanceRevision; got != 22 {
+		t.Fatalf("balance revision = %d, want two accepted topology invalidations", got)
+	}
 
 	freshRefresh, ok := conn.BeginBalanceRefresh()
 	if !ok {
@@ -741,18 +812,25 @@ func TestBalanceReadbackRejectedAcrossTeardownAndRepair(t *testing.T) {
 	if !conn.ApplyBalanceReadback(freshRefresh, &models.Balance{TargetBalance: -3, ActualBalance: -3}) {
 		t.Fatal("replacement pair readback was rejected")
 	}
+	if got := conn.Status().BalanceRevision; got != 23 {
+		t.Fatalf("balance revision = %d, want confirmed replacement readback revision 23", got)
+	}
 }
 
 func TestDeviceStatusBalanceJSON(t *testing.T) {
-	status := DeviceStatus{Balance: &models.Balance{
-		BalanceAvailable: true,
-		BalanceMin:       -12,
-		BalanceMax:       9,
-		BalanceDefault:   1,
-		TargetBalance:    8,
-		ActualBalance:    7,
-		CapabilityKnown:  true,
-	}}
+	status := DeviceStatus{
+		Balance: &models.Balance{
+			BalanceAvailable: true,
+			BalanceMin:       -12,
+			BalanceMax:       9,
+			BalanceDefault:   1,
+			TargetBalance:    8,
+			ActualBalance:    7,
+			CapabilityKnown:  true,
+		},
+		BalanceRevision: 14,
+		BassRevision:    9,
+	}
 
 	payload, err := json.Marshal(status)
 	if err != nil {
@@ -760,7 +838,9 @@ func TestDeviceStatusBalanceJSON(t *testing.T) {
 	}
 
 	var decoded struct {
-		Balance *models.Balance `json:"balance"`
+		Balance         *models.Balance `json:"balance"`
+		BalanceRevision uint64          `json:"balanceRevision"`
+		BassRevision    uint64          `json:"bassRevision"`
 	}
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("Unmarshal DeviceStatus: %v", err)
@@ -768,7 +848,7 @@ func TestDeviceStatusBalanceJSON(t *testing.T) {
 	if decoded.Balance == nil || !decoded.Balance.CapabilityKnown || !decoded.Balance.BalanceAvailable ||
 		decoded.Balance.BalanceMin != -12 || decoded.Balance.BalanceMax != 9 ||
 		decoded.Balance.BalanceDefault != 1 || decoded.Balance.TargetBalance != 8 ||
-		decoded.Balance.ActualBalance != 7 {
+		decoded.Balance.ActualBalance != 7 || decoded.BalanceRevision != 14 || decoded.BassRevision != 9 {
 		t.Fatalf("balance did not round-trip in status JSON: %+v", decoded.Balance)
 	}
 
@@ -782,6 +862,12 @@ func TestDeviceStatusBalanceJSON(t *testing.T) {
 	}
 	if _, ok := emptyDecoded["balance"]; ok {
 		t.Errorf("nil balance should be omitted, JSON = %s", emptyPayload)
+	}
+	if _, ok := emptyDecoded["balanceRevision"]; !ok {
+		t.Errorf("zero balance revision should remain explicit, JSON = %s", emptyPayload)
+	}
+	if _, ok := emptyDecoded["bassRevision"]; !ok {
+		t.Errorf("zero bass revision should remain explicit, JSON = %s", emptyPayload)
 	}
 }
 

@@ -485,6 +485,7 @@ func TestWebSocketClient_HandleMessage(t *testing.T) {
 	var (
 		nowPlayingEvent *models.NowPlayingUpdatedEvent
 		volumeEvent     *models.VolumeUpdatedEvent
+		balanceEvent    *models.BalanceUpdatedEvent
 		nameEvent       *models.NameUpdatedEvent
 	)
 
@@ -496,8 +497,23 @@ func TestWebSocketClient_HandleMessage(t *testing.T) {
 		volumeEvent = event
 	})
 
+	wsClient.OnBalanceUpdated(func(event *models.BalanceUpdatedEvent) {
+		balanceEvent = event
+	})
+
 	wsClient.OnNameUpdated(func(event *models.NameUpdatedEvent) {
 		nameEvent = event
+	})
+
+	t.Run("HandleBalanceEvent", func(t *testing.T) {
+		xmlData := []byte(`<updates deviceID="0CAE7D42D459"><balanceUpdated deviceID="0CAE7D42D459"><balance deviceID="0CAE7D42D459"><balanceAvailable>true</balanceAvailable><balanceMin>-7</balanceMin><balanceMax>7</balanceMax><balanceDefault>0</balanceDefault><targetBalance>3</targetBalance><actualBalance>3</actualBalance></balance></balanceUpdated></updates>`)
+
+		wsClient.handleMessage(xmlData)
+
+		if balanceEvent == nil || balanceEvent.DeviceID != "0CAE7D42D459" ||
+			!balanceEvent.Balance.CapabilityKnown || balanceEvent.Balance.ActualBalance != 3 {
+			t.Fatalf("unexpected balance event: %+v", balanceEvent)
+		}
 	})
 
 	t.Run("HandleNowPlayingEvent", func(t *testing.T) {

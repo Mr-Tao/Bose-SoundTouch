@@ -683,7 +683,7 @@ func TestClient_Balance_RequestFormat(t *testing.T) {
 			return
 		}
 
-		expectedXML := "<balance>6</balance>"
+		expectedXML := "<balance><targetBalance>6</targetBalance></balance>"
 		if string(actualXML) != expectedXML {
 			t.Errorf("Expected XML '%s', got '%s'", expectedXML, string(actualXML))
 		}

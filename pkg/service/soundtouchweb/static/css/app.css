@@ -447,58 +447,6 @@ img { display: block; max-width: 100%; }
     line-height: 1.35;
 }
 
-.stereo-balance-card {
-    padding: 0;
-    cursor: default;
-    overflow: hidden;
-}
-.stereo-card-open {
-    width: 100%;
-    padding: 1rem;
-    color: inherit;
-    text-align: left;
-}
-.stereo-card-open:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -3px;
-}
-.stereo-balance-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 4ch;
-    gap: .3rem .6rem;
-    align-items: center;
-    padding: .75rem 1rem .85rem;
-    border-top: 1px solid var(--border);
-    background: var(--bg);
-}
-.stereo-balance-label { grid-column: 1; grid-row: 1; font-size: .78rem; color: var(--text-dim); }
-.stereo-balance-slider {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    width: 100%;
-    min-width: 0;
-    accent-color: var(--accent);
-    touch-action: pan-y;
-}
-.stereo-balance-slider:disabled { opacity: .45; }
-.stereo-balance-control.unavailable .stereo-balance-value { color: var(--text-dim); }
-.stereo-balance-value {
-    grid-column: 2;
-    grid-row: 1;
-    color: var(--text);
-    font-size: .8rem;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-}
-.stereo-balance-control[aria-busy="true"] .stereo-balance-value { color: var(--text-dim); }
-.stereo-balance-failure {
-    padding: 0 1rem .75rem;
-    background: var(--bg);
-    color: var(--danger);
-    font-size: .75rem;
-    line-height: 1.35;
-}
-
 .device-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: .25rem; gap: .5rem; }
 .device-name { font-weight: 600; font-size: .95rem; }
 .device-type { font-size: .78rem; color: var(--text-dim); margin-top: .55rem; display: flex; gap: .4rem; flex-wrap: wrap; }
@@ -540,8 +488,8 @@ img { display: block; max-width: 100%; }
     border-color: var(--danger);
 }
 
-/* ── Device settings ────────────────────────────────────────────────────── */
-.settings-section {
+/* ── Device and sound settings ──────────────────────────────────────────── */
+.settings-section, .sound-settings-section {
     margin-top: 1.5rem;
     padding-top: 1.25rem;
     border-top: 1px solid var(--border);
@@ -566,8 +514,87 @@ img { display: block; max-width: 100%; }
     transform: rotate(45deg);
     transition: transform .15s ease;
 }
-.settings-section[open] .settings-chevron { transform: rotate(225deg); }
+.settings-section[open] .settings-chevron,
+.sound-settings-section[open] .settings-chevron { transform: rotate(225deg); }
 .settings-content { padding-top: .25rem; }
+.sound-settings-content { padding-top: .25rem; }
+.stepped-setting {
+    padding: 1rem 0;
+    border-top: 1px solid var(--border);
+}
+.stepped-setting:first-child { border-top: 0; }
+.stepped-setting-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: .75rem;
+}
+.stepped-setting-label { color: var(--text); font-size: .9rem; font-weight: 600; }
+.stepped-setting-scope { margin-top: .15rem; color: var(--text-dim); font-size: .75rem; }
+.stepped-setting-value {
+    min-width: 8ch;
+    color: var(--text);
+    font-size: .875rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+.stepped-setting[aria-busy="true"] .stepped-setting-value { color: var(--text-dim); }
+.stepped-setting-controls {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    align-items: center;
+    gap: .65rem;
+    margin-top: .65rem;
+}
+.stepped-setting-step {
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 1.15rem;
+    line-height: 1;
+}
+.stepped-setting-step:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.stepped-setting-step:disabled { cursor: default; opacity: .4; }
+.stepped-setting-indicator {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(2px, 1fr);
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    height: 18px;
+}
+.stepped-setting-segment {
+    height: 5px;
+    border-radius: 1px;
+    background: var(--border);
+}
+.stepped-setting-segment.default { box-shadow: 0 0 0 1px var(--text-dim); }
+.stepped-setting-segment.current { height: 10px; background: var(--accent); box-shadow: none; }
+.stepped-setting-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .75rem;
+    min-height: 36px;
+    color: var(--text-dim);
+    font-size: .75rem;
+}
+.stepped-setting-reset {
+    min-height: 36px;
+    padding: 0;
+    color: var(--accent);
+    font-size: .8rem;
+}
+.stepped-setting-reset:disabled { color: var(--text-dim); cursor: default; opacity: .55; }
+.stepped-setting-failure {
+    color: var(--danger);
+    font-size: .75rem;
+    line-height: 1.35;
+}
 .settings-loading, .settings-empty, .settings-value {
     color: var(--text-dim);
     font-size: .85rem;
@@ -895,9 +922,6 @@ img { display: block; max-width: 100%; }
     line-height: 1.35;
 }
 
-.bass-row { display: flex; align-items: center; gap: .75rem; margin-top: .5rem; }
-.bass-label { font-size: .8rem; color: var(--text-dim); width: 2.5ch; }
-
 /* ── Progress bar ────────────────────────────────────────────────────────── */
 .progress-row { margin-top: .35rem; display: flex; align-items: center; gap: .5rem; }
 .progress-bar {
@@ -1101,7 +1125,7 @@ img { display: block; max-width: 100%; }
     font-family: monospace;
     opacity: .72;
 }
-.zone-member-volume-control, .zone-logical-member > .stereo-balance-control {
+.zone-member-volume-control {
     margin-top: .65rem;
     padding-top: .6rem;
     border-top: 1px solid var(--border);
@@ -1141,24 +1165,10 @@ img { display: block; max-width: 100%; }
     font-size: .75rem;
     line-height: 1.35;
 }
-.zone-logical-member > .stereo-balance-control .stereo-balance-row {
-    grid-template-columns: max-content minmax(0, 1fr) 4ch;
-    padding: 0;
-    border: 0;
-    background: transparent;
-}
-.zone-logical-member > .stereo-balance-control .stereo-balance-slider {
-    grid-column: 2;
-    grid-row: 1;
-    min-height: 44px;
-}
-.zone-logical-member > .stereo-balance-control .stereo-balance-value {
-    grid-column: 3;
-    grid-row: 1;
-}
-.zone-logical-member > .stereo-balance-control .stereo-balance-failure {
-    padding: .35rem 0 0;
-    background: transparent;
+.zone-logical-member > .settings-section,
+.zone-logical-member > .sound-settings-section {
+    margin-top: .65rem;
+    padding-top: .6rem;
 }
 .zone-physical-members {
     display: flex;

@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import {
     clockControls,
     clockDisplayPatch,
+    deviceSettingsTitle,
     settingsSections,
 } from '../settingsPresentation.mjs';
 
@@ -119,7 +120,7 @@ function statusLabel(value) {
     return value ? String(value).replace(/^NETWORK_/, '').replace(/_/g, ' ').toLowerCase() : '';
 }
 
-export function Settings({ deviceId }) {
+export function Settings({ deviceId, targetName = '' }) {
     const [snapshot, setSnapshot] = useState(null);
     const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState('');
@@ -198,7 +199,7 @@ export function Settings({ deviceId }) {
     return html`
         <details class="settings-section" onToggle=${onToggle}>
             <summary class="settings-summary">
-                <span class="section-title">Settings</span>
+                <span class="section-title">${deviceSettingsTitle(targetName)}</span>
                 <span class="settings-chevron" aria-hidden="true"></span>
             </summary>
 

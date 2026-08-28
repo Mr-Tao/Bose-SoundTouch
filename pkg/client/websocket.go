@@ -172,6 +172,14 @@ func (ws *WebSocketClient) OnBassUpdated(handler models.TypedEventHandler[*model
 	ws.handlers.OnBassUpdated = handler
 }
 
+// OnBalanceUpdated sets a handler for stereo balance update events.
+func (ws *WebSocketClient) OnBalanceUpdated(handler models.TypedEventHandler[*models.BalanceUpdatedEvent]) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	ws.handlers.OnBalanceUpdated = handler
+}
+
 // OnNameUpdated sets a handler for device name update events.
 func (ws *WebSocketClient) OnNameUpdated(handler models.TypedEventHandler[*models.NameUpdatedEvent]) {
 	ws.mu.Lock()
@@ -651,6 +659,13 @@ func (ws *WebSocketClient) dispatchTypedEventContinued(handlers *models.WebSocke
 	case models.EventTypeBassUpdated:
 		if handlers.OnBassUpdated != nil && event.BassUpdated != nil {
 			handlers.OnBassUpdated(event.BassUpdated)
+		}
+
+		return true
+
+	case models.EventTypeBalanceUpdated:
+		if handlers.OnBalanceUpdated != nil && event.BalanceUpdated != nil {
+			handlers.OnBalanceUpdated(event.BalanceUpdated)
 		}
 
 		return true

@@ -13,10 +13,11 @@ import (
 )
 
 type stereoBalanceResult struct {
-	Requested int  `json:"requested"`
-	Target    *int `json:"target"`
-	Actual    *int `json:"actual"`
-	AtTarget  bool `json:"atTarget"`
+	Requested int     `json:"requested"`
+	Target    *int    `json:"target"`
+	Actual    *int    `json:"actual"`
+	AtTarget  bool    `json:"atTarget"`
+	Revision  *uint64 `json:"revision,omitempty"`
 }
 
 type stereoBalanceOperation struct {
@@ -163,26 +164,29 @@ func (app *WebApp) finishStereoBalanceReadback(
 	operation *stereoBalanceOperation,
 ) {
 	if readErr != nil || balance == nil {
-		if !app.applyBalanceReadback(controlID, conn, refresh, nil) {
+		if !app.balanceRefreshCurrent(controlID, conn, refresh) {
 			operation.fail(http.StatusConflict, "Stereo pair topology changed during balance update")
 
 			return
 		}
 
-		operation.broadcast = true
 		operation.fail(http.StatusBadGateway, stereoBalanceReadbackError(writeErr, readErr))
 
 		return
 	}
 
 	readAvailable, _, _, _, readCapabilityKnown := balance.Capability()
-	if !app.applyBalanceReadback(controlID, conn, refresh, balance) {
+
+	revision, applied := app.applyBalanceReadbackWithRevision(controlID, conn, refresh, balance)
+	if !applied {
 		operation.fail(http.StatusConflict, "Stereo pair topology changed during balance update")
 
 		return
 	}
 
 	operation.broadcast = true
+
+	operation.result.Revision = &revision
 	if !readCapabilityKnown {
 		operation.fail(http.StatusBadGateway, "Stereo balance readback capability is unverified")
 
@@ -286,8 +290,23 @@ func (app *WebApp) applyBalanceReadback(
 	refresh webtypes.BalanceRefresh,
 	balance *models.Balance,
 ) bool {
+	_, applied := app.applyBalanceReadbackWithRevision(controlID, conn, refresh, balance)
+
+	return applied
+}
+
+func (app *WebApp) applyBalanceReadbackWithRevision(
+	controlID string,
+	conn *webtypes.DeviceConnection,
+	refresh webtypes.BalanceRefresh,
+	balance *models.Balance,
+) (uint64, bool) {
 	app.devicesMu.RLock()
 	defer app.devicesMu.RUnlock()
 
-	return app.devices[controlID] == conn && conn.ApplyBalanceReadback(refresh, balance)
+	if app.devices[controlID] != conn {
+		return 0, false
+	}
+
+	return conn.ApplyBalanceReadbackWithRevision(refresh, balance)
 }

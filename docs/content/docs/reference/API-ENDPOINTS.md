@@ -299,7 +299,7 @@ Sets balance settings. Value must be within the range specified by `balanceMin` 
 
 **Request XML:**
 ```xml
-<balance>0</balance>
+<balance><targetBalance>0</targetBalance></balance>
 ```
 
 **Example Values (when the device advertises `-7..7`):**

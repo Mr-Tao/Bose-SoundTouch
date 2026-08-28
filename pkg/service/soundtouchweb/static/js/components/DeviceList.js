@@ -9,7 +9,6 @@ import {
     partialFailureMessage,
 } from '../zoneVolumeResult.mjs';
 import { zoneCardPresentation } from '../zonePresentation.mjs';
-import { StereoBalanceControl } from './StereoBalanceControl.js';
 
 const html = htm.bind(h);
 
@@ -184,21 +183,7 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
                     ${hasProjectedVolume ? localVolume : '–'}
                 </output>
             </div>
-            ${device.stereoPair ? html`<${StereoBalanceControl} id=${controlID} device=${device} />` : null}
             ${failure ? html`<div class="zone-volume-failure" role="status">${failure}</div>` : null}
-        </section>
-    `;
-}
-
-function StereoPairDeviceCard({ id, device, onSelect, showIP }) {
-    const nameID = `stereo-name-${id.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
-
-    return html`
-        <section class="device-card stereo-balance-card" aria-labelledby=${nameID}>
-            <button type="button" class="stereo-card-open" onClick=${() => onSelect(id)}>
-                ${cardDetails(id, device, showIP, nameID)}
-            </button>
-            <${StereoBalanceControl} id=${id} device=${device} />
         </section>
     `;
 }
@@ -207,10 +192,6 @@ function DeviceCard({ id, device, onSelect, showIP }) {
     if (device.zone) {
         return html`<${ZoneDeviceCard} id=${id} device=${device} onSelect=${onSelect} showIP=${showIP} />`;
     }
-    if (device.stereoPair) {
-        return html`<${StereoPairDeviceCard} id=${id} device=${device} onSelect=${onSelect} showIP=${showIP} />`;
-    }
-
     return html`
         <button type="button" class="device-card" onClick=${() => onSelect(id)}>
             ${cardDetails(id, device, showIP)}

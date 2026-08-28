@@ -6,6 +6,7 @@ import {
     balanceFailureMessage,
     clampBalance,
     confirmedBalanceActual,
+    confirmedBalanceReadback,
 } from '../static/js/stereoBalanceResult.mjs';
 
 test('clamps stereo balance to the confirmed speaker range', () => {
@@ -19,17 +20,25 @@ test('clamps stereo balance to the confirmed speaker range', () => {
 test('accepts only the requested confirmed balance readback', () => {
     assert.equal(confirmedBalanceActual({
         success: true,
-        data: { requested: 20, target: 20, actual: 18, atTarget: false },
-    }, 20, -30, 30), 18);
+        data: { requested: 20, target: 20, actual: 18, revision: 8, atTarget: false },
+    }, 20, -30, 30, 7), 18);
+    assert.deepEqual(confirmedBalanceReadback({
+        success: true,
+        data: { requested: 20, target: 20, actual: 18, revision: 8, atTarget: false },
+    }, 20, -30, 30, 7), { actual: 18, revision: 8 });
     assert.equal(confirmedBalanceActual({
         success: true,
-        data: { requested: 10, target: 10, actual: 10, atTarget: true },
-    }, 20, -30, 30), null);
+        data: { requested: 10, target: 10, actual: 10, revision: 8, atTarget: true },
+    }, 20, -30, 30, 7), null);
     assert.equal(confirmedBalanceActual({
         success: true,
-        data: { requested: 20, target: 20, actual: 31, atTarget: false },
-    }, 20, -30, 30), null);
-    assert.equal(confirmedBalanceActual({ success: false, data: { requested: 20 } }, 20, -30, 30), null);
+        data: { requested: 20, target: 20, actual: 31, revision: 8, atTarget: false },
+    }, 20, -30, 30, 7), null);
+    assert.equal(confirmedBalanceActual({
+        success: true,
+        data: { requested: 20, target: 20, actual: 18, revision: 7, atTarget: false },
+    }, 20, -30, 30, 7), null);
+    assert.equal(confirmedBalanceActual({ success: false, data: { requested: 20 } }, 20, -30, 30, 7), null);
 });
 
 for (const [name, extra] of [
@@ -50,8 +59,10 @@ for (const [name, extra] of [
             max: null,
             defaultValue: null,
             value: null,
+            revision: 0,
         });
 
+        device.status.balanceRevision = 5;
         device.status.balance = {
             capabilityKnown: true,
             balanceAvailable: true,
@@ -68,6 +79,7 @@ for (const [name, extra] of [
             max: 7,
             defaultValue: 0,
             value: -3,
+            revision: 5,
         });
     });
 }
@@ -77,6 +89,7 @@ test('unavailable and malformed capabilities cannot enable the control', () => {
         stereoPair: {},
         status: {
             isConnected: true,
+            balanceRevision: 11,
             balance: {
                 capabilityKnown: true,
                 balanceAvailable: false,
@@ -107,6 +120,7 @@ test('supports a different valid advertised range', () => {
         stereoPair: {},
         status: {
             isConnected: true,
+            balanceRevision: 11,
             balance: {
                 capabilityKnown: true,
                 balanceAvailable: true,
@@ -118,6 +132,7 @@ test('supports a different valid advertised range', () => {
         },
     });
     assert.equal(state.enabled, true);
+    assert.equal(state.revision, 11);
     assert.deepEqual([state.min, state.max, state.defaultValue, state.value], [-12, 9, 1, 8]);
 });
 

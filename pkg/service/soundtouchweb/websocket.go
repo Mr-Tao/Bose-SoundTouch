@@ -307,8 +307,22 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			})
 		})
 
+		wsClient.OnBassUpdated(func(event *models.BassUpdatedEvent) {
+			if !speakerConnectionEventMatches(conn, event.DeviceID) {
+				return
+			}
+
+			conn.WithBassOperation(func() {
+				conn.ApplyBassEvent(&event.Bass, time.Now())
+			})
+		})
+
 		wsClient.OnGroupUpdated(func(event *models.GroupUpdatedEvent) {
 			applyGroupUpdatedEvent(conn, event)
+		})
+
+		wsClient.OnBalanceUpdated(func(event *models.BalanceUpdatedEvent) {
+			app.applyBalanceUpdatedEvent(deviceID, conn, event)
 		})
 
 		wsClient.OnZoneUpdated(func(event *models.ZoneUpdatedEvent) {
@@ -431,22 +445,21 @@ func (app *WebApp) UpdateDeviceStatus(deviceID string, conn *webtypes.DeviceConn
 	// confirm the physical device as the stereo-pair group master.
 	stereoCapable := stereoPairCapable(conn.DeviceInfo)
 
-	var groupGeneration uint64
-	if stereoCapable {
-		groupGeneration = conn.BeginGroupRefresh()
-	}
-
 	nameGeneration := conn.BeginNameRefresh()
 	zoneGeneration := conn.BeginZoneRefresh()
 
 	poll := fetchDeviceStatus(conn)
-	stereo := app.fetchStereoStatus(deviceID, conn, stereoCapable, groupGeneration)
+	stereo := app.fetchStereoStatus(deviceID, conn, stereoCapable)
 
 	// Phase 2: fast merge. Only fields we successfully fetched
 	// overwrite; everything else keeps the value other goroutines may
 	// have just written.
 	if poll.volumeErr == nil {
 		conn.ApplyPolledVolume(poll.volumeGeneration, poll.volume)
+	}
+
+	if poll.bassErr == nil {
+		conn.ApplyPolledBass(poll.bassGeneration, poll.bass)
 	}
 
 	conn.CompleteHTTPPoll(
@@ -476,6 +489,7 @@ type deviceStatusPoll struct {
 	bass                    *models.Bass
 	zone                    *models.ZoneInfo
 	volumeGeneration        uint64
+	bassGeneration          uint64
 	nowPlayingErr           error
 	nameErr                 error
 	volumeErr               error
@@ -497,7 +511,10 @@ func fetchDeviceStatus(conn *webtypes.DeviceConnection) deviceStatusPoll {
 	poll.volume, poll.volumeErr = conn.Client.GetVolume()
 	poll.presets, poll.presetsErr = conn.Client.GetPresets()
 	poll.sources, poll.sourcesErr = conn.Client.GetSources()
-	poll.bass, poll.bassErr = conn.Client.GetBass()
+	conn.WithBassOperation(func() {
+		poll.bassGeneration = conn.BeginBassRefresh()
+		poll.bass, poll.bassErr = conn.Client.GetBass()
+	})
 	poll.bassCapabilitiesOutcome, _ = conn.EnsureBassCapabilities(conn.Client.GetBassCapabilities)
 	poll.zone, poll.zoneErr = conn.Client.GetZone()
 
@@ -516,10 +533,6 @@ func (poll deviceStatusPoll) merge(status *webtypes.DeviceStatus) {
 	if poll.sourcesErr == nil {
 		status.Sources = poll.sources
 	}
-
-	if poll.bassErr == nil {
-		status.Bass = poll.bass
-	}
 }
 
 type stereoStatusPoll struct {
@@ -533,22 +546,26 @@ func (app *WebApp) fetchStereoStatus(
 	deviceID string,
 	conn *webtypes.DeviceConnection,
 	stereoCapable bool,
-	groupGeneration uint64,
 ) stereoStatusPoll {
 	var poll stereoStatusPoll
 	if !stereoCapable {
 		return poll
 	}
 
-	group, err := conn.Client.GetGroup()
-
-	poll.groupErr = err
-	if err != nil || !conn.ApplyPolledGroup(groupGeneration, group) ||
-		!confirmedStereoBalanceMaster(conn.Info().DeviceID, group) {
-		return poll
-	}
-
 	conn.WithBalanceOperation(func() {
+		groupGeneration := conn.BeginGroupRefresh()
+		group, err := conn.Client.GetGroup()
+
+		poll.groupErr = err
+		if err != nil {
+			return
+		}
+
+		if !conn.ApplyPolledGroup(groupGeneration, group) ||
+			!confirmedStereoBalanceMaster(conn.Info().DeviceID, group) {
+			return
+		}
+
 		refresh, ok := conn.BeginBalanceRefresh()
 		if !ok || !sameGroupClaim(refresh.Group, group) ||
 			!app.balanceRefreshCurrent(deviceID, conn, refresh) {
@@ -597,6 +614,45 @@ func anyStatusFetchSucceeded(errors ...error) bool {
 func applyGroupUpdatedEvent(conn *webtypes.DeviceConnection, event *models.GroupUpdatedEvent) {
 	conn.MarkEventStreamActivity(time.Now())
 	conn.ApplyGroupEvent(&event.Group, time.Now())
+}
+
+func (app *WebApp) applyBalanceUpdatedEvent(
+	deviceID string,
+	conn *webtypes.DeviceConnection,
+	event *models.BalanceUpdatedEvent,
+) {
+	if event == nil || !speakerConnectionEventMatches(conn, event.DeviceID) {
+		return
+	}
+
+	applied := false
+
+	conn.WithBalanceOperation(func() {
+		if !app.confirmedStereoBalanceTarget(deviceID, conn) {
+			return
+		}
+
+		refresh, ok := conn.BeginBalanceRefresh()
+		if !ok || !confirmedStereoBalanceMaster(conn.Info().DeviceID, refresh.Group) {
+			return
+		}
+
+		balance := &event.Balance
+		if _, _, _, _, capabilityKnown := balance.Capability(); !capabilityKnown {
+			var err error
+
+			balance, err = conn.Client.GetBalance()
+			if err != nil || balance == nil {
+				return
+			}
+		}
+
+		applied = app.applyBalanceReadback(deviceID, conn, refresh, balance)
+	})
+
+	if applied {
+		conn.MarkEventStreamActivity(time.Now())
+	}
 }
 
 // refreshZonesAfterEvent treats zoneUpdated as an invalidation hint. The raw

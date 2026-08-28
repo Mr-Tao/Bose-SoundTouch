@@ -143,6 +143,41 @@ func TestParseWebSocketEvent(t *testing.T) {
 		}
 	})
 
+	t.Run("ValidBalanceUpdatedEvent", func(t *testing.T) {
+		xmlData := `<?xml version="1.0" encoding="UTF-8" ?>
+<updates deviceID="0CAE7D42D459">
+	<balanceUpdated deviceID="0CAE7D42D459">
+		<balance deviceID="0CAE7D42D459">
+			<balanceAvailable>true</balanceAvailable>
+			<balanceMin>-7</balanceMin>
+			<balanceMax>7</balanceMax>
+			<balanceDefault>0</balanceDefault>
+			<targetBalance>3</targetBalance>
+			<actualBalance>3</actualBalance>
+		</balance>
+	</balanceUpdated>
+</updates>`
+
+		event, err := ParseWebSocketEvent([]byte(xmlData))
+		if err != nil {
+			t.Fatalf("ParseWebSocketEvent() failed: %v", err)
+		}
+
+		if !event.HasEventType(EventTypeBalanceUpdated) || event.BalanceUpdated == nil {
+			t.Fatalf("balanceUpdated was not parsed: %+v", event)
+		}
+
+		balance := event.BalanceUpdated.Balance
+		if !balance.CapabilityKnown || !balance.BalanceAvailable ||
+			balance.TargetBalance != 3 || balance.ActualBalance != 3 {
+			t.Fatalf("balance = %+v, want confirmed value 3", balance)
+		}
+
+		if names := event.UnknownEventNames(); len(names) != 0 {
+			t.Fatalf("balanceUpdated remained unknown: %v", names)
+		}
+	})
+
 	t.Run("MultipleEvents", func(t *testing.T) {
 		xmlData := `<?xml version="1.0" encoding="UTF-8" ?>
 <updates deviceID="689E19B8BB8A">

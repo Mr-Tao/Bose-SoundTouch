@@ -701,7 +701,7 @@ func TestBalanceRequest_MarshalXML(t *testing.T) {
 		t.Errorf("MarshalXML() unexpected error: %v", err)
 	}
 
-	expected := "<balance>25</balance>"
+	expected := "<balance><targetBalance>25</targetBalance></balance>"
 	if string(data) != expected {
 		t.Errorf("MarshalXML() = %v, want %v", string(data), expected)
 	}

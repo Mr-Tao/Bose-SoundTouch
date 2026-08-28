@@ -1,6 +1,5 @@
 import { h, htm, useEffect, useRef, useState } from '../dependencies.js';
 import { api } from '../api.js';
-import { bassControlForStatus } from '../bassCapabilities.mjs';
 import { createLatestWinsScheduler, shouldSurfaceLatestFinal } from '../latestWinsScheduler.mjs';
 import { clampVolume, maxReadbackActual, partialFailureMessage } from '../zoneVolumeResult.mjs';
 
@@ -64,9 +63,6 @@ export function Controls({
     const isMuted = status?.volume?.MuteEnabled ?? false;
     const shuffle = np?.ShuffleSetting ?? 'SHUFFLE_OFF';
     const repeat = np?.RepeatSetting ?? 'REPEAT_OFF';
-    const bassControl = bassControlForStatus(status);
-    const actualBass = bassControl.value;
-
     const projectedVolumeRef = useRef(projectedVolume);
     const controlTargetRef = useRef({ deviceId, group: controlsLogicalZone });
     const interactionGenerationRef = useRef(0);
@@ -81,7 +77,6 @@ export function Controls({
     const [localVolume, setLocalVolume] = useState(projectedVolume);
     const [volumeBusy, setVolumeBusy] = useState(false);
     const [volumeFailure, setVolumeFailure] = useState('');
-    const [localBass, setLocalBass] = useState(actualBass);
 
     projectedVolumeRef.current = projectedVolume;
     controlTargetRef.current = { deviceId, group: controlsLogicalZone };
@@ -168,8 +163,6 @@ export function Controls({
             setLocalVolume(projectedVolume);
         }
     }, [projectedVolume]);
-    useEffect(() => { setLocalBass(actualBass); }, [actualBass]);
-
     const send = (key) => api.key(deviceId, key);
 
     function queueVolume(event, force) {
@@ -191,12 +184,6 @@ export function Controls({
         if (!interactionDirtyRef.current) return;
         interactionDirtyRef.current = false;
         queueVolume(event, true);
-    }
-
-    function onBassChange(e) {
-        const val = parseInt(e.target.value, 10);
-        setLocalBass(val);
-        api.bass(deviceId, val);
     }
 
     function toggleShuffle() {
@@ -247,15 +234,6 @@ export function Controls({
                 <span class="volume-value">${localVolume}</span>
             </div>
             ${volumeFailure ? html`<div class="volume-control-failure" role="status">${volumeFailure}</div>` : null}
-            ${bassControl.available && html`
-                <div class="bass-row">
-                    <span class="bass-label">Bass</span>
-                    <input type="range" class="volume-slider"
-                        min=${bassControl.min} max=${bassControl.max} step="1"
-                        value=${localBass} onInput=${onBassChange} />
-                    <span class="volume-value">${localBass > 0 ? '+' : ''}${localBass}</span>
-                </div>
-            `}
         </div>
     `;
 }

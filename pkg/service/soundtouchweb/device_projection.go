@@ -13,11 +13,12 @@ import (
 // A stereo pair is projected as one target keyed by its master speaker's host;
 // the underlying registry continues to track both physical speakers.
 type deviceView struct {
-	Info       *models.DeviceInfo     `json:"info"`
-	Status     *webtypes.DeviceStatus `json:"status"`
-	LastSeen   time.Time              `json:"lastSeen"`
-	StereoPair *stereoPairView        `json:"stereoPair,omitempty"`
-	Zone       *zoneView              `json:"zone,omitempty"`
+	Info                 *models.DeviceInfo        `json:"info"`
+	Status               *webtypes.DeviceStatus    `json:"status"`
+	LastSeen             time.Time                 `json:"lastSeen"`
+	StereoPair           *stereoPairView           `json:"stereoPair,omitempty"`
+	Zone                 *zoneView                 `json:"zone,omitempty"`
+	DeviceSettingsTarget *deviceSettingsTargetView `json:"deviceSettingsTarget,omitempty"`
 }
 
 // deviceProjectionEntry captures one immutable status pointer per physical
@@ -54,6 +55,19 @@ type stereoPairMemberView struct {
 	Available bool   `json:"available"`
 }
 
+// deviceSettingsTargetView names the one physical speaker that receives
+// device-scoped settings for a logical control target. For a stereo pair this
+// is the confirmed firmware master, while pair-scoped balance remains separate.
+type deviceSettingsTargetView struct {
+	ControlID        string                   `json:"controlId"`
+	DeviceID         string                   `json:"deviceId"`
+	Name             string                   `json:"name"`
+	Connectivity     webtypes.Connectivity    `json:"connectivity"`
+	Bass             *models.Bass             `json:"bass,omitempty"`
+	BassRevision     uint64                   `json:"bassRevision"`
+	BassCapabilities *models.BassCapabilities `json:"bassCapabilities,omitempty"`
+}
+
 // zoneView describes one master-authoritative multiroom zone after physical
 // stereo members have been folded into logical player targets.
 type zoneView struct {
@@ -68,20 +82,22 @@ type zoneView struct {
 }
 
 type zoneMemberView struct {
-	Kind            string                   `json:"kind"`
-	ControlID       string                   `json:"controlId,omitempty"`
-	IP              string                   `json:"ip,omitempty"`
-	HardwareID      string                   `json:"hwId,omitempty"`
-	Name            string                   `json:"name,omitempty"`
-	Model           string                   `json:"model"`
-	Type            string                   `json:"type"`
-	DeviceIDs       []string                 `json:"deviceIds"`
-	Available       bool                     `json:"available"`
-	Connectivity    webtypes.Connectivity    `json:"connectivity"`
-	ActualVolume    *int                     `json:"actualVolume,omitempty"`
-	PhysicalMembers []zonePhysicalMemberView `json:"physicalMembers"`
-	StereoPair      *stereoPairView          `json:"stereoPair,omitempty"`
-	Balance         *models.Balance          `json:"balance,omitempty"`
+	Kind                 string                    `json:"kind"`
+	ControlID            string                    `json:"controlId,omitempty"`
+	IP                   string                    `json:"ip,omitempty"`
+	HardwareID           string                    `json:"hwId,omitempty"`
+	Name                 string                    `json:"name,omitempty"`
+	Model                string                    `json:"model"`
+	Type                 string                    `json:"type"`
+	DeviceIDs            []string                  `json:"deviceIds"`
+	Available            bool                      `json:"available"`
+	Connectivity         webtypes.Connectivity     `json:"connectivity"`
+	ActualVolume         *int                      `json:"actualVolume,omitempty"`
+	PhysicalMembers      []zonePhysicalMemberView  `json:"physicalMembers"`
+	StereoPair           *stereoPairView           `json:"stereoPair,omitempty"`
+	Balance              *models.Balance           `json:"balance,omitempty"`
+	BalanceRevision      uint64                    `json:"balanceRevision"`
+	DeviceSettingsTarget *deviceSettingsTargetView `json:"deviceSettingsTarget,omitempty"`
 }
 
 type zonePhysicalMemberView struct {
@@ -193,10 +209,11 @@ func projectLogicalDeviceEntries(snapshot []deviceProjectionEntry) (
 
 		pair := masters[entry.ID]
 		devices[entry.ID] = deviceView{
-			Info:       projectedDeviceInfo(entry.ID, entry.Info, pair),
-			Status:     entry.Status,
-			LastSeen:   entry.LastSeen,
-			StereoPair: pair,
+			Info:                 projectedDeviceInfo(entry.ID, entry.Info, pair),
+			Status:               entry.Status,
+			LastSeen:             entry.LastSeen,
+			StereoPair:           pair,
+			DeviceSettingsTarget: newDeviceSettingsTarget(entry),
 		}
 	}
 
@@ -421,6 +438,7 @@ func newZoneMember(
 
 	member.Connectivity = projectedConnectivity(view.Status)
 	member.Available = member.Connectivity != webtypes.ConnectivityOffline
+	member.DeviceSettingsTarget = view.DeviceSettingsTarget
 
 	if view.StereoPair != nil {
 		member.Kind = "stereoPair"
@@ -429,6 +447,7 @@ func newZoneMember(
 
 		if view.Status != nil {
 			member.Balance = view.Status.Balance
+			member.BalanceRevision = view.Status.BalanceRevision
 		}
 
 		member.DeviceIDs = member.DeviceIDs[:0]
@@ -662,6 +681,26 @@ func newStereoPairView(group *models.Group, byDeviceID map[string][]deviceProjec
 		Degraded:             available != len(members) || (group.Status != "" && group.Status != "GROUP_OK"),
 		Members:              members,
 	}
+}
+
+func newDeviceSettingsTarget(entry deviceProjectionEntry) *deviceSettingsTargetView {
+	if entry.Info == nil || strings.TrimSpace(entry.ID) == "" || strings.TrimSpace(entry.Info.DeviceID) == "" {
+		return nil
+	}
+
+	target := &deviceSettingsTargetView{
+		ControlID:    entry.ID,
+		DeviceID:     entry.Info.DeviceID,
+		Name:         entry.Info.Name,
+		Connectivity: projectedConnectivity(entry.Status),
+	}
+	if entry.Status != nil {
+		target.Bass = entry.Status.Bass
+		target.BassRevision = entry.Status.BassRevision
+		target.BassCapabilities = entry.Status.BassCapabilities
+	}
+
+	return target
 }
 
 func projectedDeviceInfo(controlID string, info *models.DeviceInfo, pair *stereoPairView) *models.DeviceInfo {

@@ -609,8 +609,68 @@ func (app *WebApp) handleBassControl(w http.ResponseWriter, r *http.Request, dev
 		return
 	}
 
-	err := device.Client.SetBassWithCapabilities(bassReq.Level, &capabilities)
-	app.sendControlResponse(w, err, fmt.Sprintf("Bass set to %d", bassReq.Level))
+	result := struct {
+		Requested int     `json:"requested"`
+		Target    *int    `json:"target"`
+		Actual    *int    `json:"actual"`
+		AtTarget  bool    `json:"atTarget"`
+		Revision  *uint64 `json:"revision,omitempty"`
+	}{Requested: bassReq.Level}
+	response := webtypes.APIResponse{Success: true}
+	statusCode := http.StatusOK
+	broadcast := false
+
+	device.WithBassOperation(func() {
+		generation := device.BeginBassRefresh()
+		writeErr := device.Client.SetBassWithCapabilities(bassReq.Level, &capabilities)
+		bass, readErr := device.Client.GetBass()
+
+		if readErr != nil || bass == nil {
+			statusCode = http.StatusBadGateway
+			response.Success = false
+
+			switch {
+			case writeErr != nil && readErr != nil:
+				response.Error = fmt.Sprintf("Bass write and readback are unverified: write: %v; read: %v", writeErr, readErr)
+			case readErr != nil:
+				response.Error = fmt.Sprintf("Bass readback is unverified: %v", readErr)
+			default:
+				response.Error = "Bass readback is unverified"
+			}
+
+			return
+		}
+
+		revision, applied := device.ApplyPolledBassWithRevision(generation, bass)
+		if !applied {
+			statusCode = http.StatusConflict
+			response.Success = false
+			response.Error = "Bass state changed during update"
+
+			return
+		}
+
+		target := bass.TargetBass
+		actual := bass.ActualBass
+		result.Target = &target
+		result.Actual = &actual
+		result.AtTarget = target == bassReq.Level && actual == bassReq.Level
+		result.Revision = &revision
+		broadcast = true
+	})
+
+	if broadcast {
+		app.BroadcastDeviceList()
+	}
+
+	response.Data = result
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode bass response", http.StatusInternalServerError)
+	}
 }
 
 func effectiveBassCapabilities(status *webtypes.DeviceStatus) models.BassCapabilities {

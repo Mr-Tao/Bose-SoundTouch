@@ -8,6 +8,11 @@ export const SETTINGS_SECTION_ORDER = [
     'network',
 ];
 
+export function deviceSettingsTitle(name) {
+    const target = typeof name === 'string' ? name.trim() : '';
+    return target ? `Device settings · ${target}` : 'Device settings';
+}
+
 function hasError(errors, keys) {
     if (!errors || typeof errors !== 'object') return false;
     return keys.some(key => Boolean(errors[key]));

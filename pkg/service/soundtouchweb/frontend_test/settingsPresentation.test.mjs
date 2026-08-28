@@ -4,8 +4,14 @@ import test from 'node:test';
 import {
     clockControls,
     clockDisplayPatch,
+    deviceSettingsTitle,
     settingsSections,
 } from '../static/js/settingsPresentation.mjs';
+
+test('device settings title identifies its physical target', () => {
+    assert.equal(deviceSettingsTitle(' kuchyň '), 'Device settings · kuchyň');
+    assert.equal(deviceSettingsTitle(''), 'Device settings');
+});
 
 test('settings sections follow the stable presentation order', () => {
     assert.deepEqual(settingsSections({

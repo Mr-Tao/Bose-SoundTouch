@@ -433,21 +433,31 @@ func TestHandleAPIControl_BassCapabilities(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var posts atomic.Int32
 			speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/bass" {
-					t.Errorf("speaker request = %s %s, want POST /bass", r.Method, r.URL.Path)
+				if r.URL.Path != "/bass" {
+					t.Errorf("speaker path = %s, want /bass", r.URL.Path)
 					http.NotFound(w, r)
 					return
 				}
 
-				posts.Add(1)
-				var request models.BassRequest
-				if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
-					t.Errorf("decode bass request: %v", err)
-					http.Error(w, "invalid bass request", http.StatusBadRequest)
-					return
-				}
-				if request.Level != tt.level {
-					t.Errorf("posted bass = %d, want %d", request.Level, tt.level)
+				switch r.Method {
+				case http.MethodPost:
+					posts.Add(1)
+					var request models.BassRequest
+					if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Errorf("decode bass request: %v", err)
+						http.Error(w, "invalid bass request", http.StatusBadRequest)
+						return
+					}
+					if request.Level != tt.level {
+						t.Errorf("posted bass = %d, want %d", request.Level, tt.level)
+					}
+				case http.MethodGet:
+					_, _ = fmt.Fprintf(w,
+						`<bass><targetbass>%d</targetbass><actualbass>%d</actualbass></bass>`,
+						tt.level, tt.level)
+				default:
+					t.Errorf("speaker method = %s, want GET or POST", r.Method)
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				}
 			}))
 			defer speaker.Close()
@@ -479,6 +489,127 @@ func TestHandleAPIControl_BassCapabilities(t *testing.T) {
 			}
 			if got := posts.Load() > 0; got != tt.wantPost {
 				t.Fatalf("speaker POST = %v, want %v", got, tt.wantPost)
+			}
+		})
+	}
+}
+
+func TestHandleAPIControl_BassReadback(t *testing.T) {
+	tests := []struct {
+		name          string
+		writeStatus   int
+		readStatus    int
+		target        int
+		actual        int
+		wantStatus    int
+		wantSuccess   bool
+		wantAtTarget  bool
+		wantCached    int
+		wantCacheKept bool
+		wantRevision  uint64
+		wantAccepted  bool
+	}{
+		{
+			name: "matching readback confirms write", writeStatus: http.StatusOK,
+			readStatus: http.StatusOK, target: -3, actual: -3,
+			wantStatus: http.StatusOK, wantSuccess: true, wantAtTarget: true, wantCached: -3,
+			wantRevision: 11, wantAccepted: true,
+		},
+		{
+			name: "matching readback confirms transport error", writeStatus: http.StatusInternalServerError,
+			readStatus: http.StatusOK, target: -3, actual: -3,
+			wantStatus: http.StatusOK, wantSuccess: true, wantAtTarget: true, wantCached: -3,
+			wantRevision: 11, wantAccepted: true,
+		},
+		{
+			name: "mismatch is authoritative", writeStatus: http.StatusOK,
+			readStatus: http.StatusOK, target: -3, actual: -2,
+			wantStatus: http.StatusOK, wantSuccess: true, wantAtTarget: false, wantCached: -2,
+			wantRevision: 11, wantAccepted: true,
+		},
+		{
+			name: "failed readback keeps previous value", writeStatus: http.StatusOK,
+			readStatus: http.StatusInternalServerError,
+			wantStatus: http.StatusBadGateway, wantSuccess: false, wantCached: 0, wantCacheKept: true,
+			wantRevision: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodPost:
+					w.WriteHeader(tt.writeStatus)
+				case http.MethodGet:
+					if tt.readStatus != http.StatusOK {
+						http.Error(w, "readback failed", tt.readStatus)
+						return
+					}
+					_, _ = fmt.Fprintf(w,
+						`<bass><targetbass>%d</targetbass><actualbass>%d</actualbass></bass>`,
+						tt.target, tt.actual)
+				default:
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				}
+			}))
+			defer speaker.Close()
+
+			app := NewWebApp()
+			device := webtypes.NewDeviceConnection(
+				client.NewClientFromHost(speaker.URL),
+				&models.DeviceInfo{Name: "Test Speaker"},
+			)
+			device.SetStatus(&webtypes.DeviceStatus{
+				Bass:         &models.Bass{TargetBass: 0, ActualBass: 0},
+				BassRevision: 10,
+				BassCapabilities: &models.BassCapabilities{
+					BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+				},
+				IsConnected: true,
+			})
+			app.AddDevice("test-device", device)
+
+			request := httptest.NewRequest(http.MethodPost,
+				"/api/control/devices/test-device/action/bass", strings.NewReader(`{"level":-3}`))
+			request = withChiParams(request, map[string]string{"id": "test-device", "action": "bass"})
+			response := httptest.NewRecorder()
+			app.HandleAPIControl(response, request)
+
+			var payload struct {
+				Success bool   `json:"success"`
+				Error   string `json:"error"`
+				Data    struct {
+					Requested int     `json:"requested"`
+					Target    *int    `json:"target"`
+					Actual    *int    `json:"actual"`
+					AtTarget  bool    `json:"atTarget"`
+					Revision  *uint64 `json:"revision"`
+				} `json:"data"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.Code != tt.wantStatus || payload.Success != tt.wantSuccess ||
+				payload.Data.AtTarget != tt.wantAtTarget {
+				t.Fatalf("response status=%d success=%v atTarget=%v error=%q",
+					response.Code, payload.Success, payload.Data.AtTarget, payload.Error)
+			}
+			if got := device.Status().Bass; got == nil || got.ActualBass != tt.wantCached {
+				t.Fatalf("cached bass = %+v, want actual %d", got, tt.wantCached)
+			}
+			if got := device.Status().BassRevision; got != tt.wantRevision {
+				t.Fatalf("cached bass revision = %d, want %d", got, tt.wantRevision)
+			}
+			if tt.wantAccepted {
+				if payload.Data.Revision == nil || *payload.Data.Revision != tt.wantRevision {
+					t.Fatalf("response revision = %v, want %d", payload.Data.Revision, tt.wantRevision)
+				}
+			} else if payload.Data.Revision != nil {
+				t.Fatalf("failed readback invented response revision %d", *payload.Data.Revision)
+			}
+			if tt.wantCacheKept && payload.Data.Target != nil {
+				t.Fatalf("unverified readback returned confirmed target: %+v", payload.Data)
 			}
 		})
 	}
