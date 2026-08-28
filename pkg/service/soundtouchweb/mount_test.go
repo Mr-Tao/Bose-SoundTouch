@@ -88,6 +88,15 @@ func TestMountWebControlAPIShape(t *testing.T) {
 		"/api/control/devices/{id}/stereo-pair/",
 		"/api/control/devices/{id}/stereo-pair/balance/{level}",
 		"/api/control/devices/{id}/zone/member/{memberId}/volume/{volume}",
+		"/api/control/devices/{id}/settings/",
+		"/api/control/devices/{id}/settings/clock-display",
+		"/api/control/devices/{id}/settings/clock-time",
+		"/api/control/devices/{id}/settings/system-timeout",
+		"/api/control/devices/{id}/settings/language",
+		"/api/control/devices/{id}/settings/sync",
+		"/api/control/devices/{id}/settings/bluetooth/pair",
+		"/api/control/devices/{id}/settings/bluetooth/pairings",
+		"/api/control/devices/{id}/settings/source-name",
 	}
 	for _, want := range mustExist {
 		if !registered[want] {
