@@ -1045,6 +1045,124 @@ func (c *Client) SetClockTimeNow() error {
 	return c.SetClockTime(request)
 }
 
+// GetSystemTimeout retrieves the power-saving setting from /systemtimeout.
+func (c *Client) GetSystemTimeout() (*models.SystemTimeout, error) {
+	var setting models.SystemTimeout
+	if err := c.get("/systemtimeout", &setting); err != nil {
+		return nil, fmt.Errorf("failed to get system timeout: %w", err)
+	}
+	return &setting, nil
+}
+
+// SetSystemTimeout updates /systemtimeout. HTTP success only confirms that the
+// request was accepted; callers must read the setting back before reporting it.
+func (c *Client) SetSystemTimeout(setting *models.SystemTimeout) error {
+	if err := setting.Validate(); err != nil {
+		return fmt.Errorf("invalid system timeout request: %w", err)
+	}
+	if err := c.post("/systemtimeout", setting); err != nil {
+		return fmt.Errorf("failed to set system timeout: %w", err)
+	}
+	return nil
+}
+
+// GetRebroadcastLatencyMode retrieves /rebroadcastlatencymode.
+func (c *Client) GetRebroadcastLatencyMode() (*models.RebroadcastLatencyMode, error) {
+	var setting models.RebroadcastLatencyMode
+	if err := c.get("/rebroadcastlatencymode", &setting); err != nil {
+		return nil, fmt.Errorf("failed to get rebroadcast latency mode: %w", err)
+	}
+	return &setting, nil
+}
+
+// SetRebroadcastLatencyMode updates /rebroadcastlatencymode. HTTP success only
+// confirms request acceptance; callers must read the setting back.
+func (c *Client) SetRebroadcastLatencyMode(mode models.RebroadcastLatencyModeValue) error {
+	request := &models.RebroadcastLatencyModeRequest{Mode: mode}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid rebroadcast latency mode request: %w", err)
+	}
+	if err := c.post("/rebroadcastlatencymode", request); err != nil {
+		return fmt.Errorf("failed to set rebroadcast latency mode: %w", err)
+	}
+	return nil
+}
+
+// GetLanguage retrieves the current integer system language from /language.
+// Unknown codes are returned unchanged for compatibility with newer firmware.
+func (c *Client) GetLanguage() (*models.SystemLanguage, error) {
+	var language models.SystemLanguage
+	if err := c.get("/language", &language); err != nil {
+		return nil, fmt.Errorf("failed to get system language: %w", err)
+	}
+	return &language, nil
+}
+
+// SetLanguage updates /language. HTTP success only confirms request acceptance;
+// callers must read the language back before reporting the change.
+func (c *Client) SetLanguage(code models.LanguageCode) error {
+	request := &models.SystemLanguage{Code: code}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid system language request: %w", err)
+	}
+	if err := c.post("/language", request); err != nil {
+		return fmt.Errorf("failed to set system language: %w", err)
+	}
+	return nil
+}
+
+// GetBluetoothInfo retrieves the speaker adapter information from /bluetoothInfo.
+func (c *Client) GetBluetoothInfo() (*models.BluetoothInfo, error) {
+	var info models.BluetoothInfo
+	if err := c.get("/bluetoothInfo", &info); err != nil {
+		return nil, fmt.Errorf("failed to get Bluetooth info: %w", err)
+	}
+	return &info, nil
+}
+
+// RenameSource updates the source display name through /nameSource. HTTP
+// success only confirms request acceptance; callers must read sources back.
+func (c *Client) RenameSource(source, sourceAccount, itemName string) error {
+	request := &models.SourceRenameRequest{
+		Source:        source,
+		SourceAccount: sourceAccount,
+		ItemName:      itemName,
+	}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid source rename request: %w", err)
+	}
+	if err := c.post("/nameSource", request); err != nil {
+		return fmt.Errorf("failed to rename source: %w", err)
+	}
+	return nil
+}
+
+// EnterPairingMode requests Bluetooth pairing mode through the firmware's
+// state-changing GET endpoint. Callers must verify discoverability through a
+// subsequent now-playing read; HTTP success does not confirm physical state.
+func (c *Client) EnterPairingMode() error {
+	var response struct {
+		XMLName xml.Name
+	}
+	if err := c.mutatingGet("/enterPairingMode", &response); err != nil {
+		return fmt.Errorf("failed to enter pairing mode: %w", err)
+	}
+	return nil
+}
+
+// ClearPairedList requests removal of Bluetooth pairings through the
+// firmware's state-changing GET endpoint. Callers must perform a device-state
+// readback; HTTP success does not confirm that the physical state changed.
+func (c *Client) ClearPairedList() error {
+	var response struct {
+		XMLName xml.Name
+	}
+	if err := c.mutatingGet("/clearPairedList", &response); err != nil {
+		return fmt.Errorf("failed to clear paired list: %w", err)
+	}
+	return nil
+}
+
 // GetClockDisplay retrieves clock display settings from the /clockDisplay endpoint
 func (c *Client) GetClockDisplay() (*models.ClockDisplay, error) {
 	var clockDisplay models.ClockDisplay
