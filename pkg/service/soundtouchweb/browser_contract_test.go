@@ -173,7 +173,7 @@ func newBrowserContractApp(t *testing.T) *WebApp {
 	pair := &models.Group{
 		ID:             "browser-contract-pair",
 		Name:           contractPairName,
-		MasterDeviceID: "pair-left",
+		MasterDeviceID: "pair-right",
 		Status:         "GROUP_OK",
 		Roles: models.GroupRoles{Roles: []models.GroupRole{
 			{DeviceID: "pair-left", Role: "LEFT", IPAddress: contractPairLeftHost},
@@ -187,10 +187,10 @@ func newBrowserContractApp(t *testing.T) *WebApp {
 	addBrowserContractDevice(t, app, contractUnavailableMemberHost, "unavailable-member", "Gallery Annex", "SoundTouch 10", 17, webtypes.ConnectivityOffline, nil, nil)
 	addBrowserContractDevice(t, app, contractDegradedHost, "degraded-master", contractDegradedName,
 		contractMasterModel, 33, webtypes.ConnectivityOnline, nil, degradedZone)
-	pairMaster := addBrowserContractDevice(t, app, contractPairLeftHost, "pair-left", contractLeftName,
-		contractPairModel, 41, webtypes.ConnectivityOnline, pair, nil)
-	addBrowserContractDevice(t, app, contractPairRightHost, "pair-right", contractRightName,
+	addBrowserContractDevice(t, app, contractPairLeftHost, "pair-left", contractLeftName,
 		contractPairModel, 41, webtypes.ConnectivityOffline, pair, nil)
+	pairMaster := addBrowserContractDevice(t, app, contractPairRightHost, "pair-right", contractRightName,
+		contractPairModel, 41, webtypes.ConnectivityOnline, pair, nil)
 	pairMaster.UpdateStatus(func(status *webtypes.DeviceStatus) {
 		status.Balance = &models.Balance{
 			BalanceAvailable: true,
@@ -344,7 +344,7 @@ func serveBrowserContractControlResponse(w http.ResponseWriter, r *http.Request,
 			"partial":   false,
 			"members": []map[string]interface{}{
 				{"controlId": contractDegradedHost, "actual": value},
-				{"controlId": contractPairLeftHost, "actual": value},
+				{"controlId": contractPairRightHost, "actual": value},
 			},
 		}})
 	case "member-volume":
@@ -515,11 +515,11 @@ func assertBrowserMemberDisclosure(t *testing.T, ctx context.Context) {
 	assertBrowserExpression(t, ctx, "logical and physical count summary", `document.querySelector('.zone-member-details > summary')?.textContent.trim() === '2 members · 3 speakers'`)
 	assertBrowserStrings(t, ctx, "logical identity, model/type, IP, kind, and connectivity", `Array.from(document.querySelectorAll('.zone-logical-member')).map(row => [row.querySelector('.zone-logical-name').childNodes[0].textContent.trim(), ...Array.from(row.querySelectorAll('.zone-logical-metadata > span')).map(node => node.textContent.trim()), row.querySelector('.zone-logical-header > .device-indicator').getAttribute('aria-label'), row.querySelector('.zone-logical-header > .device-indicator').classList.contains('online') ? 'online' : 'not-online'].join('|'))`, []string{
 		strings.Join([]string{contractDegradedName, contractMasterModel, contractDegradedHost, "Speaker", contractDegradedName + ": Online", "online"}, "|"),
-		strings.Join([]string{contractPairName, contractPairModel, contractPairLeftHost, "Stereo pair", contractPairName + ": Online", "online"}, "|"),
+		strings.Join([]string{contractPairName, contractPairModel, contractPairRightHost, "Stereo pair", contractPairName + ": Online", "online"}, "|"),
 	})
 	assertBrowserStrings(t, ctx, "physical LEFT/RIGHT identity, type, full IP, and connectivity", `Array.from(document.querySelectorAll('.zone-physical-member')).map(row => [row.querySelector('.zone-physical-role').textContent.trim(), row.querySelector('.zone-physical-name').textContent.trim(), ...Array.from(row.querySelectorAll('.zone-physical-metadata > span')).map(node => node.textContent.trim()), row.querySelector('.device-indicator').getAttribute('aria-label')].join('|'))`, []string{
-		strings.Join([]string{"LEFT", contractLeftName, contractPairModel, contractPairLeftHost, contractLeftName + ": Online"}, "|"),
-		strings.Join([]string{"RIGHT", contractRightName, contractPairModel, contractPairRightHost, contractRightName + ": Offline"}, "|"),
+		strings.Join([]string{"LEFT", contractLeftName, contractPairModel, contractPairLeftHost, contractLeftName + ": Offline"}, "|"),
+		strings.Join([]string{"RIGHT", contractRightName, contractPairModel, contractPairRightHost, contractRightName + ": Online"}, "|"),
 	})
 	assertBrowserExpression(t, ctx, "logical member volume sliders", `document.querySelectorAll('.zone-member-volume-slider').length === 2`)
 	assertBrowserExpression(t, ctx, "usable member volume sliders", `Array.from(document.querySelectorAll('.zone-member-volume-slider')).every(node => !node.disabled && node.getBoundingClientRect().width >= 120)`)
@@ -650,16 +650,16 @@ func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *
 	dispatchBrowserSliderSequence(t, ctx, memberInput, 43, 46)
 	waitForBrowserControl(t, ctx, memberInput, ".zone-member-volume-control", ".zone-member-volume-value", 46)
 	assertContractControlCalls(t, recorder, "member-volume", []contractControlCall{
-		{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairLeftHost, value: 43},
-		{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairLeftHost, value: 46},
+		{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairRightHost, value: 43},
+		{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairRightHost, value: 46},
 	})
 
 	balanceInput := fmt.Sprintf(`input.stereo-balance-slider[aria-label=%q]`, contractPairName+" balance")
 	dispatchBrowserSliderSequence(t, ctx, balanceInput, -2, 3)
 	waitForBrowserControl(t, ctx, balanceInput, ".stereo-balance-control", ".stereo-balance-value", 3)
 	assertContractControlCalls(t, recorder, "balance", []contractControlCall{
-		{kind: "balance", controlID: contractPairLeftHost, value: -2},
-		{kind: "balance", controlID: contractPairLeftHost, value: 3},
+		{kind: "balance", controlID: contractPairRightHost, value: -2},
+		{kind: "balance", controlID: contractPairRightHost, value: 3},
 	})
 }
 
