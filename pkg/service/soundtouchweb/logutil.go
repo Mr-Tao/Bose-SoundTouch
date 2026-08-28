@@ -56,3 +56,27 @@ func logNowPlayingError(deviceID, source, sourceAccount string) {
 		sanitizeLog(sourceAccount),
 	)
 }
+
+// logZoneVolumePartial retains the per-member reason that is otherwise only
+// returned to the browser. Successful group-volume updates stay quiet.
+func logZoneVolumePartial(result zoneVolumeResult) {
+	if !result.Partial {
+		return
+	}
+
+	failures := make([]string, 0, len(result.Members))
+	for _, member := range result.Members {
+		if member.Error == "" {
+			continue
+		}
+
+		failures = append(failures,
+			sanitizeLog(member.ControlID)+"="+sanitizeLog(member.Error))
+	}
+
+	log.Printf("[zone-volume] partial master=%q requested=%d failures=%q",
+		sanitizeLog(result.MasterDeviceID),
+		result.Requested,
+		strings.Join(failures, "; "),
+	)
+}

@@ -83,6 +83,7 @@ func (app *WebApp) HandleZoneVolume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result.MasterDeviceID = masterDeviceID
+	logZoneVolumePartial(result)
 
 	// A full projected inventory lets every browser reconcile zone-level volume
 	// and any topology change observed during revalidation.
