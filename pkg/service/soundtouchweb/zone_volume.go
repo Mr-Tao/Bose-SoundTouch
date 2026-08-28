@@ -41,7 +41,7 @@ type zoneVolumeTarget struct {
 }
 
 // HandleZoneVolume applies one proportional volume move to a logical zone.
-// The scalar is the highest current physical-member volume; every reachable
+// The scalar is the highest current logical-member volume; every reachable
 // member moves by the same delta, preserving audible offsets except at 0/100
 // clamps. Each write is followed by a device readback and partial failures are
 // returned instead of rolling successful members back.
@@ -134,29 +134,38 @@ func (app *WebApp) revalidateZone(masterDeviceID string) (*models.ZoneInfo, erro
 }
 
 func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVolumeResult, bool) {
-	deviceIDs := zone.GetAllDeviceIDs()
+	projected, ok := projectZoneInfo(zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
+	if !ok {
+		return zoneVolumeResult{Requested: requested}, false
+	}
+
+	members := projected.Members
 	result := zoneVolumeResult{
 		Requested: requested,
-		Members:   make([]zoneVolumeMemberResult, len(deviceIDs)),
+		Members:   make([]zoneVolumeMemberResult, len(members)),
 	}
-	targets := make([]zoneVolumeTarget, 0, len(deviceIDs))
+	targets := make([]zoneVolumeTarget, 0, len(members))
 
 	var targetsMu sync.Mutex
 
 	var readWG sync.WaitGroup
-	readWG.Add(len(deviceIDs))
+	readWG.Add(len(members))
 
-	for index, deviceID := range deviceIDs {
+	for index, projectedMember := range members {
 		go func() {
 			defer readWG.Done()
 
-			member := zoneVolumeMemberResult{DeviceID: deviceID}
-			controlID := app.findIPByHwID(deviceID)
-			member.ControlID = controlID
+			member := zoneVolumeResultForMember(projectedMember)
 
-			conn, ok := app.GetDevice(controlID)
+			conn, ok := app.GetDevice(projectedMember.ControlID)
 			if !ok || conn.Client == nil {
 				member.Error = "speaker unavailable"
+				result.Members[index] = member
+
+				return
+			}
+			if !authoritativeVolumeControl(conn) {
+				member.Error = "stereo pair master unavailable"
 				result.Members[index] = member
 
 				return
@@ -202,7 +211,7 @@ func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVo
 	result.Delta = requested - baseline
 
 	var partial atomic.Bool
-	partial.Store(len(targets) != len(deviceIDs))
+	partial.Store(len(targets) != len(members))
 
 	var writeWG sync.WaitGroup
 	writeWG.Add(len(targets))
@@ -215,37 +224,7 @@ func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVo
 			level := models.ClampVolumeLevel(target.before + result.Delta)
 			member.Target = &level
 
-			if err := target.conn.Client.SetVolume(level); err != nil {
-				appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", err))
-				partial.Store(true)
-			}
-
-			volumeGeneration := target.conn.BeginVolumeRefresh()
-			healthGeneration := target.conn.BeginHTTPPoll()
-
-			volume, err := target.conn.Client.GetVolume()
-			if err != nil {
-				target.conn.CompleteHTTPPoll(healthGeneration, false, time.Now(), nil)
-				appendZoneVolumeError(member, fmt.Sprintf("readback volume: %v", err))
-				partial.Store(true)
-
-				return
-			}
-
-			actual := volume.ActualVolume
-			member.Actual = &actual
-
-			if !target.conn.ApplyPolledVolume(volumeGeneration, volume) {
-				if current := target.conn.Status().Volume; current != nil {
-					actual = current.ActualVolume
-					member.Actual = &actual
-				}
-			}
-
-			target.conn.CompleteHTTPPoll(healthGeneration, true, time.Now(), nil)
-
-			if actual != level {
-				appendZoneVolumeError(member, fmt.Sprintf("readback volume %d does not match target %d", actual, level))
+			if !app.applyVolumeTarget(member, target.conn, level) {
 				partial.Store(true)
 			}
 		}()
@@ -256,6 +235,85 @@ func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVo
 	result.Partial = partial.Load()
 
 	return result, true
+}
+
+func zoneVolumeResultForMember(member zoneMemberView) zoneVolumeMemberResult {
+	result := zoneVolumeMemberResult{
+		DeviceID:  member.HardwareID,
+		ControlID: member.ControlID,
+		Name:      member.Name,
+		Before:    member.ActualVolume,
+	}
+	if result.DeviceID == "" && len(member.DeviceIDs) != 0 {
+		result.DeviceID = member.DeviceIDs[0]
+	}
+
+	return result
+}
+
+// A registered stereo slave is not an independent volume target. If its
+// firmware master is unavailable, fail closed until the logical pair can be
+// projected through that master again.
+func authoritativeVolumeControl(conn *webtypes.DeviceConnection) bool {
+	if conn == nil {
+		return false
+	}
+
+	info := conn.Info()
+	status := conn.Status()
+	if info == nil {
+		return false
+	}
+	if status == nil || status.Group == nil {
+		return true
+	}
+
+	masterDeviceID := strings.TrimSpace(status.Group.MasterDeviceID)
+	return masterDeviceID == "" || masterDeviceID == strings.TrimSpace(info.DeviceID)
+}
+
+func (app *WebApp) applyVolumeTarget(
+	member *zoneVolumeMemberResult,
+	conn *webtypes.DeviceConnection,
+	level int,
+) bool {
+	writeErr := conn.Client.SetVolume(level)
+	volumeGeneration := conn.BeginVolumeRefresh()
+	healthGeneration := conn.BeginHTTPPoll()
+
+	volume, readErr := conn.Client.GetVolume()
+	if readErr != nil {
+		conn.CompleteHTTPPoll(healthGeneration, false, time.Now(), nil)
+		if writeErr != nil {
+			appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
+		}
+		appendZoneVolumeError(member, fmt.Sprintf("readback volume: %v", readErr))
+		return false
+	}
+
+	actual := volume.ActualVolume
+	member.Actual = intPointer(actual)
+	if !conn.ApplyPolledVolume(volumeGeneration, volume) {
+		if current := conn.Status().Volume; current != nil {
+			actual = current.ActualVolume
+			member.Actual = intPointer(actual)
+		}
+	}
+	conn.CompleteHTTPPoll(healthGeneration, true, time.Now(), nil)
+
+	if actual == level {
+		return true
+	}
+	if writeErr != nil {
+		appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
+	}
+	appendZoneVolumeError(member, fmt.Sprintf("readback volume %d does not match target %d", actual, level))
+
+	return false
+}
+
+func intPointer(value int) *int {
+	return &value
 }
 
 func appendZoneVolumeError(member *zoneVolumeMemberResult, message string) {

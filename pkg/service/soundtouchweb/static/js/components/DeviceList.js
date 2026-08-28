@@ -3,12 +3,8 @@ import { api } from '../api.js';
 import { connectivityLabel, connectivityState } from '../devicePresentation.mjs';
 import { createLatestWinsScheduler } from '../latestWinsScheduler.mjs';
 import { clampVolume, maxReadbackActual, partialFailureMessage } from '../zoneVolumeResult.mjs';
-import {
-    balanceControlState,
-    balanceFailureMessage,
-    clampBalance,
-    confirmedBalanceActual,
-} from '../stereoBalanceResult.mjs';
+import { zoneCardPresentation } from '../zonePresentation.mjs';
+import { StereoBalanceControl } from './StereoBalanceControl.js';
 
 const html = htm.bind(h);
 
@@ -161,10 +157,7 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
         queueVolume(event, true);
     }
 
-    const unavailableCount = Math.max(0, zone.memberCount - zone.availableMemberCount);
-    const availabilityLabel = zone.degraded
-        ? `Degraded · ${zone.availableMemberCount}/${zone.memberCount} available`
-        : `${zone.availableMemberCount}/${zone.memberCount} available`;
+    const card = zoneCardPresentation(zone);
 
     return html`
         <section class="device-card zone-card ${zone.degraded ? 'degraded' : ''}"
@@ -172,11 +165,12 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
             <button type="button" class="zone-card-open" onClick=${() => onSelect(controlID)}>
                 ${cardDetails(id, device, showIP, nameID)}
                 <div class="zone-card-summary">
-                    <span class="zone-card-badge">Group · ${zone.memberCount}</span>
-                    <span class="zone-card-availability ${zone.degraded ? 'degraded' : ''}"
-                          title=${unavailableCount > 0 ? `${unavailableCount} unavailable` : availabilityLabel}>
-                        ${availabilityLabel}
-                    </span>
+                    <span class="zone-card-badge" title=${card.availabilityTitle}>${card.groupLabel}</span>
+                    ${card.availabilityLabel ? html`
+                        <span class="zone-card-availability degraded" title=${card.availabilityTitle}>
+                            ${card.availabilityLabel}
+                        </span>
+                    ` : null}
                 </div>
             </button>
             <div class="zone-volume-row">
@@ -200,107 +194,6 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
             ${device.stereoPair ? html`<${StereoBalanceControl} id=${controlID} device=${device} />` : null}
             ${failure ? html`<div class="zone-volume-failure" role="status">${failure}</div>` : null}
         </section>
-    `;
-}
-
-function StereoBalanceControl({ id, device }) {
-    const control = balanceControlState(device);
-    const projectedBalance = control.value;
-    const projectedBalanceRef = useRef(projectedBalance);
-    const controlRef = useRef(control);
-    const draggingRef = useRef(false);
-    const finalizedValueRef = useRef(null);
-    const acceptedSequenceRef = useRef(0);
-    const schedulerRef = useRef(null);
-    const [localBalance, setLocalBalance] = useState(projectedBalance);
-    const [isBusy, setIsBusy] = useState(false);
-    const [failure, setFailure] = useState('');
-    const inputID = `stereo-balance-${id.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
-
-    projectedBalanceRef.current = projectedBalance;
-    controlRef.current = control;
-
-    if (schedulerRef.current === null) {
-        schedulerRef.current = createLatestWinsScheduler({
-            send: level => api.stereoBalance(id, level),
-            onResult(response, metadata) {
-                if (!metadata.isLatest) return;
-
-                const current = controlRef.current;
-                const confirmed = confirmedBalanceActual(
-                    response, metadata.value, current.min, current.max);
-                if (confirmed === null) {
-                    setFailure(balanceFailureMessage(response));
-                    return;
-                }
-
-                acceptedSequenceRef.current = metadata.sequence;
-                setLocalBalance(confirmed);
-                setFailure(balanceFailureMessage(response));
-            },
-            onError(_error, metadata) {
-                if (metadata.isLatest) setFailure('Stereo balance update failed.');
-            },
-            onStateChange(next) {
-                setIsBusy(next.active);
-                if (!next.active && !draggingRef.current &&
-                    acceptedSequenceRef.current !== next.latestSequence) {
-                    setLocalBalance(projectedBalanceRef.current);
-                }
-            },
-        });
-    }
-
-    useEffect(() => () => schedulerRef.current.dispose(), []);
-    useEffect(() => {
-        if (!draggingRef.current && !schedulerRef.current.isActive()) {
-            setLocalBalance(projectedBalance);
-        }
-    }, [projectedBalance, control.min, control.max, control.enabled]);
-
-    function queueBalance(event, force) {
-        const current = controlRef.current;
-        const level = clampBalance(event.currentTarget.value, current.min, current.max);
-        if (!current.enabled || level === null) return;
-        if (!force) finalizedValueRef.current = null;
-        setLocalBalance(level);
-        setFailure('');
-        schedulerRef.current.queue(level, { force });
-    }
-
-    function finishBalance(event) {
-        const current = controlRef.current;
-        const level = clampBalance(event.currentTarget.value, current.min, current.max);
-        draggingRef.current = false;
-        if (!current.enabled || level === null) return;
-        if (finalizedValueRef.current === level) return;
-        finalizedValueRef.current = level;
-        queueBalance(event, true);
-    }
-
-    return html`
-        <div class="stereo-balance-control ${control.enabled ? '' : 'unavailable'}"
-             aria-busy=${isBusy ? 'true' : 'false'} aria-disabled=${control.enabled ? 'false' : 'true'}>
-            <div class="stereo-balance-row">
-                <label class="stereo-balance-label" for=${inputID}>Balance</label>
-                <input id=${inputID} type="range" class="stereo-balance-slider"
-                    min=${control.min} max=${control.max} value=${localBalance}
-                    disabled=${!control.enabled}
-                    onPointerDown=${() => {
-                        draggingRef.current = true;
-                        finalizedValueRef.current = null;
-                    }}
-                    onInput=${event => queueBalance(event, false)}
-                    onPointerUp=${finishBalance}
-                    onPointerCancel=${finishBalance}
-                    onChange=${finishBalance}
-                    onBlur=${finishBalance} />
-                <output class="stereo-balance-value" for=${inputID}>
-                    ${Number.isFinite(localBalance) ? localBalance : '–'}
-                </output>
-            </div>
-            ${failure ? html`<div class="stereo-balance-failure" role="status">${failure}</div>` : null}
-        </div>
     `;
 }
 

@@ -125,9 +125,12 @@ func TestProjectDeviceEntriesCollapsesMasterConfirmedZone(t *testing.T) {
 		},
 	}
 
+	masterEntry := projectionDeviceWithZone("192.0.2.10", "master-id", "Kitchen", true, 20, nil, zone)
+	memberEntry := projectionDeviceWithZone("192.0.2.20", "member-id", "Dining", true, 35, nil, nil)
+	memberEntry.Device.DeviceInfo.Type = "SoundTouch 20"
 	got := projectDeviceEntries([]DeviceEntry{
-		projectionDeviceWithZone("192.0.2.10", "master-id", "Kitchen", true, 20, nil, zone),
-		projectionDeviceWithZone("192.0.2.20", "member-id", "Dining", true, 35, nil, nil),
+		masterEntry,
+		memberEntry,
 		projectionDeviceWithZone("192.0.2.30", "other-id", "Bedroom", true, 10, nil, nil),
 	})
 
@@ -141,6 +144,18 @@ func TestProjectDeviceEntriesCollapsesMasterConfirmedZone(t *testing.T) {
 	}
 	if master.Zone.MemberCount != 2 || master.Zone.AvailableMemberCount != 2 || master.Zone.Degraded {
 		t.Fatalf("unexpected zone availability: %+v", master.Zone)
+	}
+	if master.Zone.PhysicalMemberCount != 2 {
+		t.Fatalf("physical member count = %d, want 2", master.Zone.PhysicalMemberCount)
+	}
+	ordinary := master.Zone.Members[1]
+	if ordinary.Kind != "speaker" || ordinary.Type != "SoundTouch 20" || ordinary.Model != "SoundTouch 20" ||
+		ordinary.ControlID != "192.0.2.20" ||
+		len(ordinary.PhysicalMembers) != 1 || ordinary.PhysicalMembers[0].DeviceID != "member-id" ||
+		ordinary.PhysicalMembers[0].IP != "192.0.2.20" || ordinary.PhysicalMembers[0].Name != "Dining" ||
+		ordinary.PhysicalMembers[0].Type != "SoundTouch 20" || !ordinary.PhysicalMembers[0].Available ||
+		ordinary.PhysicalMembers[0].Connectivity != webtypes.ConnectivityOnline {
+		t.Fatalf("ordinary logical member metadata = %+v", ordinary)
 	}
 	if master.Zone.Volume == nil || *master.Zone.Volume != 35 {
 		t.Fatalf("zone volume = %v, want highest member volume 35", master.Zone.Volume)
@@ -242,21 +257,34 @@ func TestProjectDeviceEntriesFoldsStereoBeforeZone(t *testing.T) {
 		},
 	}
 
-	got := projectDeviceEntries([]DeviceEntry{
-		projectionDeviceWithZone("192.0.2.5", "master-id", "Kitchen", true, 25, nil, zone),
-		projectionDeviceWithZone("192.0.2.10", "left-id", "Living Room", true, 12, group, nil),
-		projectionDeviceWithZone("192.0.2.11", "right-id", "Living Room", true, 12, group, nil),
+	master := projectionDeviceWithZone("192.0.2.5", "master-id", "Kitchen", true, 25, nil, zone)
+	left := projectionDeviceWithZone("192.0.2.10", "left-id", "Living Room", true, 12, group, nil)
+	right := projectionDeviceWithZone("192.0.2.11", "right-id", "Living Room", true, 12, group, nil)
+	left.Device.DeviceInfo.Type = "SoundTouch 10"
+	right.Device.DeviceInfo.Type = "SoundTouch 10"
+	left.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Balance = &models.Balance{TargetBalance: 2, ActualBalance: 1}
 	})
+
+	got := projectDeviceEntries([]DeviceEntry{master, left, right})
 
 	if len(got) != 1 {
 		t.Fatalf("zone with stereo member produced %d cards, want one: %+v", len(got), got)
 	}
 	view := got["192.0.2.5"].Zone
-	if view == nil || view.MemberCount != 2 || len(view.Members) != 2 {
+	if view == nil || view.MemberCount != 2 || view.PhysicalMemberCount != 3 || len(view.Members) != 2 {
 		t.Fatalf("stereo members were not folded before zone projection: %+v", view)
 	}
-	if len(view.Members[1].DeviceIDs) != 2 {
-		t.Fatalf("stereo logical member does not retain both physical IDs: %+v", view.Members[1])
+	pair := view.Members[1]
+	if pair.Kind != "stereoPair" || pair.Type != "SoundTouch 10" || pair.Model != "SoundTouch 10" ||
+		len(pair.DeviceIDs) != 2 || len(pair.PhysicalMembers) != 2 || pair.StereoPair == nil ||
+		pair.Balance == nil || pair.Balance.ActualBalance != 1 || pair.ActualVolume == nil || *pair.ActualVolume != 12 {
+		t.Fatalf("stereo logical member metadata = %+v", pair)
+	}
+	if physical := pair.PhysicalMembers[0]; physical.DeviceID != "left-id" || physical.Role != "LEFT" ||
+		physical.IP != "192.0.2.10" || physical.Name != "Living Room" || physical.Type != "SoundTouch 10" ||
+		!physical.Available || physical.Connectivity != webtypes.ConnectivityOnline {
+		t.Fatalf("stereo physical member metadata = %+v", physical)
 	}
 }
 
@@ -285,7 +313,7 @@ func TestProjectZoneInfoExpandsStereoPairRepresentedByMasterOnly(t *testing.T) {
 	if pair.Name != "Living Room" || pair.ControlID != "192.0.2.10" || pair.IP != "192.0.2.10" ||
 		pair.HardwareID != "left-id" || len(pair.DeviceIDs) != 2 ||
 		pair.DeviceIDs[0] != "left-id" || pair.DeviceIDs[1] != "right-id" ||
-		pair.ActualVolume == nil || *pair.ActualVolume != 18 {
+		pair.ActualVolume == nil || *pair.ActualVolume != 12 {
 		t.Fatalf("stereo zone member = %+v", pair)
 	}
 }

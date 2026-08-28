@@ -1,0 +1,78 @@
+import { zoneMemberPresentation } from './devicePresentation.mjs';
+
+function count(value, fallback = 0) {
+    return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function physicalMembers(zone) {
+    return (zone?.members || []).flatMap(member => member?.physicalMembers || []);
+}
+
+export function zoneCardPresentation(zone) {
+    const members = zone?.members || [];
+    const memberCount = count(zone?.memberCount, members.length);
+    const availableCount = count(
+        zone?.availableMemberCount,
+        members.filter(member => member?.available).length,
+    );
+    const degraded = Boolean(zone?.degraded || availableCount < memberCount);
+    const physical = physicalMembers(zone);
+    const physicalCount = count(zone?.physicalMemberCount, physical.length || memberCount);
+    const availablePhysicalCount = physical.length > 0
+        ? physical.filter(member => member?.available).length
+        : physicalCount;
+
+    let availabilityLabel = '';
+    let availabilityTitle = `All ${memberCount} available`;
+    if (degraded && availableCount < memberCount) {
+        availabilityLabel = `${availableCount}/${memberCount} available`;
+        availabilityTitle = `${memberCount - availableCount} unavailable`;
+    } else if (degraded && availablePhysicalCount < physicalCount) {
+        availabilityLabel = `${availablePhysicalCount}/${physicalCount} speakers available`;
+        availabilityTitle = `${physicalCount - availablePhysicalCount} physical speaker unavailable`;
+    } else if (degraded) {
+        availabilityLabel = 'Degraded';
+        availabilityTitle = 'The speaker topology reports a degraded state';
+    }
+
+    return {
+        groupLabel: `Group · ${memberCount}`,
+        availabilityLabel,
+        availabilityTitle,
+    };
+}
+
+export function zoneMemberCountSummary(logicalCount, physicalCount) {
+    const logical = count(logicalCount);
+    const physical = count(physicalCount, logical);
+    const logicalLabel = `${logical} ${logical === 1 ? 'member' : 'members'}`;
+
+    if (logical === physical) return logicalLabel;
+
+    return `${logicalLabel} · ${physical} ${physical === 1 ? 'speaker' : 'speakers'}`;
+}
+
+export function zoneMemberMetadata(member) {
+    const presentation = zoneMemberPresentation(member);
+    const name = member?.name || member?.controlId || member?.ip || 'Unknown member';
+    const kind = member?.kind === 'stereoPair' ? 'Stereo pair' : 'Speaker';
+
+    return {
+        ...presentation,
+        name,
+        type: member?.type || 'Unknown model',
+        ip: member?.ip || member?.controlId || '',
+        kind,
+        statusAriaLabel: `${name}: ${presentation.label}`,
+        volumeAriaLabel: `${name} volume`,
+    };
+}
+
+export function physicalMemberMetadata(member) {
+    const metadata = zoneMemberMetadata(member);
+
+    return {
+        ...metadata,
+        role: (member?.role || 'Member').toUpperCase(),
+    };
+}

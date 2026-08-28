@@ -1048,7 +1048,7 @@ func TestHandleGetZoneProjectsStereoMasterAsLogicalMember(t *testing.T) {
 	if member.Name != "Living Room" || member.ControlID != "192.0.2.10" ||
 		member.IP != "192.0.2.10" || member.HwID != "left-id" ||
 		len(member.DeviceIDs) != 2 || member.DeviceIDs[0] != "left-id" || member.DeviceIDs[1] != "right-id" ||
-		member.Connectivity != webtypes.ConnectivityStale || member.ActualVolume == nil || *member.ActualVolume != 18 {
+		member.Connectivity != webtypes.ConnectivityStale || member.ActualVolume == nil || *member.ActualVolume != 12 {
 		t.Fatalf("logical stereo member = %+v", member)
 	}
 

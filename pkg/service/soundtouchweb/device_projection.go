@@ -59,6 +59,7 @@ type zoneView struct {
 	MasterDeviceID       string           `json:"masterDeviceId"`
 	MasterControlID      string           `json:"masterControlId"`
 	MemberCount          int              `json:"memberCount"`
+	PhysicalMemberCount  int              `json:"physicalMemberCount"`
 	AvailableMemberCount int              `json:"availableMemberCount"`
 	Degraded             bool             `json:"degraded"`
 	Volume               *int             `json:"volume,omitempty"`
@@ -66,14 +67,30 @@ type zoneView struct {
 }
 
 type zoneMemberView struct {
-	ControlID    string                `json:"controlId,omitempty"`
-	IP           string                `json:"ip,omitempty"`
-	HardwareID   string                `json:"hwId,omitempty"`
-	Name         string                `json:"name,omitempty"`
-	DeviceIDs    []string              `json:"deviceIds"`
+	Kind            string                   `json:"kind"`
+	ControlID       string                   `json:"controlId,omitempty"`
+	IP              string                   `json:"ip,omitempty"`
+	HardwareID      string                   `json:"hwId,omitempty"`
+	Name            string                   `json:"name,omitempty"`
+	Model           string                   `json:"model"`
+	Type            string                   `json:"type"`
+	DeviceIDs       []string                 `json:"deviceIds"`
+	Available       bool                     `json:"available"`
+	Connectivity    webtypes.Connectivity    `json:"connectivity"`
+	ActualVolume    *int                     `json:"actualVolume,omitempty"`
+	PhysicalMembers []zonePhysicalMemberView `json:"physicalMembers"`
+	StereoPair      *stereoPairView          `json:"stereoPair,omitempty"`
+	Balance         *models.Balance          `json:"balance,omitempty"`
+}
+
+type zonePhysicalMemberView struct {
+	DeviceID     string                `json:"deviceId"`
+	Role         string                `json:"role,omitempty"`
+	IP           string                `json:"ip"`
+	Name         string                `json:"name"`
+	Type         string                `json:"type"`
 	Available    bool                  `json:"available"`
 	Connectivity webtypes.Connectivity `json:"connectivity"`
-	ActualVolume *int                  `json:"actualVolume,omitempty"`
 }
 
 // deviceViewSnapshot projects the physical registry into logical control
@@ -278,6 +295,7 @@ func newZoneProjectionCandidate(
 	memberByLogicalID := make(map[string]int)
 	logicalMembers := make([]string, 0, zone.GetTotalDeviceCount())
 	availableCount := 0
+	physicalMemberCount := 0
 	degraded := false
 	groupVolume := 0
 	groupVolumeKnown := false
@@ -304,36 +322,61 @@ func newZoneProjectionCandidate(
 		}
 
 		member := zoneMemberView{
+			Kind:         "speaker",
 			ControlID:    controlID,
 			IP:           controlID,
 			HardwareID:   deviceID,
 			DeviceIDs:    []string{deviceID},
 			Connectivity: webtypes.ConnectivityOffline,
+			PhysicalMembers: []zonePhysicalMemberView{{
+				DeviceID:     deviceID,
+				IP:           zoneMemberIPs[deviceID],
+				Connectivity: webtypes.ConnectivityOffline,
+			}},
 		}
 
 		if view, ok := devices[logicalID]; ok {
 			if view.Info != nil {
 				member.Name = view.Info.Name
+				member.Model = view.Info.Type
+				member.Type = view.Info.Type
 			}
 
 			member.Connectivity = projectedConnectivity(view.Status)
 			member.Available = member.Connectivity != webtypes.ConnectivityOffline
 
 			if view.StereoPair != nil {
+				member.Kind = "stereoPair"
 				member.HardwareID = view.StereoPair.MasterDeviceID
+				member.StereoPair = view.StereoPair
+				if view.Status != nil {
+					member.Balance = view.Status.Balance
+				}
 
 				member.DeviceIDs = member.DeviceIDs[:0]
 				for _, pairMember := range view.StereoPair.Members {
 					member.DeviceIDs = append(member.DeviceIDs, pairMember.DeviceID)
 				}
+				member.PhysicalMembers = physicalZoneMembers(view.StereoPair, byDeviceID)
 
 				if view.StereoPair.Degraded {
 					degraded = true
 				}
+			} else {
+				member.PhysicalMembers = physicalZoneMembers(nil, map[string][]deviceProjectionEntry{
+					deviceID: byDeviceID[deviceID],
+				})
+			}
+
+			if view.Status != nil && view.Status.Volume != nil {
+				volume := view.Status.Volume.ActualVolume
+				member.ActualVolume = &volume
 			}
 		}
 
-		member.ActualVolume = maximumPhysicalVolume(byDeviceID, member.DeviceIDs)
+		if member.ActualVolume == nil && member.Kind != "stereoPair" {
+			member.ActualVolume = maximumPhysicalVolume(byDeviceID, member.DeviceIDs)
+		}
 		if member.ActualVolume != nil {
 			groupVolumeKnown = true
 
@@ -349,6 +392,7 @@ func newZoneProjectionCandidate(
 		}
 
 		members = append(members, member)
+		physicalMemberCount += len(member.PhysicalMembers)
 		if logicalID != "" {
 			memberByLogicalID[logicalID] = len(members) - 1
 			logicalMembers = append(logicalMembers, logicalID)
@@ -371,12 +415,67 @@ func newZoneProjectionCandidate(
 			MasterDeviceID:       zone.Master,
 			MasterControlID:      masterControlID,
 			MemberCount:          len(members),
+			PhysicalMemberCount:  physicalMemberCount,
 			AvailableMemberCount: availableCount,
 			Degraded:             degraded,
 			Volume:               projectedVolume,
 			Members:              members,
 		},
 	}, true
+}
+
+func physicalZoneMembers(
+	pair *stereoPairView,
+	byDeviceID map[string][]deviceProjectionEntry,
+) []zonePhysicalMemberView {
+	if pair == nil {
+		for deviceID := range byDeviceID {
+			return []zonePhysicalMemberView{newZonePhysicalMember(deviceID, "", "", byDeviceID)}
+		}
+
+		return []zonePhysicalMemberView{}
+	}
+
+	members := make([]zonePhysicalMemberView, 0, len(pair.Members))
+	for _, pairMember := range pair.Members {
+		members = append(members, newZonePhysicalMember(
+			pairMember.DeviceID,
+			pairMember.Role,
+			pairMember.IPAddress,
+			byDeviceID,
+		))
+	}
+
+	return members
+}
+
+func newZonePhysicalMember(
+	deviceID string,
+	role string,
+	fallbackIP string,
+	byDeviceID map[string][]deviceProjectionEntry,
+) zonePhysicalMemberView {
+	member := zonePhysicalMemberView{
+		DeviceID:     deviceID,
+		Role:         role,
+		IP:           fallbackIP,
+		Connectivity: webtypes.ConnectivityOffline,
+	}
+
+	entry, ok := uniqueDeviceEntry(byDeviceID, deviceID)
+	if !ok {
+		return member
+	}
+
+	member.IP = entry.ID
+	if entry.Info != nil {
+		member.Name = entry.Info.Name
+		member.Type = entry.Info.Type
+	}
+	member.Connectivity = projectedConnectivity(entry.Status)
+	member.Available = member.Connectivity != webtypes.ConnectivityOffline
+
+	return member
 }
 
 func maximumPhysicalVolume(byDeviceID map[string][]deviceProjectionEntry, deviceIDs []string) *int {

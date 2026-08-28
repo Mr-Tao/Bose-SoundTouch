@@ -24,6 +24,7 @@ type volumeSpeaker struct {
 	zone         string
 	posts        []int
 	ignoreWrites bool
+	postError    bool
 	volumeGets   int
 	onVolumeGet  func(int)
 }
@@ -58,7 +59,12 @@ func newVolumeSpeaker(t *testing.T, initial int, zone string) *volumeSpeaker {
 				speaker.volume = request.Value
 			}
 			speaker.posts = append(speaker.posts, request.Value)
+			postError := speaker.postError
 			speaker.mu.Unlock()
+			if postError {
+				http.Error(w, "write response lost", http.StatusBadGateway)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 		default:
 			http.NotFound(w, r)
@@ -75,6 +81,12 @@ func (speaker *volumeSpeaker) setIgnoreWrites(ignore bool) {
 	speaker.mu.Unlock()
 }
 
+func (speaker *volumeSpeaker) setPostError(postError bool) {
+	speaker.mu.Lock()
+	speaker.postError = postError
+	speaker.mu.Unlock()
+}
+
 func (speaker *volumeSpeaker) setVolumeGetHook(hook func(int)) {
 	speaker.mu.Lock()
 	speaker.onVolumeGet = hook
@@ -86,6 +98,13 @@ func (speaker *volumeSpeaker) values() (int, []int) {
 	defer speaker.mu.Unlock()
 
 	return speaker.volume, append([]int(nil), speaker.posts...)
+}
+
+func (speaker *volumeSpeaker) getCount() int {
+	speaker.mu.Lock()
+	defer speaker.mu.Unlock()
+
+	return speaker.volumeGets
 }
 
 func addVolumeDevice(
@@ -339,5 +358,146 @@ func TestHandleZoneVolumeClearsCacheWhenMasterReportsStandalone(t *testing.T) {
 	conn, _ := app.GetDevice("192.0.2.10")
 	if conn.Status().Zone != nil {
 		t.Fatalf("master-confirmed standalone response did not clear cache: %+v", conn.Status().Zone)
+	}
+}
+
+func TestHandleZoneVolumeCollapsesStereoPairToOneControlTarget(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.5">MASTER</member><member ipaddress="192.0.2.10">LEFT</member><member ipaddress="192.0.2.11">RIGHT</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.5"},
+		{DeviceID: "LEFT", IP: "192.0.2.10"},
+		{DeviceID: "RIGHT", IP: "192.0.2.11"},
+	}}
+	group := &models.Group{
+		ID: "pair", Name: "Living Room", MasterDeviceID: "LEFT", Status: "GROUP_OK",
+		Roles: models.GroupRoles{Roles: []models.GroupRole{
+			{DeviceID: "LEFT", Role: "LEFT", IPAddress: "192.0.2.10"},
+			{DeviceID: "RIGHT", Role: "RIGHT", IPAddress: "192.0.2.11"},
+		}},
+	}
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	left := newVolumeSpeaker(t, 30, "")
+	right := newVolumeSpeaker(t, 80, "")
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.5", "MASTER", "Kitchen", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.10", "LEFT", "Living Room", left, 30, nil)
+	addVolumeDevice(app, "192.0.2.11", "RIGHT", "Living Room", right, 80, nil)
+	for _, controlID := range []string{"192.0.2.10", "192.0.2.11"} {
+		conn, _ := app.GetDevice(controlID)
+		conn.UpdateStatus(func(status *webtypes.DeviceStatus) { status.Group = group })
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.5/zone/volume/40", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.5", "volume": "40"})
+	response := httptest.NewRecorder()
+	app.HandleZoneVolume(response, req)
+
+	var payload struct {
+		Data zoneVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || payload.Data.Partial || payload.Data.Baseline != 30 ||
+		payload.Data.Delta != 10 || len(payload.Data.Members) != 2 {
+		t.Fatalf("logical group result: status=%d data=%+v", response.Code, payload.Data)
+	}
+	if volume, posts := left.values(); volume != 40 || fmt.Sprint(posts) != "[40]" {
+		t.Fatalf("pair master operations: volume=%d posts=%v", volume, posts)
+	}
+	if volume, posts := right.values(); volume != 80 || len(posts) != 0 {
+		t.Fatalf("pair member was controlled separately: volume=%d posts=%v", volume, posts)
+	}
+	if left.getCount() != 2 || right.getCount() != 0 {
+		t.Fatalf("pair reads: control=%d physical member=%d", left.getCount(), right.getCount())
+	}
+}
+
+func TestHandleZoneVolumeAcceptsMatchingReadbackAfterPostError(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">MEMBER</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.10"},
+		{DeviceID: "MEMBER", IP: "192.0.2.20"},
+	}}
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	member := newVolumeSpeaker(t, 35, "")
+	member.setPostError(true)
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Kitchen", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Dining", member, 35, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/zone/volume/40", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "volume": "40"})
+	response := httptest.NewRecorder()
+	app.HandleZoneVolume(response, req)
+
+	var payload struct {
+		Data zoneVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || payload.Data.Partial {
+		t.Fatalf("matching readback was not authoritative: status=%d data=%+v", response.Code, payload.Data)
+	}
+	for _, result := range payload.Data.Members {
+		if result.Actual == nil || result.Target == nil || *result.Actual != *result.Target || result.Error != "" {
+			t.Fatalf("confirmed member result = %+v", result)
+		}
+	}
+}
+
+func TestHandleZoneVolumeRefusesRegisteredStereoSlaveWithoutMaster(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">SLAVE</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.10"},
+		{DeviceID: "SLAVE", IP: "192.0.2.20"},
+	}}
+	group := &models.Group{
+		ID: "pair", Name: "Living Room", MasterDeviceID: "PAIRMASTER", Status: "GROUP_OK",
+		Roles: models.GroupRoles{Roles: []models.GroupRole{
+			{DeviceID: "PAIRMASTER", Role: "LEFT", IPAddress: "192.0.2.99"},
+			{DeviceID: "SLAVE", Role: "RIGHT", IPAddress: "192.0.2.20"},
+		}},
+	}
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	slave := newVolumeSpeaker(t, 30, "")
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Kitchen", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "SLAVE", "Living right", slave, 30, nil)
+	slaveConn, ok := app.GetDevice("192.0.2.20")
+	if !ok {
+		t.Fatal("registered stereo slave missing from fixture")
+	}
+	slaveConn.UpdateStatus(func(status *webtypes.DeviceStatus) { status.Group = group })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/zone/volume/40", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "volume": "40"})
+	response := httptest.NewRecorder()
+	app.HandleZoneVolume(response, req)
+
+	var payload struct {
+		Data zoneVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || !payload.Data.Partial || len(payload.Data.Members) != 2 {
+		t.Fatalf("unsafe slave response: status=%d data=%+v", response.Code, payload.Data)
+	}
+	if _, posts := slave.values(); len(posts) != 0 || slave.getCount() != 0 {
+		t.Fatalf("registered stereo slave was touched: posts=%v gets=%d", posts, slave.getCount())
+	}
+	found := false
+	for _, member := range payload.Data.Members {
+		if member.DeviceID == "SLAVE" {
+			found = strings.Contains(member.Error, "stereo pair master unavailable")
+		}
+	}
+	if !found {
+		t.Fatalf("missing explicit slave failure: %+v", payload.Data.Members)
 	}
 }
