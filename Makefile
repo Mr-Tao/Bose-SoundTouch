@@ -1,4 +1,4 @@
-.PHONY: all build build-cli test test-coverage test-http-client test-http-client-rotate check fmt vet lint clean dev help screenshots build-stockholm-image prepare-stockholm update-static-deps dev-docs dev-docs-tidy hugo
+.PHONY: all build build-cli test test-coverage test-frontend test-browser test-http-client test-http-client-rotate check fmt vet lint clean dev help screenshots build-stockholm-image prepare-stockholm update-static-deps dev-docs dev-docs-tidy hugo
 
 # Load .env if present (simple KEY=VALUE format, no shell quoting)
 -include .env
@@ -146,6 +146,14 @@ test-coverage:
 	$(GOTEST) -v -coverprofile=coverage.out ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
+
+test-frontend:
+	@echo "Running frontend module tests..."
+	node --test pkg/service/soundtouchweb/frontend_test/*.test.mjs
+
+test-browser:
+	@echo "Running player browser contract tests..."
+	$(GOTEST) -tags=browser -run '^TestPlayerBrowserContract$$' -count=1 ./pkg/service/soundtouchweb
 
 check: fmt vet test test-http-client
 
@@ -501,6 +509,8 @@ help:
 	@echo "  build-linux-armv7 - Build for Linux ARMv7 (kernel 3.14+ compatible, CGO_ENABLED=0)"
 	@echo "  test          - Run tests"
 	@echo "  test-coverage - Run tests with coverage report"
+	@echo "  test-frontend - Run frontend module tests with Node.js"
+	@echo "  test-browser  - Run the player browser contract with Chrome/Chromium"
 	@echo "  test-http-client         - Run .http integration tests via Docker Compose"
 	@echo "  test-http-client-rotate  - Archive tests/integration/testdata/ before a fresh run (non-destructive)"
 	@echo "  check         - Run fmt, vet, and tests"
