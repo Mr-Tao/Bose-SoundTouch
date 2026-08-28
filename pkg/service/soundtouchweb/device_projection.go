@@ -321,62 +321,20 @@ func newZoneProjectionCandidate(
 			continue
 		}
 
-		member := zoneMemberView{
-			Kind:         "speaker",
-			ControlID:    controlID,
-			IP:           controlID,
-			HardwareID:   deviceID,
-			DeviceIDs:    []string{deviceID},
-			Connectivity: webtypes.ConnectivityOffline,
-			PhysicalMembers: []zonePhysicalMemberView{{
-				DeviceID:     deviceID,
-				IP:           zoneMemberIPs[deviceID],
-				Connectivity: webtypes.ConnectivityOffline,
-			}},
-		}
-
-		if view, ok := devices[logicalID]; ok {
-			if view.Info != nil {
-				member.Name = view.Info.Name
-				member.Model = view.Info.Type
-				member.Type = view.Info.Type
-			}
-
-			member.Connectivity = projectedConnectivity(view.Status)
-			member.Available = member.Connectivity != webtypes.ConnectivityOffline
-
-			if view.StereoPair != nil {
-				member.Kind = "stereoPair"
-				member.HardwareID = view.StereoPair.MasterDeviceID
-				member.StereoPair = view.StereoPair
-				if view.Status != nil {
-					member.Balance = view.Status.Balance
-				}
-
-				member.DeviceIDs = member.DeviceIDs[:0]
-				for _, pairMember := range view.StereoPair.Members {
-					member.DeviceIDs = append(member.DeviceIDs, pairMember.DeviceID)
-				}
-				member.PhysicalMembers = physicalZoneMembers(view.StereoPair, byDeviceID)
-
-				if view.StereoPair.Degraded {
-					degraded = true
-				}
-			} else {
-				member.PhysicalMembers = physicalZoneMembers(nil, map[string][]deviceProjectionEntry{
-					deviceID: byDeviceID[deviceID],
-				})
-			}
-
-			if view.Status != nil && view.Status.Volume != nil {
-				volume := view.Status.Volume.ActualVolume
-				member.ActualVolume = &volume
-			}
-		}
+		member, memberDegraded := newZoneMember(
+			deviceID,
+			logicalID,
+			controlID,
+			devices,
+			zoneMemberIPs,
+			byDeviceID,
+		)
+		degraded = degraded || memberDegraded
 
 		if member.ActualVolume == nil && member.Kind != "stereoPair" {
 			member.ActualVolume = maximumPhysicalVolume(byDeviceID, member.DeviceIDs)
 		}
+
 		if member.ActualVolume != nil {
 			groupVolumeKnown = true
 
@@ -393,6 +351,7 @@ func newZoneProjectionCandidate(
 
 		members = append(members, member)
 		physicalMemberCount += len(member.PhysicalMembers)
+
 		if logicalID != "" {
 			memberByLogicalID[logicalID] = len(members) - 1
 			logicalMembers = append(logicalMembers, logicalID)
@@ -422,6 +381,72 @@ func newZoneProjectionCandidate(
 			Members:              members,
 		},
 	}, true
+}
+
+func newZoneMember(
+	deviceID string,
+	logicalID string,
+	controlID string,
+	devices map[string]deviceView,
+	zoneMemberIPs map[string]string,
+	byDeviceID map[string][]deviceProjectionEntry,
+) (zoneMemberView, bool) {
+	member := zoneMemberView{
+		Kind:         "speaker",
+		ControlID:    controlID,
+		IP:           controlID,
+		HardwareID:   deviceID,
+		DeviceIDs:    []string{deviceID},
+		Connectivity: webtypes.ConnectivityOffline,
+		PhysicalMembers: []zonePhysicalMemberView{{
+			DeviceID:     deviceID,
+			IP:           zoneMemberIPs[deviceID],
+			Connectivity: webtypes.ConnectivityOffline,
+		}},
+	}
+
+	view, ok := devices[logicalID]
+	if !ok {
+		return member, false
+	}
+
+	if view.Info != nil {
+		member.Name = view.Info.Name
+		member.Model = view.Info.Type
+		member.Type = view.Info.Type
+	}
+
+	member.Connectivity = projectedConnectivity(view.Status)
+	member.Available = member.Connectivity != webtypes.ConnectivityOffline
+
+	if view.StereoPair != nil {
+		member.Kind = "stereoPair"
+		member.HardwareID = view.StereoPair.MasterDeviceID
+		member.StereoPair = view.StereoPair
+
+		if view.Status != nil {
+			member.Balance = view.Status.Balance
+		}
+
+		member.DeviceIDs = member.DeviceIDs[:0]
+
+		for _, pairMember := range view.StereoPair.Members {
+			member.DeviceIDs = append(member.DeviceIDs, pairMember.DeviceID)
+		}
+
+		member.PhysicalMembers = physicalZoneMembers(view.StereoPair, byDeviceID)
+	} else {
+		member.PhysicalMembers = physicalZoneMembers(nil, map[string][]deviceProjectionEntry{
+			deviceID: byDeviceID[deviceID],
+		})
+	}
+
+	if view.Status != nil && view.Status.Volume != nil {
+		volume := view.Status.Volume.ActualVolume
+		member.ActualVolume = &volume
+	}
+
+	return member, view.StereoPair != nil && view.StereoPair.Degraded
 }
 
 func physicalZoneMembers(
@@ -472,6 +497,7 @@ func newZonePhysicalMember(
 		member.Name = entry.Info.Name
 		member.Type = entry.Info.Type
 	}
+
 	member.Connectivity = projectedConnectivity(entry.Status)
 	member.Available = member.Connectivity != webtypes.ConnectivityOffline
 

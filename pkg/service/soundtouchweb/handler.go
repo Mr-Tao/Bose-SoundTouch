@@ -1004,16 +1004,17 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 	projection, projected := projectZoneInfo(zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
 	if projected {
 		masterIP = projection.MasterControlID
-		for _, member := range projection.Members {
+		for index := range projection.Members {
+			member := &projection.Members[index]
 			if member.ControlID == projection.MasterControlID {
-				master := member
+				master := *member
 				masterMember = &master
 				masterName = member.Name
 
 				continue
 			}
 
-			members = append(members, member)
+			members = append(members, *member)
 		}
 	} else {
 		for _, m := range zone.Members {

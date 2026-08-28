@@ -151,10 +151,11 @@ func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVo
 	var readWG sync.WaitGroup
 	readWG.Add(len(members))
 
-	for index, projectedMember := range members {
+	for index := range members {
 		go func() {
 			defer readWG.Done()
 
+			projectedMember := &members[index]
 			member := zoneVolumeResultForMember(projectedMember)
 
 			conn, ok := app.GetDevice(projectedMember.ControlID)
@@ -164,6 +165,7 @@ func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVo
 
 				return
 			}
+
 			if !authoritativeVolumeControl(conn) {
 				member.Error = "stereo pair master unavailable"
 				result.Members[index] = member
@@ -237,7 +239,7 @@ func (app *WebApp) applyZoneVolume(zone *models.ZoneInfo, requested int) (zoneVo
 	return result, true
 }
 
-func zoneVolumeResultForMember(member zoneMemberView) zoneVolumeMemberResult {
+func zoneVolumeResultForMember(member *zoneMemberView) zoneVolumeMemberResult {
 	result := zoneVolumeMemberResult{
 		DeviceID:  member.HardwareID,
 		ControlID: member.ControlID,
@@ -261,14 +263,17 @@ func authoritativeVolumeControl(conn *webtypes.DeviceConnection) bool {
 
 	info := conn.Info()
 	status := conn.Status()
+
 	if info == nil {
 		return false
 	}
+
 	if status == nil || status.Group == nil {
 		return true
 	}
 
 	masterDeviceID := strings.TrimSpace(status.Group.MasterDeviceID)
+
 	return masterDeviceID == "" || masterDeviceID == strings.TrimSpace(info.DeviceID)
 }
 
@@ -284,29 +289,36 @@ func (app *WebApp) applyVolumeTarget(
 	volume, readErr := conn.Client.GetVolume()
 	if readErr != nil {
 		conn.CompleteHTTPPoll(healthGeneration, false, time.Now(), nil)
+
 		if writeErr != nil {
 			appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
 		}
+
 		appendZoneVolumeError(member, fmt.Sprintf("readback volume: %v", readErr))
+
 		return false
 	}
 
 	actual := volume.ActualVolume
 	member.Actual = intPointer(actual)
+
 	if !conn.ApplyPolledVolume(volumeGeneration, volume) {
 		if current := conn.Status().Volume; current != nil {
 			actual = current.ActualVolume
 			member.Actual = intPointer(actual)
 		}
 	}
+
 	conn.CompleteHTTPPoll(healthGeneration, true, time.Now(), nil)
 
 	if actual == level {
 		return true
 	}
+
 	if writeErr != nil {
 		appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
 	}
+
 	appendZoneVolumeError(member, fmt.Sprintf("readback volume %d does not match target %d", actual, level))
 
 	return false

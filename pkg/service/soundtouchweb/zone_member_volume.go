@@ -35,6 +35,7 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 		app.sendError(w, "Device not found", http.StatusNotFound)
 		return
 	}
+
 	if initialMaster.Zone == nil {
 		app.sendError(w, "Device is not a logical zone master", http.StatusConflict)
 		return
@@ -72,11 +73,13 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 	// Capture once more immediately before the write. Group events can change a
 	// stereo member while the authoritative zone refresh is in flight.
 	currentProjection, projected := projectZoneInfo(zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
+
 	currentMember, current := findLogicalZoneMember(currentProjection, memberID)
 	if !projected || !current || !sameLogicalZoneMember(member, currentMember) {
 		app.sendError(w, "Zone member topology changed before volume update", http.StatusConflict)
 		return
 	}
+
 	member = currentMember
 
 	control, ok := app.GetDevice(member.ControlID)
@@ -85,14 +88,17 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 		app.sendError(w, "Zone member control target is unavailable", http.StatusConflict)
 		return
 	}
+
 	if !authoritativeVolumeControl(control) {
 		app.sendError(w, "Stereo pair master is unavailable", http.StatusConflict)
 		return
 	}
+
 	result := app.applyZoneMemberVolume(control, member, requested)
 	app.BroadcastDeviceList()
 
 	w.Header().Set("Content-Type", "application/json")
+
 	if err := json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true, Data: result}); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
@@ -104,9 +110,11 @@ func findLogicalZoneMember(zone *zoneView, memberID string) (zoneMemberView, boo
 	}
 
 	memberID = strings.TrimSpace(memberID)
-	for _, member := range zone.Members {
+
+	for index := range zone.Members {
+		member := &zone.Members[index]
 		if member.ControlID == memberID || member.HardwareID == memberID {
-			return member, true
+			return *member, true
 		}
 	}
 
@@ -137,7 +145,7 @@ func (app *WebApp) applyZoneMemberVolume(
 	result := zoneMemberVolumeResult{
 		Requested: requested,
 		ControlID: member.ControlID,
-		Members:   []zoneVolumeMemberResult{zoneVolumeResultForMember(member)},
+		Members:   []zoneVolumeMemberResult{zoneVolumeResultForMember(&member)},
 	}
 	result.Members[0].Target = intPointer(requested)
 	result.Partial = !app.applyVolumeTarget(&result.Members[0], control, requested)
