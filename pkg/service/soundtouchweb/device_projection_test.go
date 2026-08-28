@@ -110,13 +110,35 @@ func TestProjectDeviceEntriesShowsDegradedPairWhenMemberIsMissing(t *testing.T) 
 		projectionDevice("192.0.2.10", "left-id", "Living Room", true, testStereoGroup()),
 	})
 
-	pair := got["192.0.2.10"].StereoPair
+	view := got["192.0.2.10"]
+	pair := view.StereoPair
 	if pair == nil {
 		t.Fatal("connected master should remain a logical pair when its member is unavailable")
 	}
 
 	if pair.AvailableMemberCount != 1 || !pair.Degraded {
 		t.Errorf("missing member not reflected as degraded: %+v", pair)
+	}
+	if targets := view.DeviceSettingsTargets; len(targets) != 2 ||
+		targets[0].Role != "LEFT" || targets[0].ControlID != "192.0.2.10" ||
+		targets[1].Role != "RIGHT" || targets[1].ControlID != "192.0.2.11" ||
+		targets[1].Connectivity != webtypes.ConnectivityOffline {
+		t.Fatalf("degraded pair settings targets = %+v, want both physical roles", targets)
+	}
+}
+
+func TestProjectDeviceEntriesExposesOneSettingsTargetForOrdinarySpeaker(t *testing.T) {
+	view := projectDeviceEntries([]DeviceEntry{
+		projectionDevice("kitchen.local", "speaker-id", "Kitchen", true, nil),
+	})["kitchen.local"]
+
+	if target := view.DeviceSettingsTarget; target == nil || target.ControlID != "kitchen.local" ||
+		target.DeviceID != "speaker-id" {
+		t.Fatalf("ordinary speaker compatibility target = %+v", target)
+	}
+	if targets := view.DeviceSettingsTargets; len(targets) != 1 ||
+		targets[0].ControlID != "kitchen.local" || targets[0].DeviceID != "speaker-id" || targets[0].Role != "" {
+		t.Fatalf("ordinary speaker settings targets = %+v, want one physical target", targets)
 	}
 }
 
@@ -520,9 +542,14 @@ func TestLogicalStereoProjectionPreservesMasterBassCapabilities(t *testing.T) {
 		t.Fatalf("logical stereo projection lost master bass capabilities: %+v", view)
 	}
 	if target := view.DeviceSettingsTarget; target == nil || target.ControlID != "192.0.2.10" ||
-		target.DeviceID != "left-id" || target.Name != "Living Room" ||
+		target.DeviceID != "left-id" || target.Name != "Living Room" || target.Role != "LEFT" ||
 		target.BassRevision != 7 || target.BassCapabilities == nil || target.BassCapabilities.BassMax != 0 {
 		t.Fatalf("logical stereo projection lost physical settings target: %+v", target)
+	}
+	if targets := view.DeviceSettingsTargets; len(targets) != 2 ||
+		targets[0].Role != "LEFT" || targets[0].ControlID != "192.0.2.10" || targets[0].DeviceID != "left-id" ||
+		targets[1].Role != "RIGHT" || targets[1].ControlID != "192.0.2.11" || targets[1].DeviceID != "right-id" {
+		t.Fatalf("logical stereo settings targets are not ordered LEFT then RIGHT: %+v", targets)
 	}
 }
 
@@ -530,6 +557,7 @@ func TestDeviceSettingsTargetFollowsRightRoleFirmwareMasterIntoZone(t *testing.T
 	group := testStereoGroup()
 	group.Name = "Living pair"
 	group.MasterDeviceID = "right-id"
+	group.Roles.Roles[0], group.Roles.Roles[1] = group.Roles.Roles[1], group.Roles.Roles[0]
 	zone := &models.ZoneInfo{
 		Master: "zone-master",
 		Members: []models.Member{
@@ -551,16 +579,23 @@ func TestDeviceSettingsTargetFollowsRightRoleFirmwareMasterIntoZone(t *testing.T
 	})
 	master := projectionDeviceWithZone("192.0.2.5", "zone-master", "Kitchen", true, 25, nil, zone)
 
-	got := projectDeviceEntries([]DeviceEntry{master, left, right})
+	got := projectDeviceEntries([]DeviceEntry{master, right, left})
 	view := got["192.0.2.5"].Zone
 	if view == nil || len(view.Members) != 2 {
 		t.Fatalf("zone projection missing logical stereo member: %+v", got)
 	}
 	target := view.Members[1].DeviceSettingsTarget
 	if target == nil || target.ControlID != "192.0.2.11" || target.DeviceID != "right-id" ||
-		target.Name != "Right physical" || target.Bass == nil || target.Bass.ActualBass != -3 ||
+		target.Name != "Right physical" || target.Role != "RIGHT" || target.Bass == nil || target.Bass.ActualBass != -3 ||
 		target.BassRevision != 17 || view.Members[1].BalanceRevision != 29 {
 		t.Fatalf("zone stereo settings target did not follow RIGHT firmware master: %+v", target)
+	}
+	targets := view.Members[1].DeviceSettingsTargets
+	if len(targets) != 2 ||
+		targets[0].Role != "LEFT" || targets[0].ControlID != "192.0.2.10" || targets[0].DeviceID != "left-id" ||
+		targets[1].Role != "RIGHT" || targets[1].ControlID != "192.0.2.11" || targets[1].DeviceID != "right-id" ||
+		targets[1].Bass == nil || targets[1].Bass.ActualBass != -3 {
+		t.Fatalf("RIGHT-master stereo settings targets are not ordered LEFT then RIGHT: %+v", targets)
 	}
 }
 
@@ -589,6 +624,10 @@ func TestZoneMemberDeviceSettingsTargetDoesNotInheritZoneMasterBass(t *testing.T
 	if target == nil || target.ControlID != "192.0.2.20" || target.Name != "Room" ||
 		target.Bass == nil || target.Bass.ActualBass != -2 {
 		t.Fatalf("ordinary member inherited the wrong settings target: %+v", target)
+	}
+	if targets := view.Members[1].DeviceSettingsTargets; len(targets) != 1 ||
+		targets[0].ControlID != "192.0.2.20" || targets[0].DeviceID != "member-id" || targets[0].Role != "" {
+		t.Fatalf("ordinary member settings targets = %+v, want one physical target", targets)
 	}
 }
 

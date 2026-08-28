@@ -6,11 +6,17 @@ const html = htm.bind(h);
 
 export function MemberSettings({ controlId, member, fallbackName = '' }) {
     const [open, setOpen] = useState(false);
-    const deviceTarget = member?.deviceSettingsTarget;
+    const projectedTargets = Array.isArray(member?.deviceSettingsTargets)
+        ? member.deviceSettingsTargets.filter(target => target?.controlId)
+        : [];
+    const deviceTargets = projectedTargets.length > 0
+        ? projectedTargets
+        : (member?.deviceSettingsTarget?.controlId ? [member.deviceSettingsTarget] : []);
+    const multipleDeviceTargets = deviceTargets.length > 1;
     const soundAvailable = hasSoundSettings(controlId, null, member);
     const targetName = String(member?.name || fallbackName || '').trim();
 
-    if (!soundAvailable && !deviceTarget?.controlId) return null;
+    if (!soundAvailable && deviceTargets.length === 0) return null;
 
     return html`
         <details
@@ -25,14 +31,17 @@ export function MemberSettings({ controlId, member, fallbackName = '' }) {
                 ${soundAvailable ? html`
                     <${SoundSettings} controlId=${controlId} member=${member} embedded=${true} />
                 ` : null}
-                ${deviceTarget?.controlId ? html`
+                ${deviceTargets.map(deviceTarget => html`
                     <${Settings}
+                        key=${deviceTarget.deviceId || deviceTarget.controlId}
                         deviceId=${deviceTarget.controlId}
                         targetName=${deviceTarget.name || fallbackName}
+                        targetRole=${deviceTarget.role || ''}
                         embedded=${true}
-                        active=${open}
+                        embeddedCollapsible=${multipleDeviceTargets}
+                        active=${open && !multipleDeviceTargets}
                     />
-                ` : null}
+                `)}
             </div>
         </details>
     `;

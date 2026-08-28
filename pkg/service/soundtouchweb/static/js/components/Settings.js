@@ -120,7 +120,14 @@ function statusLabel(value) {
     return value ? String(value).replace(/^NETWORK_/, '').replace(/_/g, ' ').toLowerCase() : '';
 }
 
-export function Settings({ deviceId, targetName = '', embedded = false, active = false }) {
+export function Settings({
+    deviceId,
+    targetName = '',
+    targetRole = '',
+    embedded = false,
+    embeddedCollapsible = false,
+    active = false,
+}) {
     const [snapshot, setSnapshot] = useState(null);
     const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState('');
@@ -167,8 +174,8 @@ export function Settings({ deviceId, targetName = '', embedded = false, active =
     }
 
     useEffect(() => {
-        if (embedded && active && !snapshot) load();
-    }, [embedded, active, deviceId, snapshot]);
+        if (embedded && !embeddedCollapsible && active && !snapshot) load();
+    }, [embedded, embeddedCollapsible, active, deviceId, snapshot]);
 
     async function mutate(section, action, fallback) {
         if (busy) return;
@@ -211,16 +218,31 @@ export function Settings({ deviceId, targetName = '', embedded = false, active =
         mutate('clock', () => api.setClockDisplay(deviceId, patch), fallback);
     }
 
-    const container = embedded ? 'section' : 'details';
+    const collapsible = !embedded || embeddedCollapsible;
+    const container = collapsible ? 'details' : 'section';
     const className = embedded
         ? 'member-settings-group device-settings-group'
         : 'settings-section';
     const target = String(targetName || '').trim();
+    const role = String(targetRole || '').trim().toUpperCase();
+    const title = target ? `Device · ${target}` : 'Device';
 
     return html`
-        <${container} class=${className} onToggle=${embedded ? undefined : onToggle}>
-            ${embedded ? html`
-                <h3 class="member-settings-heading">${target ? `Device · ${target}` : 'Device'}</h3>
+        <${container}
+            class=${`${className}${embeddedCollapsible ? ' device-settings-disclosure' : ''}`}
+            onToggle=${collapsible ? onToggle : undefined}
+        >
+            ${embeddedCollapsible ? html`
+                <summary
+                    class="settings-summary device-settings-summary"
+                    aria-label=${`${title} settings${role ? ` (${role})` : ''}`}
+                >
+                    <span class="member-settings-heading">${title}</span>
+                    ${role ? html`<span class="device-settings-role">${role}</span>` : null}
+                    <span class="settings-chevron" aria-hidden="true"></span>
+                </summary>
+            ` : embedded ? html`
+                <h3 class="member-settings-heading">${title}</h3>
             ` : html`<summary class="settings-summary">
                 <span class="section-title">${deviceSettingsTitle(targetName)}</span>
                 <span class="settings-chevron" aria-hidden="true"></span>

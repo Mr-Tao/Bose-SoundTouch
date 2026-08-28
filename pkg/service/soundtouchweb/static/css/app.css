@@ -516,7 +516,8 @@ img { display: block; max-width: 100%; }
 }
 .settings-section[open] .settings-chevron,
 .sound-settings-section[open] .settings-chevron,
-.member-settings-section[open] .settings-chevron { transform: rotate(225deg); }
+.member-settings-section[open] > .settings-summary .settings-chevron,
+.device-settings-disclosure[open] > .settings-summary .settings-chevron { transform: rotate(225deg); }
 .member-settings-content {
     min-width: 0;
     margin: .15rem 0 0 .25rem;
@@ -536,6 +537,18 @@ img { display: block; max-width: 100%; }
     font-size: .82rem;
     font-weight: 600;
     letter-spacing: 0;
+}
+.device-settings-disclosure { padding: .35rem 0; }
+.device-settings-summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: .65rem;
+}
+.device-settings-summary .member-settings-heading { margin: 0; }
+.device-settings-role {
+    color: var(--text-dim);
+    font-size: .72rem;
+    font-weight: 600;
 }
 .settings-content { padding-top: .25rem; }
 .sound-settings-content { padding-top: .25rem; }

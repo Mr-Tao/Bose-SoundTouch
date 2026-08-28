@@ -732,6 +732,7 @@ func assertBrowserMemberDisclosure(t *testing.T, ctx context.Context) {
 func assertBrowserMemberSettingsCollapsed(t *testing.T, ctx context.Context) {
 	t.Helper()
 
+	ordinaryMember := ".zone-logical-member:nth-child(1)"
 	pairMember := ".zone-logical-member:nth-child(2)"
 	assertBrowserExpression(t, ctx, "zone root has no implicit member settings", `document.querySelector('.device-detail > .member-settings-section') === null`)
 	assertBrowserExpression(t, ctx, "every logical member owns one collapsed settings disclosure", `Array.from(document.querySelectorAll('.zone-logical-member')).every(row => {
@@ -747,7 +748,17 @@ func assertBrowserMemberSettingsCollapsed(t *testing.T, ctx context.Context) {
 	assertBrowserExpression(t, ctx, "device settings stay lazy while collapsed", `document.querySelectorAll('.member-settings-section .settings-loading, .member-settings-section .settings-load-error').length === 0`)
 	assertBrowserExpression(t, ctx, "collapsed member settings do not request physical device settings", `performance.getEntriesByType('resource').every(entry => !new URL(entry.name).pathname.includes('/settings/'))`)
 	assertBrowserExpression(t, ctx, "old prominent acoustic controls are absent", `document.querySelectorAll('.device-card .stereo-balance-slider, .device-card .bass-row, .controls .stereo-balance-slider, .controls .bass-row').length === 0`)
-	assertBrowserExpression(t, ctx, "device section identifies the physical pair master", fmt.Sprintf(`document.querySelector(%q)?.textContent.trim() === %q`, pairMember+" > .member-settings-section .device-settings-group > .member-settings-heading", "Device · "+contractRightName))
+	assertBrowserExpression(t, ctx, "ordinary member keeps one direct device section", fmt.Sprintf(`document.querySelectorAll(%q).length === 0 && document.querySelector(%q)?.textContent.trim() === %q`, ordinaryMember+" > .member-settings-section .device-settings-disclosure", ordinaryMember+" > .member-settings-section .device-settings-group > .member-settings-heading", "Device · "+contractDegradedName))
+	assertBrowserStrings(t, ctx, "pair device sections identify both physical targets", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(node => node.textContent.trim())`, pairMember+" > .member-settings-section .device-settings-disclosure > .device-settings-summary > .member-settings-heading"), []string{
+		"Device · " + contractLeftName,
+		"Device · " + contractRightName,
+	})
+	assertBrowserStrings(t, ctx, "pair device sections retain deterministic roles", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(node => node.textContent.trim())`, pairMember+" > .member-settings-section .device-settings-disclosure > .device-settings-summary > .device-settings-role"), []string{"LEFT", "RIGHT"})
+	assertBrowserStrings(t, ctx, "pair device sections have unique accessible targets", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(node => node.getAttribute('aria-label'))`, pairMember+" > .member-settings-section .device-settings-disclosure > .device-settings-summary"), []string{
+		"Device · " + contractLeftName + " settings (LEFT)",
+		"Device · " + contractRightName + " settings (RIGHT)",
+	})
+	assertBrowserExpression(t, ctx, "pair device sections are independently collapsed", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).length === 2 && Array.from(document.querySelectorAll(%q)).every(node => !node.open)`, pairMember+" > .member-settings-section .device-settings-disclosure", pairMember+" > .member-settings-section .device-settings-disclosure"))
 }
 
 func openBrowserMemberSettings(t *testing.T, ctx context.Context) {
@@ -757,9 +768,17 @@ func openBrowserMemberSettings(t *testing.T, ctx context.Context) {
 	if err := chromedp.Run(ctx,
 		chromedp.Click(section+" > .settings-summary", chromedp.ByQuery),
 		chromedp.WaitVisible(section+" .sound-settings-group .stepped-setting-controls", chromedp.ByQuery),
-		chromedp.Poll(fmt.Sprintf(`performance.getEntriesByType('resource').filter(entry => new URL(entry.name).pathname === %q).length === 1`, "/api/control/devices/"+contractPairRightHost+"/settings/"), nil),
 	); err != nil {
 		t.Fatalf("open pair member settings: %v", err)
+	}
+	assertBrowserExpression(t, ctx, "opening member settings keeps physical device settings lazy", `performance.getEntriesByType('resource').every(entry => !new URL(entry.name).pathname.includes('/settings/'))`)
+	if err := chromedp.Run(ctx,
+		chromedp.Click(section+" .device-settings-disclosure:nth-of-type(1) > .device-settings-summary", chromedp.ByQuery),
+		chromedp.Poll(fmt.Sprintf(`performance.getEntriesByType('resource').filter(entry => new URL(entry.name).pathname === %q).length === 1`, "/api/control/devices/"+contractPairLeftHost+"/settings/"), nil),
+		chromedp.Click(section+" .device-settings-disclosure:nth-of-type(2) > .device-settings-summary", chromedp.ByQuery),
+		chromedp.Poll(fmt.Sprintf(`performance.getEntriesByType('resource').filter(entry => new URL(entry.name).pathname === %q).length === 1`, "/api/control/devices/"+contractPairRightHost+"/settings/"), nil),
+	); err != nil {
+		t.Fatalf("open physical pair device settings: %v", err)
 	}
 }
 
@@ -769,10 +788,12 @@ func assertBrowserMemberSettings(t *testing.T, ctx context.Context) {
 	section := ".zone-logical-member:nth-child(2) > .member-settings-section"
 	soundSection := section + " > .member-settings-content > .sound-settings-group"
 	assertBrowserExpression(t, ctx, "member settings opened", fmt.Sprintf(`document.querySelector(%q)?.open === true`, section))
-	assertBrowserStrings(t, ctx, "subordinate member settings headings", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(node => node.textContent.trim())`, section+" > .member-settings-content > .member-settings-group > .member-settings-heading"), []string{
-		"Sound",
+	assertBrowserStrings(t, ctx, "subordinate sound heading", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(node => node.textContent.trim())`, section+" > .member-settings-content > .sound-settings-group > .member-settings-heading"), []string{"Sound"})
+	assertBrowserStrings(t, ctx, "subordinate physical device headings", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(node => node.textContent.trim())`, section+" > .member-settings-content > .device-settings-disclosure > .device-settings-summary > .member-settings-heading"), []string{
+		"Device · " + contractLeftName,
 		"Device · " + contractRightName,
 	})
+	assertBrowserExpression(t, ctx, "both physical device settings opened independently", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).length === 2 && Array.from(document.querySelectorAll(%q)).every(node => node.open)`, section+" > .member-settings-content > .device-settings-disclosure", section+" > .member-settings-content > .device-settings-disclosure"))
 	assertBrowserExpression(t, ctx, "acoustic controls stay out of the physical device section", fmt.Sprintf(`document.querySelectorAll(%q).length === 0`, section+" .device-settings-group .stepped-setting"))
 	assertBrowserStrings(t, ctx, "scoped acoustic settings", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(control => [control.querySelector('.stepped-setting-label').textContent.trim(), control.querySelector('.stepped-setting-scope').textContent.trim(), control.querySelector('.stepped-setting-value').textContent.trim(), control.querySelector('.stepped-setting-footer span').textContent.trim()].join('|'))`, soundSection+" .stepped-setting"), []string{
 		strings.Join([]string{"Bass reduction", "Speaker · " + contractRightName, "-3", "Default 0"}, "|"),
