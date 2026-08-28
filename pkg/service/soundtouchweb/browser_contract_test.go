@@ -131,8 +131,6 @@ func TestPlayerBrowserContract(t *testing.T) {
 			}
 			assertBrowserExpression(t, runContext, "member disclosure initially closed", `document.querySelector('.zone-member-details')?.open === false`)
 			assertNoHorizontalDocumentOverflow(t, runContext, "closed member disclosure")
-			exerciseDetailGroupVolumeControl(t, runContext, controls)
-
 			if err := chromedp.Run(runContext,
 				chromedp.Click(".zone-member-details > summary", chromedp.ByQuery),
 				chromedp.WaitVisible(".zone-physical-members", chromedp.ByQuery),
@@ -142,6 +140,7 @@ func TestPlayerBrowserContract(t *testing.T) {
 			assertBrowserMemberDisclosure(t, runContext)
 			assertBrowserDetailLayout(t, runContext)
 			assertNoHorizontalDocumentOverflow(t, runContext, "open member disclosure")
+			exerciseDetailGroupVolumeControl(t, runContext, controls, app)
 			exerciseLogicalMemberControls(t, runContext, controls)
 		})
 	}
@@ -284,7 +283,7 @@ func newBrowserContractServer(t *testing.T, app *WebApp) (*httptest.Server, *con
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case serveBrowserContractControlResponse(w, r, controls):
+		case serveBrowserContractControlResponse(w, r, controls, app):
 		case r.URL.Path == "/api/announcements":
 			writeBrowserContractJSON(w, map[string]interface{}{"announcements": []interface{}{}})
 		case strings.HasSuffix(r.URL.Path, "/zone") || strings.HasSuffix(r.URL.Path, "/zone/"):
@@ -319,7 +318,12 @@ func newBrowserContractServer(t *testing.T, app *WebApp) (*httptest.Server, *con
 	return server, controls
 }
 
-func serveBrowserContractControlResponse(w http.ResponseWriter, r *http.Request, recorder *contractControlRecorder) bool {
+func serveBrowserContractControlResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	recorder *contractControlRecorder,
+	app *WebApp,
+) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
@@ -353,13 +357,12 @@ func serveBrowserContractControlResponse(w http.ResponseWriter, r *http.Request,
 
 	switch call.kind {
 	case "group-volume":
+		members := applyBrowserContractGroupVolume(app, controlID, value)
+		app.BroadcastDeviceList()
 		writeBrowserContractJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
 			"requested": value,
 			"partial":   false,
-			"members": []map[string]interface{}{
-				{"controlId": contractDegradedHost, "actual": value},
-				{"controlId": contractPairRightHost, "actual": value},
-			},
+			"members":   members,
 		}})
 	case "member-volume":
 		partial := value == 47
@@ -392,6 +395,45 @@ func serveBrowserContractControlResponse(w http.ResponseWriter, r *http.Request,
 	}
 
 	return true
+}
+
+func applyBrowserContractGroupVolume(app *WebApp, controlID string, requested int) []map[string]interface{} {
+	view := app.deviceViewSnapshot()[controlID]
+	if view.Zone == nil {
+		return nil
+	}
+
+	baseline := 0
+	for _, member := range view.Zone.Members {
+		if member.ActualVolume != nil && *member.ActualVolume > baseline {
+			baseline = *member.ActualVolume
+		}
+	}
+
+	delta := requested - baseline
+	members := make([]map[string]interface{}, 0, len(view.Zone.Members))
+
+	for _, member := range view.Zone.Members {
+		if member.ActualVolume == nil {
+			continue
+		}
+
+		actual := models.ClampVolumeLevel(*member.ActualVolume + delta)
+		connection, ok := app.GetDevice(member.ControlID)
+		if !ok {
+			continue
+		}
+
+		connection.UpdateStatus(func(status *webtypes.DeviceStatus) {
+			status.Volume = &models.Volume{TargetVolume: actual, ActualVolume: actual}
+		})
+		members = append(members, map[string]interface{}{
+			"controlId": member.ControlID,
+			"actual":    actual,
+		})
+	}
+
+	return members
 }
 
 func writeBrowserContractError(w http.ResponseWriter, message string, status int) {
@@ -671,7 +713,12 @@ func exerciseGroupVolumeControl(t *testing.T, ctx context.Context, recorder *con
 	})
 }
 
-func exerciseDetailGroupVolumeControl(t *testing.T, ctx context.Context, recorder *contractControlRecorder) {
+func exerciseDetailGroupVolumeControl(
+	t *testing.T,
+	ctx context.Context,
+	recorder *contractControlRecorder,
+	app *WebApp,
+) {
 	t.Helper()
 
 	recorder.reset()
@@ -682,6 +729,32 @@ func exerciseDetailGroupVolumeControl(t *testing.T, ctx context.Context, recorde
 		{kind: "group-volume", controlID: contractDegradedHost, value: 34},
 		{kind: "group-volume", controlID: contractDegradedHost, value: 36},
 	})
+	assertContractControlCalls(t, recorder, "balance", nil)
+	assertBrowserMemberVolumeReadback(t, ctx, app)
+}
+
+func assertBrowserMemberVolumeReadback(t *testing.T, ctx context.Context, app *WebApp) {
+	t.Helper()
+
+	zone := app.deviceViewSnapshot()[contractDegradedHost].Zone
+	if zone == nil {
+		t.Fatal("degraded browser fixture lost its projected zone")
+	}
+
+	expected := make([]string, 0, len(zone.Members))
+	for _, member := range zone.Members {
+		if member.ActualVolume == nil {
+			continue
+		}
+		expected = append(expected, fmt.Sprintf("%s=%d", member.Name, *member.ActualVolume))
+	}
+
+	assertBrowserStrings(t, ctx, "member volume readback after detail group drag",
+		`Array.from(document.querySelectorAll('.zone-logical-member')).map(row => {
+			const name = row.querySelector('.zone-logical-name').childNodes[0].textContent.trim();
+			const value = row.querySelector('.zone-member-volume-slider').value;
+			return name + '=' + value;
+		})`, expected)
 }
 
 func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *contractControlRecorder) {
