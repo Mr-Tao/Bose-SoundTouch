@@ -59,6 +59,11 @@ type WebApp struct {
 	// empty and falls back to ServiceURL.
 	InternalServiceURL string
 
+	// OnboardingURL identifies a separately mounted, confirmation-driven Wi-Fi
+	// setup workflow. Embedded service builds set it only when that workflow is
+	// actually mounted; standalone player builds leave it empty.
+	OnboardingURL string
+
 	// ServiceClient is used for server-side calls to the AfterTouch service
 	// (currently the TTS proxy). When nil, serviceHTTPClient falls back to
 	// http.DefaultClient. Set it via NewServiceHTTPClient to trust the

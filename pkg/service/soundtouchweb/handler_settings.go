@@ -109,10 +109,18 @@ var systemLanguageCodes = []models.LanguageCode{
 	models.LanguageHungarian,
 }
 
-func supportedSystemLanguageOptions() []settingsLanguageOption {
-	options := make([]settingsLanguageOption, 0, len(systemLanguageCodes))
+func supportedSystemLanguageOptions(current models.LanguageCode) []settingsLanguageOption {
+	options := make([]settingsLanguageOption, 0, len(systemLanguageCodes)+1)
+	currentKnown := false
 	for _, code := range systemLanguageCodes {
 		options = append(options, settingsLanguageOption{Code: int(code), Name: models.SystemLanguageNames[code]})
+		currentKnown = currentKnown || code == current
+	}
+	if !currentKnown {
+		options = append(options, settingsLanguageOption{
+			Code: int(current),
+			Name: fmt.Sprintf("Unknown (%d)", current),
+		})
 	}
 
 	return options
@@ -257,7 +265,10 @@ func (app *WebApp) readDeviceSettings(device *webtypes.DeviceConnection) (*devic
 		if readErr != nil {
 			snapshot.Errors["language"] = readErr.Error()
 		} else {
-			snapshot.Language = &settingsLanguage{Code: int(value.Code), Options: supportedSystemLanguageOptions()}
+			snapshot.Language = &settingsLanguage{
+				Code:    int(value.Code),
+				Options: supportedSystemLanguageOptions(value.Code),
+			}
 		}
 	}
 
@@ -312,8 +323,8 @@ func (app *WebApp) readDeviceSettings(device *webtypes.DeviceConnection) (*devic
 		}
 	}
 
-	if snapshot.Support.WiFiOnboarding && app.InternalServiceURL != "" {
-		snapshot.OnboardingURL = "/"
+	if snapshot.Support.WiFiOnboarding && app.OnboardingURL != "" {
+		snapshot.OnboardingURL = app.OnboardingURL
 	}
 
 	if len(snapshot.Errors) == 0 {
@@ -671,7 +682,21 @@ func (app *WebApp) HandleClearBluetoothPairings(w http.ResponseWriter, r *http.R
 	}
 
 	snapshot.Errors["bluetoothClear"] = "The speaker accepted the clear command but exposes no paired-list readback."
-	app.writeDeviceSettings(w, snapshot)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	if err := json.NewEncoder(w).Encode(struct {
+		Success bool                    `json:"success"`
+		Outcome string                  `json:"outcome"`
+		Data    *deviceSettingsSnapshot `json:"data"`
+		Error   string                  `json:"error"`
+	}{
+		Success: false,
+		Outcome: "unverified",
+		Data:    snapshot,
+		Error:   snapshot.Errors["bluetoothClear"],
+	}); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
 }
 
 type sourceNameSettingsRequest struct {

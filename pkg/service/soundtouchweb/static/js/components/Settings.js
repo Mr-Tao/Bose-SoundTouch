@@ -156,6 +156,10 @@ export function Settings({ deviceId }) {
         setActionErrors(previous => ({ ...previous, [section]: '' }));
         try {
             const response = await action();
+            if (response?.outcome === 'unverified') {
+                if (response.data) setSnapshot(response.data);
+                throw new Error(response.error || 'The speaker accepted the command, but its result could not be verified.');
+            }
             if (!response?.success || !response.data || response.error) {
                 throw new Error(response?.error || fallback);
             }

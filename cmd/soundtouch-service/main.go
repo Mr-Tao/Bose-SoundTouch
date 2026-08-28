@@ -664,6 +664,9 @@ func main() {
 
 			internalURL := "http://" + net.JoinHostPort(loopbackHost, config.port)
 			webApp := newEmbeddedWebApp(server, config.serverURL, internalURL, ds)
+			if stockholmHandler != nil {
+				webApp.OnboardingURL = "/setup/"
+			}
 
 			r := setupRouter(server, stockholmHandler, webApp)
 

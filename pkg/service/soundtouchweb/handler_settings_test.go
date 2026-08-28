@@ -57,7 +57,9 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 		switch r.URL.Path {
 		case "/capabilities":
 			if advertiseSettings {
-				_, _ = io.WriteString(w, `<capabilities><clockDisplay>true</clockDisplay>`+
+				_, _ = io.WriteString(w, `<capabilities><networkConfig>`+
+					`<hostedWifiConfigWebPage hostedBy="BCO" generation="1" port="80">true</hostedWifiConfigWebPage>`+
+					`</networkConfig><clockDisplay>true</clockDisplay>`+
 					`<capability name="systemtimeout" url="/systemtimeout"/>`+
 					`<capability name="rebroadcastlatencymode" url="/rebroadcastlatencymode"/>`+
 					`</capabilities>`)
@@ -176,6 +178,7 @@ func settingsTestApp(fixture *settingsSpeakerFixture) *WebApp {
 	connection := webtypes.NewDeviceConnection(client.NewClient(&client.Config{Host: fixture.server.URL}), info)
 	connection.SetStatus(&webtypes.DeviceStatus{NowPlaying: &models.NowPlaying{Source: "STANDBY"}})
 	app.AddDevice("speaker", connection)
+	app.OnboardingURL = "/setup/"
 
 	return app
 }
@@ -189,6 +192,7 @@ func settingsRequest(method, path, body string) *http.Request {
 
 func decodeSettingsResponse(t *testing.T, recorder *httptest.ResponseRecorder) struct {
 	Success bool                   `json:"success"`
+	Outcome string                 `json:"outcome"`
 	Error   string                 `json:"error"`
 	Data    deviceSettingsSnapshot `json:"data"`
 } {
@@ -196,6 +200,7 @@ func decodeSettingsResponse(t *testing.T, recorder *httptest.ResponseRecorder) s
 
 	var response struct {
 		Success bool                   `json:"success"`
+		Outcome string                 `json:"outcome"`
 		Error   string                 `json:"error"`
 		Data    deviceSettingsSnapshot `json:"data"`
 	}
@@ -243,6 +248,29 @@ func TestHandleGetDeviceSettingsProjectsOnlyAdvertisedControls(t *testing.T) {
 	}
 	if response.Data.Network == nil || len(response.Data.Network.Interfaces) != 1 {
 		t.Fatalf("unexpected network projection: %+v", response.Data.Network)
+	}
+	if !support.WiFiOnboarding || response.Data.OnboardingURL != "/setup/" {
+		t.Fatalf("unexpected Wi-Fi onboarding projection: support=%+v url=%q",
+			support, response.Data.OnboardingURL)
+	}
+}
+
+func TestHandleGetDeviceSettingsPreservesUnknownCurrentLanguage(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.language = 99
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+
+	app.HandleGetDeviceSettings(recorder, settingsRequest(http.MethodGet,
+		"/api/control/devices/speaker/settings", ""))
+	response := decodeSettingsResponse(t, recorder)
+	if recorder.Code != http.StatusOK || !response.Success || response.Data.Language == nil {
+		t.Fatalf("response = status %d %+v", recorder.Code, response)
+	}
+	options := response.Data.Language.Options
+	last := options[len(options)-1]
+	if response.Data.Language.Code != 99 || last.Code != 99 || last.Name != "Unknown (99)" {
+		t.Fatalf("unknown current language was not preserved: %+v", response.Data.Language)
 	}
 }
 
@@ -424,10 +452,13 @@ func TestHandleClearBluetoothPairingsReportsUnverifiedReadback(t *testing.T) {
 	app.HandleClearBluetoothPairings(recorder, settingsRequest(http.MethodDelete,
 		"/api/control/devices/speaker/settings/bluetooth/pairings", ""))
 
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	response := decodeSettingsResponse(t, recorder)
+	if response.Success || response.Outcome != "unverified" || response.Error == "" {
+		t.Fatalf("clear response claimed success: %+v", response)
+	}
 	if response.Data.Errors["bluetoothClear"] == "" {
 		t.Fatalf("clear response claimed verified success: %+v", response.Data.Errors)
 	}
