@@ -296,6 +296,47 @@ func TestHandleStereoBalanceSetsMasterReadsBackAndProjectsStatus(t *testing.T) {
 	}
 }
 
+func TestHandleStereoBalanceAcceptsPairNestedInZoneProjection(t *testing.T) {
+	speaker := newBalanceTestSpeaker(t, 0)
+	app := NewWebApp()
+	addStereoBalancePair(app, speaker, "RIGHT")
+
+	zone := &models.ZoneInfo{
+		Master: "ZONE",
+		Members: []models.Member{
+			{DeviceID: "ZONE", IP: "192.0.2.30"},
+			{DeviceID: "LEFT", IP: "192.0.2.10"},
+			{DeviceID: "RIGHT", IP: "192.0.2.20"},
+		},
+	}
+	zoneMaster := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
+		DeviceID: "ZONE", Name: "Zone master", Type: "SoundTouch 20", IPAddress: "192.0.2.30",
+	})
+	zoneMaster.SetStatus(&webtypes.DeviceStatus{
+		Zone: zone, IsConnected: true, Connectivity: webtypes.ConnectivityOnline,
+	})
+	app.AddDevice("192.0.2.30", zoneMaster)
+
+	projected := app.deviceViewSnapshot()
+	if _, standalone := projected["192.0.2.10"]; standalone {
+		t.Fatal("nested pair unexpectedly remained a top-level card")
+	}
+	if view := projected["192.0.2.30"]; view.Zone == nil || len(view.Zone.Members) != 2 ||
+		view.Zone.Members[1].Kind != "stereoPair" {
+		t.Fatalf("nested pair missing from zone projection: %+v", view.Zone)
+	}
+
+	response := httptest.NewRecorder()
+	app.HandleStereoBalance(response, stereoBalanceRequest("1"))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	if got := speaker.postedLevels(); fmt.Sprint(got) != "[1]" {
+		t.Fatalf("nested pair balance posts = %v, want [1]", got)
+	}
+}
+
 func TestHandleStereoBalanceRejectsInvalidLevel(t *testing.T) {
 	for _, level := range []string{"1.5", "nope"} {
 		t.Run(level, func(t *testing.T) {

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { maxReadbackActual, partialFailureMessage } from '../static/js/zoneVolumeResult.mjs';
+import {
+    maxReadbackActual,
+    partialFailureMessage,
+} from '../static/js/zoneVolumeResult.mjs';
 
 test('uses every known readback when a member reports a write error', () => {
     const data = {

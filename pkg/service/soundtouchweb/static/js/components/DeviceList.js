@@ -1,8 +1,13 @@
 import { h, htm, useEffect, useRef, useState } from '../dependencies.js';
 import { api } from '../api.js';
 import { connectivityLabel, connectivityState } from '../devicePresentation.mjs';
-import { createLatestWinsScheduler } from '../latestWinsScheduler.mjs';
-import { clampVolume, maxReadbackActual, partialFailureMessage } from '../zoneVolumeResult.mjs';
+import { sortDeviceEntries } from '../deviceListPresentation.mjs';
+import { createLatestWinsScheduler, shouldSurfaceLatestFinal } from '../latestWinsScheduler.mjs';
+import {
+    clampVolume,
+    maxReadbackActual,
+    partialFailureMessage,
+} from '../zoneVolumeResult.mjs';
 import { zoneCardPresentation } from '../zonePresentation.mjs';
 import { StereoBalanceControl } from './StereoBalanceControl.js';
 
@@ -13,24 +18,6 @@ const SORT_LS_KEY = 'aftertouch_device_sort';
 function initialSortMode() {
     const stored = localStorage.getItem(SORT_LS_KEY);
     return stored === 'ip' || stored === 'name' ? stored : 'name';
-}
-
-function sortEntries(entries, mode) {
-    const copy = [...entries];
-    if (mode === 'name') {
-        // Sort by the speaker's display name, falling back to the map key (its IP)
-        // when a device has no name yet.
-        copy.sort(([idA, a], [idB, b]) => {
-            const byName = (a?.info?.name || idA).localeCompare(
-                b?.info?.name || idB, undefined, { sensitivity: 'base' });
-            return byName || idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' });
-        });
-    } else {
-        // IP mode uses the map key, ordered numerically so .2 precedes .10.
-        copy.sort(([idA], [idB]) =>
-            idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' }));
-    }
-    return copy;
 }
 
 function formatIPAddress(address) {
@@ -92,7 +79,7 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
     const projectedVolume = clampVolume(zone.volume);
     const projectedVolumeRef = useRef(projectedVolume);
     const draggingRef = useRef(false);
-    const finalizedValueRef = useRef(null);
+    const interactionDirtyRef = useRef(false);
     const acceptedSequenceRef = useRef(0);
     const schedulerRef = useRef(null);
     const [localVolume, setLocalVolume] = useState(projectedVolume);
@@ -110,7 +97,9 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
 
                 const data = response?.data;
                 if (!response?.success || data?.requested !== metadata.value) {
-                    setFailure(response?.error || 'Group volume update failed.');
+                    if (shouldSurfaceLatestFinal(metadata)) {
+                        setFailure(response?.error || 'Group volume update failed.');
+                    }
                     return;
                 }
 
@@ -119,10 +108,14 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
                     acceptedSequenceRef.current = metadata.sequence;
                     setLocalVolume(confirmed);
                 }
-                setFailure(partialFailureMessage(data));
+                if (shouldSurfaceLatestFinal(metadata)) {
+                    setFailure(partialFailureMessage(data));
+                }
             },
             onError(_error, metadata) {
-                if (metadata.isLatest) setFailure('Group volume update failed.');
+                if (shouldSurfaceLatestFinal(metadata)) {
+                    setFailure('Group volume update failed.');
+                }
             },
             onStateChange(next) {
                 setIsBusy(next.active);
@@ -143,7 +136,7 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
 
     function queueVolume(event, force) {
         const level = clampVolume(parseInt(event.currentTarget.value, 10));
-        if (!force) finalizedValueRef.current = null;
+        if (!force) interactionDirtyRef.current = true;
         setLocalVolume(level);
         setFailure('');
         schedulerRef.current.queue(level, { force });
@@ -152,8 +145,8 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
     function finishVolume(event) {
         const level = clampVolume(parseInt(event.currentTarget.value, 10));
         draggingRef.current = false;
-        if (finalizedValueRef.current === level) return;
-        finalizedValueRef.current = level;
+        if (!interactionDirtyRef.current) return;
+        interactionDirtyRef.current = false;
         queueVolume(event, true);
     }
 
@@ -180,7 +173,7 @@ function ZoneDeviceCard({ id, device, onSelect, showIP }) {
                     disabled=${zone.availableMemberCount === 0 || !hasProjectedVolume}
                     onPointerDown=${() => {
                         draggingRef.current = true;
-                        finalizedValueRef.current = null;
+                        interactionDirtyRef.current = false;
                     }}
                     onInput=${event => queueVolume(event, false)}
                     onPointerUp=${finishVolume}
@@ -233,7 +226,7 @@ export function DeviceList({ devices, isDiscovering, onSelect, onDiscover }) {
         localStorage.setItem(SORT_LS_KEY, mode);
     }
 
-    const entries = sortEntries(Object.entries(devices), sortMode);
+    const entries = sortDeviceEntries(Object.entries(devices), sortMode);
 
     return html`
         <div class="device-list-container">

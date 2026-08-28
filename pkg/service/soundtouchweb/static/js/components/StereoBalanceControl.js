@@ -1,6 +1,6 @@
 import { h, htm, useEffect, useRef, useState } from '../dependencies.js';
 import { api } from '../api.js';
-import { createLatestWinsScheduler } from '../latestWinsScheduler.mjs';
+import { createLatestWinsScheduler, shouldSurfaceLatestFinal } from '../latestWinsScheduler.mjs';
 import {
     balanceControlState,
     balanceFailureMessage,
@@ -29,7 +29,7 @@ export function StereoBalanceControl({ id, device, member, ariaLabel = 'Balance'
     const projectedBalanceRef = useRef(projectedBalance);
     const controlRef = useRef(control);
     const draggingRef = useRef(false);
-    const finalizedValueRef = useRef(null);
+    const interactionDirtyRef = useRef(false);
     const acceptedSequenceRef = useRef(0);
     const schedulerRef = useRef(null);
     const [localBalance, setLocalBalance] = useState(projectedBalance);
@@ -50,16 +50,22 @@ export function StereoBalanceControl({ id, device, member, ariaLabel = 'Balance'
                 const confirmed = confirmedBalanceActual(
                     response, metadata.value, current.min, current.max);
                 if (confirmed === null) {
-                    setFailure(balanceFailureMessage(response));
+                    if (shouldSurfaceLatestFinal(metadata)) {
+                        setFailure(balanceFailureMessage(response));
+                    }
                     return;
                 }
 
                 acceptedSequenceRef.current = metadata.sequence;
                 setLocalBalance(confirmed);
-                setFailure(balanceFailureMessage(response));
+                if (shouldSurfaceLatestFinal(metadata)) {
+                    setFailure(balanceFailureMessage(response));
+                }
             },
             onError(_error, metadata) {
-                if (metadata.isLatest) setFailure('Stereo balance update failed.');
+                if (shouldSurfaceLatestFinal(metadata)) {
+                    setFailure('Stereo balance update failed.');
+                }
             },
             onStateChange(next) {
                 setIsBusy(next.active);
@@ -82,7 +88,7 @@ export function StereoBalanceControl({ id, device, member, ariaLabel = 'Balance'
         const current = controlRef.current;
         const level = clampBalance(event.currentTarget.value, current.min, current.max);
         if (!current.enabled || level === null) return;
-        if (!force) finalizedValueRef.current = null;
+        if (!force) interactionDirtyRef.current = true;
         setLocalBalance(level);
         setFailure('');
         schedulerRef.current.queue(level, { force });
@@ -93,8 +99,8 @@ export function StereoBalanceControl({ id, device, member, ariaLabel = 'Balance'
         const level = clampBalance(event.currentTarget.value, current.min, current.max);
         draggingRef.current = false;
         if (!current.enabled || level === null) return;
-        if (finalizedValueRef.current === level) return;
-        finalizedValueRef.current = level;
+        if (!interactionDirtyRef.current) return;
+        interactionDirtyRef.current = false;
         queueBalance(event, true);
     }
 
@@ -108,7 +114,7 @@ export function StereoBalanceControl({ id, device, member, ariaLabel = 'Balance'
                     disabled=${!control.enabled} aria-label=${ariaLabel}
                     onPointerDown=${() => {
                         draggingRef.current = true;
-                        finalizedValueRef.current = null;
+                        interactionDirtyRef.current = false;
                     }}
                     onInput=${event => queueBalance(event, false)}
                     onPointerUp=${finishBalance}

@@ -888,6 +888,12 @@ img { display: block; max-width: 100%; }
 .volume-icon { display: flex; align-items: center; }
 .volume-slider { flex: 1; accent-color: var(--accent); }
 .volume-value { font-size: .8rem; color: var(--text-dim); min-width: 2.5ch; text-align: right; }
+.volume-control-failure {
+    margin-top: .45rem;
+    color: var(--danger);
+    font-size: .75rem;
+    line-height: 1.35;
+}
 
 .bass-row { display: flex; align-items: center; gap: .75rem; margin-top: .5rem; }
 .bass-label { font-size: .8rem; color: var(--text-dim); width: 2.5ch; }
@@ -1136,9 +1142,19 @@ img { display: block; max-width: 100%; }
     line-height: 1.35;
 }
 .zone-logical-member > .stereo-balance-control .stereo-balance-row {
+    grid-template-columns: max-content minmax(0, 1fr) 4ch;
     padding: 0;
     border: 0;
     background: transparent;
+}
+.zone-logical-member > .stereo-balance-control .stereo-balance-slider {
+    grid-column: 2;
+    grid-row: 1;
+    min-height: 44px;
+}
+.zone-logical-member > .stereo-balance-control .stereo-balance-value {
+    grid-column: 3;
+    grid-row: 1;
 }
 .zone-logical-member > .stereo-balance-control .stereo-balance-failure {
     padding: .35rem 0 0;

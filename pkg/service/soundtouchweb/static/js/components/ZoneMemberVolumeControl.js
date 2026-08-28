@@ -1,7 +1,11 @@
 import { h, htm, useEffect, useRef, useState } from '../dependencies.js';
 import { api } from '../api.js';
-import { createLatestWinsScheduler } from '../latestWinsScheduler.mjs';
-import { clampVolume, maxReadbackActual, partialFailureMessage } from '../zoneVolumeResult.mjs';
+import { createLatestWinsScheduler, shouldSurfaceLatestFinal } from '../latestWinsScheduler.mjs';
+import {
+    clampVolume,
+    maxReadbackActual,
+    partialFailureMessage,
+} from '../zoneVolumeResult.mjs';
 
 const html = htm.bind(h);
 
@@ -9,7 +13,7 @@ export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, vol
     const projectedVolume = clampVolume(volume);
     const projectedVolumeRef = useRef(projectedVolume);
     const draggingRef = useRef(false);
-    const finalizedValueRef = useRef(null);
+    const interactionDirtyRef = useRef(false);
     const acceptedSequenceRef = useRef(0);
     const schedulerRef = useRef(null);
     const [localVolume, setLocalVolume] = useState(projectedVolume);
@@ -29,7 +33,9 @@ export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, vol
                 const data = response?.data;
                 if (!response?.success || data?.requested !== metadata.value ||
                     data?.controlId !== memberId) {
-                    setFailure(response?.error || 'Member volume update failed.');
+                    if (shouldSurfaceLatestFinal(metadata)) {
+                        setFailure(response?.error || 'Member volume update failed.');
+                    }
                     return;
                 }
 
@@ -38,10 +44,14 @@ export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, vol
                     acceptedSequenceRef.current = metadata.sequence;
                     setLocalVolume(confirmed);
                 }
-                setFailure(partialFailureMessage(data));
+                if (shouldSurfaceLatestFinal(metadata)) {
+                    setFailure(partialFailureMessage(data));
+                }
             },
             onError(_error, metadata) {
-                if (metadata.isLatest) setFailure('Member volume update failed.');
+                if (shouldSurfaceLatestFinal(metadata)) {
+                    setFailure('Member volume update failed.');
+                }
             },
             onStateChange(next) {
                 setIsBusy(next.active);
@@ -62,7 +72,7 @@ export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, vol
 
     function queueVolume(event, force) {
         const level = clampVolume(parseInt(event.currentTarget.value, 10));
-        if (!force) finalizedValueRef.current = null;
+        if (!force) interactionDirtyRef.current = true;
         setLocalVolume(level);
         setFailure('');
         schedulerRef.current.queue(level, { force });
@@ -71,8 +81,8 @@ export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, vol
     function finishVolume(event) {
         const level = clampVolume(parseInt(event.currentTarget.value, 10));
         draggingRef.current = false;
-        if (finalizedValueRef.current === level) return;
-        finalizedValueRef.current = level;
+        if (!interactionDirtyRef.current) return;
+        interactionDirtyRef.current = false;
         queueVolume(event, true);
     }
 
@@ -84,7 +94,7 @@ export function ZoneMemberVolumeControl({ zoneMasterId, memberId, ariaLabel, vol
                     min="0" max="100" value=${localVolume} aria-label=${ariaLabel}
                     onPointerDown=${() => {
                         draggingRef.current = true;
-                        finalizedValueRef.current = null;
+                        interactionDirtyRef.current = false;
                     }}
                     onInput=${event => queueVolume(event, false)}
                     onPointerUp=${finishVolume}

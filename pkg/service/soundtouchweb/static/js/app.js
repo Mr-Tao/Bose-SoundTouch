@@ -30,6 +30,9 @@ function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify, onR
         `;
     }
 
+    const controlsMode = device.zone && !device.zone.isStandalone &&
+        device.zone.masterControlId === deviceId ? 'zone' : 'device';
+
     return html`
         <div class="device-detail">
             <div class="page-header">
@@ -42,7 +45,7 @@ function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify, onR
                 </button>
             </div>
             <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} />
-            <${Controls} deviceId=${deviceId} status=${device.status} />
+            <${Controls} key=${`${deviceId}:${controlsMode}`} deviceId=${deviceId} device=${device} />
             <${Presets} deviceId=${deviceId} status=${device.status} />
             <${Sources} deviceId=${deviceId} status=${device.status} />
             <${StereoPair}

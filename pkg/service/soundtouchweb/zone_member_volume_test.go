@@ -237,6 +237,65 @@ func TestHandleZoneMemberVolumeStereoUsesOneAuthoritativeTarget(t *testing.T) {
 	}
 }
 
+func TestHandleZoneMemberVolumeStereoUsesRightRoleMaster(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.5">MASTER</member><member ipaddress="192.0.2.11">RIGHT</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.5"},
+		{DeviceID: "RIGHT", IP: "192.0.2.11"},
+	}}
+	group := &models.Group{
+		ID: "pair", Name: "Living Room", MasterDeviceID: "RIGHT", Status: "GROUP_OK",
+		Roles: models.GroupRoles{Roles: []models.GroupRole{
+			{DeviceID: "LEFT", Role: "LEFT", IPAddress: "192.0.2.10"},
+			{DeviceID: "RIGHT", Role: "RIGHT", IPAddress: "192.0.2.11"},
+		}},
+	}
+	master := newZoneMemberVolumeSpeaker(t, 20, zoneXML)
+	left := newZoneMemberVolumeSpeaker(t, 30, "")
+	right := newZoneMemberVolumeSpeaker(t, 30, "")
+	right.propagate = left.setVolume
+
+	app := NewWebApp()
+	addZoneMemberVolumeDevice(app, "192.0.2.5", "MASTER", "Kitchen", "SoundTouch 30", master, 20, nil, zone)
+	leftConn := addZoneMemberVolumeDevice(app, "192.0.2.10", "LEFT", "Living Room", "SoundTouch 10", left, 30, group, nil)
+	rightConn := addZoneMemberVolumeDevice(app, "192.0.2.11", "RIGHT", "Living Room", "SoundTouch 10", right, 30, group, nil)
+	rightConn.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Balance = &models.Balance{TargetBalance: 0, ActualBalance: 0}
+	})
+
+	response := httptest.NewRecorder()
+	app.HandleZoneMemberVolume(response, zoneMemberVolumeRequest("192.0.2.5", "192.0.2.11", 46))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Data zoneMemberVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Data.Partial || payload.Data.ControlID != "192.0.2.11" || len(payload.Data.Members) != 1 {
+		t.Fatalf("response = %+v; body=%s", payload.Data, response.Body.String())
+	}
+	memberResult := payload.Data.Members[0]
+	if memberResult.DeviceID != "RIGHT" || memberResult.Actual == nil || *memberResult.Actual != 46 || memberResult.Error != "" {
+		t.Fatalf("logical readback = %+v", memberResult)
+	}
+	if _, posts, gets := right.values(); fmt.Sprint(posts) != "[46]" || gets != 1 {
+		t.Fatalf("RIGHT pair master operations = posts %v, gets %d", posts, gets)
+	}
+	if _, posts, gets := left.values(); len(posts) != 0 || gets != 0 {
+		t.Fatalf("LEFT pair member operations = posts %v, gets %d", posts, gets)
+	}
+	if rightConn.Status().Volume.ActualVolume != 46 || leftConn.Status().Volume.ActualVolume != 30 {
+		t.Fatalf("pair cache was not refreshed: RIGHT=%d LEFT=%d",
+			rightConn.Status().Volume.ActualVolume,
+			leftConn.Status().Volume.ActualVolume,
+		)
+	}
+}
+
 func TestHandleZoneMemberVolumeReportsReadbackMismatch(t *testing.T) {
 	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">MEMBER</member></zone>`
 	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{

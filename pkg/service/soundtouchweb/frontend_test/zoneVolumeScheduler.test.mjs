@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createLatestWinsScheduler } from '../static/js/latestWinsScheduler.mjs';
+import {
+    createLatestWinsScheduler,
+    shouldSurfaceLatestFinal,
+} from '../static/js/latestWinsScheduler.mjs';
 
 function deferred() {
     let resolve;
@@ -160,4 +163,11 @@ test('marks only the response for the newest desired level as latest', async () 
     await flushPromises();
 
     assert.deepEqual(results, [[25, false], [75, true]]);
+});
+
+test('surfaces failures only for the latest forced final request', () => {
+    assert.equal(shouldSurfaceLatestFinal({ isLatest: true, final: true }), true);
+    assert.equal(shouldSurfaceLatestFinal({ isLatest: true, final: false }), false);
+    assert.equal(shouldSurfaceLatestFinal({ isLatest: false, final: true }), false);
+    assert.equal(shouldSurfaceLatestFinal(undefined), false);
 });

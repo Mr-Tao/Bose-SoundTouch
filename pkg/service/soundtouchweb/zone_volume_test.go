@@ -414,6 +414,59 @@ func TestHandleZoneVolumeCollapsesStereoPairToOneControlTarget(t *testing.T) {
 	}
 }
 
+func TestHandleZoneVolumeUsesRightRoleStereoMaster(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.5">MASTER</member><member ipaddress="192.0.2.10">LEFT</member><member ipaddress="192.0.2.11">RIGHT</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.5"},
+		{DeviceID: "LEFT", IP: "192.0.2.10"},
+		{DeviceID: "RIGHT", IP: "192.0.2.11"},
+	}}
+	group := &models.Group{
+		ID: "pair", Name: "Living Room", MasterDeviceID: "RIGHT", Status: "GROUP_OK",
+		Roles: models.GroupRoles{Roles: []models.GroupRole{
+			{DeviceID: "LEFT", Role: "LEFT", IPAddress: "192.0.2.10"},
+			{DeviceID: "RIGHT", Role: "RIGHT", IPAddress: "192.0.2.11"},
+		}},
+	}
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	left := newVolumeSpeaker(t, 80, "")
+	right := newVolumeSpeaker(t, 30, "")
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.5", "MASTER", "Kitchen", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.10", "LEFT", "Living Room", left, 80, nil)
+	addVolumeDevice(app, "192.0.2.11", "RIGHT", "Living Room", right, 30, nil)
+	for _, controlID := range []string{"192.0.2.10", "192.0.2.11"} {
+		conn, _ := app.GetDevice(controlID)
+		conn.UpdateStatus(func(status *webtypes.DeviceStatus) { status.Group = group })
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.5/zone/volume/40", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.5", "volume": "40"})
+	response := httptest.NewRecorder()
+	app.HandleZoneVolume(response, req)
+
+	var payload struct {
+		Data zoneVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || payload.Data.Partial || payload.Data.Baseline != 30 ||
+		payload.Data.Delta != 10 || len(payload.Data.Members) != 2 {
+		t.Fatalf("logical group result: status=%d data=%+v", response.Code, payload.Data)
+	}
+	if volume, posts := right.values(); volume != 40 || fmt.Sprint(posts) != "[40]" {
+		t.Fatalf("RIGHT pair master operations: volume=%d posts=%v", volume, posts)
+	}
+	if volume, posts := left.values(); volume != 80 || len(posts) != 0 {
+		t.Fatalf("LEFT pair member was controlled separately: volume=%d posts=%v", volume, posts)
+	}
+	if right.getCount() != 2 || left.getCount() != 0 {
+		t.Fatalf("pair reads: RIGHT control=%d LEFT member=%d", right.getCount(), left.getCount())
+	}
+}
+
 func TestHandleZoneVolumeAcceptsMatchingReadbackAfterPostError(t *testing.T) {
 	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">MEMBER</member></zone>`
 	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{

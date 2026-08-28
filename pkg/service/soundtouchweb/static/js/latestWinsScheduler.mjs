@@ -112,3 +112,7 @@ export function createLatestWinsScheduler({
         getState: state,
     };
 }
+
+export function shouldSurfaceLatestFinal(metadata) {
+    return Boolean(metadata?.isLatest && metadata?.final);
+}

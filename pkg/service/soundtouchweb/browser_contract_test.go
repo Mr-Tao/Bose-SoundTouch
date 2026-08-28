@@ -32,6 +32,7 @@ const (
 	contractDegradedHost          = "192.168.101.101"
 	contractPairLeftHost          = "192.168.101.102"
 	contractPairRightHost         = "192.168.101.103"
+	contractHealthyControlID      = "atrium.local"
 	contractHealthyHost           = "192.168.101.20"
 	contractHealthyMemberHost     = "192.168.101.21"
 
@@ -130,6 +131,7 @@ func TestPlayerBrowserContract(t *testing.T) {
 			}
 			assertBrowserExpression(t, runContext, "member disclosure initially closed", `document.querySelector('.zone-member-details')?.open === false`)
 			assertNoHorizontalDocumentOverflow(t, runContext, "closed member disclosure")
+			exerciseDetailGroupVolumeControl(t, runContext, controls)
 
 			if err := chromedp.Run(runContext,
 				chromedp.Click(".zone-member-details > summary", chromedp.ByQuery),
@@ -181,7 +183,7 @@ func newBrowserContractApp(t *testing.T) *WebApp {
 		}},
 	}
 
-	addBrowserContractDevice(t, app, contractHealthyHost, "healthy-master", "Atrium", "SoundTouch 20", 19, webtypes.ConnectivityOnline, nil, healthyZone)
+	addBrowserContractDeviceAt(t, app, contractHealthyControlID, contractHealthyHost, "healthy-master", "Atrium", "SoundTouch 20", 19, webtypes.ConnectivityOnline, nil, healthyZone)
 	addBrowserContractDevice(t, app, contractHealthyMemberHost, "healthy-member", "Breakfast Room", "SoundTouch 10", 27, webtypes.ConnectivityOnline, nil, nil)
 	addBrowserContractDevice(t, app, contractUnavailableHost, "unavailable-master", contractUnavailableName, "SoundTouch 20", 22, webtypes.ConnectivityOnline, nil, unavailableZone)
 	addBrowserContractDevice(t, app, contractUnavailableMemberHost, "unavailable-member", "Gallery Annex", "SoundTouch 10", 17, webtypes.ConnectivityOffline, nil, nil)
@@ -233,6 +235,18 @@ func addBrowserContractDevice(
 	group *models.Group,
 	zone *models.ZoneInfo,
 ) *webtypes.DeviceConnection {
+	return addBrowserContractDeviceAt(t, app, host, host, deviceID, name, model, volume, connectivity, group, zone)
+}
+
+func addBrowserContractDeviceAt(
+	t *testing.T,
+	app *WebApp,
+	controlID, address, deviceID, name, model string,
+	volume int,
+	connectivity webtypes.Connectivity,
+	group *models.Group,
+	zone *models.ZoneInfo,
+) *webtypes.DeviceConnection {
 	t.Helper()
 
 	connected := connectivity != webtypes.ConnectivityOffline
@@ -240,7 +254,7 @@ func addBrowserContractDevice(
 		DeviceID:  deviceID,
 		Name:      name,
 		Type:      model,
-		IPAddress: host,
+		IPAddress: address,
 	})
 	connection.SetStatus(&webtypes.DeviceStatus{
 		NowPlaying:    &models.NowPlaying{Source: "STANDBY"},
@@ -252,8 +266,8 @@ func addBrowserContractDevice(
 		IsConnected:   connected,
 		LastActivity:  time.Unix(1_700_000_000, 0),
 	})
-	if !app.AddDevice(host, connection) {
-		t.Fatalf("duplicate browser fixture host %q", host)
+	if !app.AddDevice(controlID, connection) {
+		t.Fatalf("duplicate browser fixture control ID %q", controlID)
 	}
 
 	return connection
@@ -348,12 +362,24 @@ func serveBrowserContractControlResponse(w http.ResponseWriter, r *http.Request,
 			},
 		}})
 	case "member-volume":
+		partial := value == 47
+		actual := value
+		errorMessage := ""
+		if partial {
+			actual = value - 1
+			errorMessage = fmt.Sprintf("readback volume %d does not match target %d", actual, value)
+		}
 		writeBrowserContractJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
 			"requested": value,
 			"controlId": call.memberID,
-			"partial":   false,
+			"partial":   partial,
 			"members": []map[string]interface{}{
-				{"controlId": call.memberID, "actual": value},
+				{
+					"controlId": call.memberID,
+					"name":      contractPairName,
+					"actual":    actual,
+					"error":     errorMessage,
+				},
 			},
 		}})
 	case "balance":
@@ -451,7 +477,7 @@ func assertMountedWebSocketClient(t *testing.T, app *WebApp) {
 func assertBrowserDeviceCards(t *testing.T, ctx context.Context) {
 	t.Helper()
 
-	healthyCard := contractZoneCardSelector(contractHealthyHost)
+	healthyCard := contractZoneCardSelector(contractHealthyControlID)
 	unavailableCard := contractZoneCardSelector(contractUnavailableHost)
 	stereoCard := contractZoneCardSelector(contractDegradedHost)
 
@@ -497,10 +523,11 @@ func assertBrowserNameAndIPSort(t *testing.T, ctx context.Context) {
 
 	assertBrowserStrings(t, ctx, "numeric IP-sort card order", `Array.from(document.querySelectorAll('.zone-card')).map(card => card.getAttribute('aria-labelledby'))`, []string{
 		contractZoneNameID(contractUnavailableHost),
-		contractZoneNameID(contractHealthyHost),
+		contractZoneNameID(contractHealthyControlID),
 		contractZoneNameID(contractDegradedHost),
 	})
 	assertBrowserExpression(t, ctx, "IP sort shows one IP per logical card", `document.querySelectorAll('.zone-card .device-ip').length === 3`)
+	assertBrowserExpression(t, ctx, "hostname control uses resolved address for IP presentation", fmt.Sprintf(`document.querySelector(%q)?.querySelector('.device-ip')?.title === %q`, contractZoneCardSelector(contractHealthyControlID), contractHealthyHost))
 
 	card := contractZoneCardSelector(contractDegradedHost)
 	assertBrowserExpression(t, ctx, "IP sort preserves full address in title", fmt.Sprintf(`document.querySelector(%q)?.querySelector('.device-ip')?.title === %q`, card, contractDegradedHost))
@@ -529,6 +556,7 @@ func assertBrowserMemberDisclosure(t *testing.T, ctx context.Context) {
 	})
 	assertBrowserExpression(t, ctx, "physical LEFT/RIGHT rows have no independent volume sliders", `document.querySelectorAll('.zone-physical-member input[type="range"]').length === 0`)
 	assertBrowserExpression(t, ctx, "one enabled logical stereo balance control", fmt.Sprintf(`document.querySelectorAll('.zone-logical-member .stereo-balance-slider').length === 1 && (() => { const input = document.querySelector('.zone-logical-member .stereo-balance-slider'); return input.getAttribute('aria-label') === %q && !input.disabled && input.min === '-7' && input.max === '7' && input.value === '0' && input.closest('.stereo-balance-control').getAttribute('aria-disabled') === 'false'; })()`, contractPairName+" balance"))
+	assertBrowserExpression(t, ctx, "logical stereo balance keeps a touch-sized target", `document.querySelector('.zone-logical-member .stereo-balance-slider').getBoundingClientRect().height >= 44`)
 }
 
 func assertBrowserListLayout(t *testing.T, ctx context.Context) {
@@ -643,6 +671,19 @@ func exerciseGroupVolumeControl(t *testing.T, ctx context.Context, recorder *con
 	})
 }
 
+func exerciseDetailGroupVolumeControl(t *testing.T, ctx context.Context, recorder *contractControlRecorder) {
+	t.Helper()
+
+	recorder.reset()
+	input := ".device-detail > .controls .volume-row .volume-slider"
+	dispatchBrowserSliderSequence(t, ctx, input, 34, 36)
+	waitForBrowserControl(t, ctx, input, ".volume-row", ".volume-value", 36)
+	assertContractControlCalls(t, recorder, "group-volume", []contractControlCall{
+		{kind: "group-volume", controlID: contractDegradedHost, value: 34},
+		{kind: "group-volume", controlID: contractDegradedHost, value: 36},
+	})
+}
+
 func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *contractControlRecorder) {
 	t.Helper()
 
@@ -653,14 +694,77 @@ func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *
 		{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairRightHost, value: 43},
 		{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairRightHost, value: 46},
 	})
+	recorder.reset()
+	exerciseRetainedFinalVolumeFailure(t, ctx, recorder, memberInput)
 
 	balanceInput := fmt.Sprintf(`input.stereo-balance-slider[aria-label=%q]`, contractPairName+" balance")
+	assertUntouchedControlBlurDoesNotWrite(t, ctx, recorder, balanceInput)
 	dispatchBrowserSliderSequence(t, ctx, balanceInput, -2, 3)
 	waitForBrowserControl(t, ctx, balanceInput, ".stereo-balance-control", ".stereo-balance-value", 3)
 	assertContractControlCalls(t, recorder, "balance", []contractControlCall{
 		{kind: "balance", controlID: contractPairRightHost, value: -2},
 		{kind: "balance", controlID: contractPairRightHost, value: 3},
 	})
+}
+
+func assertUntouchedControlBlurDoesNotWrite(t *testing.T, ctx context.Context, recorder *contractControlRecorder, selector string) {
+	t.Helper()
+
+	evaluateBrowserContract(t, ctx, fmt.Sprintf(`(() => {
+        const input = document.querySelector(%q);
+        input.focus();
+        input.blur();
+    })()`, selector), nil)
+	time.Sleep(300 * time.Millisecond)
+	assertContractControlCalls(t, recorder, "balance", nil)
+}
+
+func exerciseRetainedFinalVolumeFailure(t *testing.T, ctx context.Context, recorder *contractControlRecorder, selector string) {
+	t.Helper()
+
+	expression := fmt.Sprintf(`(() => {
+        const input = document.querySelector(%q);
+        if (!input) throw new Error('slider is missing');
+        const pointer = {bubbles: true, pointerId: 2, pointerType: 'touch', isPrimary: true};
+        input.dispatchEvent(new PointerEvent('pointerdown', pointer));
+        input.value = '47';
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        input.dispatchEvent(new PointerEvent('pointerup', pointer));
+        input.dispatchEvent(new Event('change', {bubbles: true}));
+    })()`, selector)
+	evaluateBrowserContract(t, ctx, expression, nil)
+
+	failureExpression := fmt.Sprintf(`(() => {
+        const input = document.querySelector(%q);
+        const control = input?.closest('.zone-member-volume-control');
+        return input?.value === '46' && control?.getAttribute('aria-busy') === 'false' &&
+            control?.querySelector('.zone-member-volume-failure')?.textContent.trim() === %q;
+    })()`, selector, "1 member failed: "+contractPairName)
+	var failed bool
+	if err := chromedp.Run(ctx, chromedp.Poll(failureExpression, &failed, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+		t.Fatalf("wait for retained member-volume failure: %v", err)
+	}
+
+	beforeBlur := recorder.callsFor("member-volume")
+	if len(beforeBlur) < 1 || len(beforeBlur) > 2 {
+		t.Fatalf("member-volume calls before blur = %+v, want one coalesced final or one intermediate plus final", beforeBlur)
+	}
+	for _, call := range beforeBlur {
+		if call != (contractControlCall{kind: "member-volume", controlID: contractDegradedHost, memberID: contractPairRightHost, value: 47}) {
+			t.Fatalf("unexpected member-volume call before blur: %+v", call)
+		}
+	}
+
+	evaluateBrowserContract(t, ctx, fmt.Sprintf(`document.querySelector(%q).dispatchEvent(new FocusEvent('blur', {bubbles: true}))`, selector), nil)
+	time.Sleep(300 * time.Millisecond)
+	if afterBlur := recorder.callsFor("member-volume"); !reflect.DeepEqual(afterBlur, beforeBlur) {
+		t.Fatalf("blur added a member-volume write: before=%+v after=%+v", beforeBlur, afterBlur)
+	}
+	assertBrowserExpression(t, ctx, "final member-volume failure survives blur", fmt.Sprintf(
+		`document.querySelector(%q)?.closest('.zone-member-volume-control')?.querySelector('.zone-member-volume-failure')?.textContent.trim() === %q`,
+		selector,
+		"1 member failed: "+contractPairName,
+	))
 }
 
 func dispatchBrowserSliderSequence(t *testing.T, ctx context.Context, selector string, inputValue, finalValue int) {
