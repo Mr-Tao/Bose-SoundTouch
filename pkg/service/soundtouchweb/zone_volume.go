@@ -211,6 +211,7 @@ func (app *WebApp) applyZoneVolume(
 
 			before := volume.ActualVolume
 			member.Before = &before
+
 			result.Members[index] = member
 			if !app.volumeTargetCurrent(projectedMember.ControlID, conn, groupTopology, zoneTopology) {
 				member.Error = "speaker topology changed while reading volume"
@@ -333,6 +334,7 @@ func (app *WebApp) applyVolumeTarget(
 
 	conn.WithVolumeOperation(func() {
 		var writeErr error
+
 		if !app.withCurrentVolumeWrite(controlID, conn, groupTopology, zoneTopology, func() {
 			writeErr = conn.Client.SetVolume(level)
 		}) {
@@ -373,6 +375,7 @@ func (app *WebApp) applyVolumeTarget(
 			volume,
 		)
 		conn.CompleteHTTPPoll(healthGeneration, true, time.Now(), nil)
+
 		if !confirmed {
 			appendZoneVolumeError(member, "speaker topology or volume state changed during readback")
 

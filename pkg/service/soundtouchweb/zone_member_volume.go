@@ -82,16 +82,9 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 
 	member = currentMember
 
-	control, ok := app.GetDevice(member.ControlID)
-	if !ok || control.Client == nil || control.Info() == nil ||
-		strings.TrimSpace(control.Info().DeviceID) != strings.TrimSpace(member.HardwareID) {
-		app.sendError(w, "Zone member control target is unavailable", http.StatusConflict)
-		return
-	}
-
-	groupTopology, current := control.SnapshotGroupTopology()
-	if !current || !authoritativeVolumeTopology(control, groupTopology) {
-		app.sendError(w, "Stereo pair master is unavailable", http.StatusConflict)
+	control, groupTopology, failure := app.zoneMemberVolumeControl(member)
+	if failure != "" {
+		app.sendError(w, failure, http.StatusConflict)
 		return
 	}
 
@@ -103,6 +96,23 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 	if err := json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true, Data: result}); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
+}
+
+func (app *WebApp) zoneMemberVolumeControl(
+	member zoneMemberView,
+) (*webtypes.DeviceConnection, webtypes.GroupTopology, string) {
+	control, ok := app.GetDevice(member.ControlID)
+	if !ok || control.Client == nil || control.Info() == nil ||
+		strings.TrimSpace(control.Info().DeviceID) != strings.TrimSpace(member.HardwareID) {
+		return nil, webtypes.GroupTopology{}, "Zone member control target is unavailable"
+	}
+
+	groupTopology, current := control.SnapshotGroupTopology()
+	if !current || !authoritativeVolumeTopology(control, groupTopology) {
+		return nil, webtypes.GroupTopology{}, "Stereo pair master is unavailable"
+	}
+
+	return control, groupTopology, ""
 }
 
 func findLogicalZoneMember(zone *zoneView, memberID string) (zoneMemberView, bool) {

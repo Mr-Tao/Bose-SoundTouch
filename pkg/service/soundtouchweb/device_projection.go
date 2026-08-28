@@ -210,10 +210,12 @@ func projectLogicalDeviceEntries(snapshot []deviceProjectionEntry) (
 		}
 
 		pair := masters[entry.ID]
+
 		settingsTarget := newDeviceSettingsTarget(entry)
 		if settingsTarget != nil && pair != nil {
 			settingsTarget.Role = stereoRoleForDevice(pair, settingsTarget.DeviceID)
 		}
+
 		devices[entry.ID] = deviceView{
 			Info:                  projectedDeviceInfo(entry.ID, entry.Info, pair),
 			Status:                entry.Status,
@@ -725,6 +727,7 @@ func newDeviceSettingsTargets(
 	}
 
 	targets := make([]deviceSettingsTargetView, 0, 2)
+
 	for _, role := range []string{"LEFT", "RIGHT"} {
 		for _, member := range pair.Members {
 			if strings.ToUpper(strings.TrimSpace(member.Role)) != role {
@@ -746,6 +749,7 @@ func newDeviceSettingsTargets(
 			}
 
 			targets = append(targets, target)
+
 			break
 		}
 	}

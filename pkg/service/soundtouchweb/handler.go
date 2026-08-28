@@ -550,15 +550,18 @@ func (app *WebApp) handleVerifiedVolumeControl(
 		ControlID: controlID,
 		Target:    intPointer(level),
 	}
+
 	atTarget, confirmed := app.applyVolumeTarget(&member, controlID, device, topology, nil, level)
 	if confirmed {
 		app.BroadcastDeviceList()
 	}
+
 	if !atTarget {
 		status := http.StatusBadGateway
 		if strings.Contains(member.Error, "topology") || strings.Contains(member.Error, "state changed") {
 			status = http.StatusConflict
 		}
+
 		app.sendError(w, member.Error, status)
 
 		return
