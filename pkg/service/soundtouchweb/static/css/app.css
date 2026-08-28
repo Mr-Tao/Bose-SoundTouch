@@ -816,6 +816,7 @@ img { display: block; max-width: 100%; }
 .settings-source-row input { width: 100%; }
 .settings-network-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
     justify-content: space-between;
     gap: .75rem;
@@ -826,6 +827,24 @@ img { display: block; max-width: 100%; }
 .settings-network-row:first-child { border-top: 0; padding-top: 0; }
 .settings-network-row strong { min-width: 0; overflow-wrap: anywhere; }
 .settings-network-row span { color: var(--text-dim); text-align: right; overflow-wrap: anywhere; }
+.settings-network-evidence {
+    flex-basis: 100%;
+    color: var(--text-dim);
+    font-size: .72rem;
+    line-height: 1.35;
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+.settings-network-technical { margin-top: .45rem; border-top: 1px solid var(--border); }
+.settings-network-technical > summary {
+    min-height: 44px;
+    padding: .65rem 0;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: .78rem;
+    font-weight: 600;
+}
+.settings-network-technical[open] > summary { margin-bottom: .1rem; }
 .settings-command-link { display: inline-flex; align-items: center; margin-top: .65rem; }
 
 @media (max-width: 520px) {

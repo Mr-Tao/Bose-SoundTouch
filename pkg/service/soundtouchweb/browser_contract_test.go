@@ -344,7 +344,26 @@ func newBrowserContractServer(t *testing.T, app *WebApp) (*httptest.Server, *con
 		case strings.HasSuffix(r.URL.Path, "/recents"):
 			writeBrowserContractJSON(w, webtypes.APIResponse{Success: true, Data: []interface{}{}})
 		case strings.HasSuffix(r.URL.Path, "/settings/"):
-			writeBrowserContractJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{}})
+			writeBrowserContractJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
+				"support": map[string]interface{}{},
+				"network": map[string]interface{}{"interfaces": []map[string]interface{}{
+					{
+						"type": "WIFI_INTERFACE", "name": "wlan0", "ipAddress": "192.168.101.103",
+						"ssid": "Whole-house wireless network", "band": "5GHz",
+						"state": "NETWORK_WIFI_CONNECTED", "firmwareNetworkQuality": "Marginal",
+						"firmwareNetworkQualitySource": "netStats", "firmwareNetworkQualityState": "conflict",
+						"networkInfoFirmwareQuality": "Poor",
+					},
+					{
+						"type": "WIFI_INTERFACE", "name": "wlan1", "ipAddress": "192.168.101.104",
+						"band": "2.4GHz", "state": "NETWORK_WIFI_DISCONNECTED",
+					},
+					{
+						"type": "ETHERNET_INTERFACE", "name": "eth0", "macAddress": "AA:BB:CC:DD:EE:02",
+						"state": "NETWORK_ETHERNET_DISCONNECTED",
+					},
+				}},
+			}})
 		default:
 			router.ServeHTTP(w, r)
 		}
@@ -813,6 +832,18 @@ func assertBrowserMemberSettings(t *testing.T, ctx context.Context) {
 		"Reset balance for Stereo pair · " + contractPairName + " to Centered",
 	})
 	assertBrowserExpression(t, ctx, "range sliders are absent from sound settings", fmt.Sprintf(`document.querySelectorAll(%q).length === 0`, soundSection+" input[type=range]"))
+	assertBrowserExpression(t, ctx, "each physical speaker has one connected network summary", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).length === 2 && Array.from(document.querySelectorAll(%q)).every(list => list.querySelectorAll(':scope > .settings-network-row').length === 1)`, section+" .settings-network-primary", section+" .settings-network-primary"))
+	assertBrowserStrings(t, ctx, "connected network summary includes only type IP and band", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(row => [row.querySelector('strong').textContent.trim(), row.querySelector('span').textContent.trim()].join('|'))`, section+" .settings-network-primary > .settings-network-row"), []string{
+		"Wi-Fi · Whole-house wireless network|192.168.101.103 · 5GHz",
+		"Wi-Fi · Whole-house wireless network|192.168.101.103 · 5GHz",
+	})
+	assertBrowserStrings(t, ctx, "firmware quality is subordinate topology-sensitive conflict evidence", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(node => node.textContent.trim())`, section+" .settings-network-evidence"), []string{
+		"Firmware network quality: Marginal (/netStats; /networkInfo: Poor; topology-sensitive)",
+		"Firmware network quality: Marginal (/netStats; /networkInfo: Poor; topology-sensitive)",
+	})
+	assertBrowserExpression(t, ctx, "firmware quality is not presented as signal RSSI or dBm", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).every(node => !/signal|rssi|dbm/i.test(node.textContent))`, section+" .settings-network-evidence"))
+	assertBrowserExpression(t, ctx, "disconnected interfaces stay in closed technical disclosures", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).length === 2 && Array.from(document.querySelectorAll(%q)).every(details => !details.open && details.querySelectorAll('.settings-network-row').length === 2 && details.querySelector('summary').textContent.trim() === 'Technical details · 2 disconnected interfaces')`, section+" .settings-network-technical", section+" .settings-network-technical"))
+	assertBrowserExpression(t, ctx, "disconnected interface names are absent from primary summaries", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).every(list => !list.textContent.includes('wlan1') && !list.textContent.includes('eth0'))`, section+" .settings-network-primary"))
 }
 
 func assertBrowserEmbeddedSettingsGenerationFence(t *testing.T, ctx context.Context) {
@@ -934,6 +965,10 @@ func assertBrowserDetailLayout(t *testing.T, ctx context.Context) {
 		".stepped-setting-controls",
 		".stepped-setting-step",
 		".stepped-setting-indicator",
+		".settings-network-primary",
+		".settings-network-primary > .settings-network-row",
+		".settings-network-evidence",
+		".settings-network-technical > summary",
 		".zone-physical-member",
 		".zone-physical-identity",
 		".zone-physical-metadata",

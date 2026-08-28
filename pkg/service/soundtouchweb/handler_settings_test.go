@@ -21,38 +21,52 @@ import (
 type settingsSpeakerFixture struct {
 	server *httptest.Server
 
-	mu             sync.Mutex
-	clockEnabled   bool
-	clockFormat    string
-	clockTimeZone  string
-	clockHasFormat bool
-	clockHasZone   bool
-	clockHasTime   bool
-	timeoutEnabled bool
-	language       int
-	syncMode       string
-	sourceName     string
-	discoverable   bool
+	mu                 sync.Mutex
+	clockEnabled       bool
+	clockFormat        string
+	clockTimeZone      string
+	clockHasFormat     bool
+	clockHasZone       bool
+	clockHasTime       bool
+	timeoutEnabled     bool
+	language           int
+	syncMode           string
+	sourceName         string
+	discoverable       bool
+	netStatsAdvertised bool
+	netStatsStatus     int
+	netStatsBody       string
+	networkInfoSignal  string
 
 	clockPosts     atomic.Int32
 	clockTimePosts atomic.Int32
 	clearGets      atomic.Int32
+	netStatsGets   atomic.Int32
 }
 
 func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSpeakerFixture {
 	t.Helper()
 
 	fixture := &settingsSpeakerFixture{
-		clockEnabled:   false,
-		clockFormat:    "TIME_FORMAT_24HOUR_ID",
-		clockTimeZone:  "Europe/Prague",
-		clockHasFormat: true,
-		clockHasZone:   true,
-		clockHasTime:   true,
-		timeoutEnabled: true,
-		language:       15,
-		syncMode:       "SYNC_TO_ZONE",
-		sourceName:     "Line in",
+		clockEnabled:       false,
+		clockFormat:        "TIME_FORMAT_24HOUR_ID",
+		clockTimeZone:      "Europe/Prague",
+		clockHasFormat:     true,
+		clockHasZone:       true,
+		clockHasTime:       true,
+		timeoutEnabled:     true,
+		language:           15,
+		syncMode:           "SYNC_TO_ZONE",
+		sourceName:         "Line in",
+		netStatsAdvertised: advertiseSettings,
+		netStatsStatus:     http.StatusOK,
+		networkInfoSignal:  "POOR_SIGNAL",
+		netStatsBody: `<network-data><devices><device id="radio"><interfaces>` +
+			`<interface><name>eth0</name><mac-addr>11:22:33:44:55:66</mac-addr>` +
+			`<bindings><ipv4address>192.0.2.10</ipv4address></bindings><running>true</running>` +
+			`<kind>Wireless</kind><ssid>Test WiFi</ssid><rssi>Good</rssi>` +
+			`<frequencyKHz>5200000</frequencyKHz></interface>` +
+			`</interfaces></device></devices></network-data>`,
 	}
 
 	fixture.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +95,9 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 					"/rebroadcastlatencymode", "/bluetoothInfo", "/enterPairingMode",
 					"/clearPairedList", "/nameSource", "/networkInfo",
 				)
+				if fixture.netStatsAdvertised {
+					locations = append(locations, "/netStats")
+				}
 			}
 
 			_, _ = io.WriteString(w, `<supportedURLs>`)
@@ -174,7 +191,15 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 			fixture.sourceName = request.ItemName
 			_, _ = io.WriteString(w, `<status>/nameSource</status>`)
 		case "/networkInfo":
-			_, _ = io.WriteString(w, `<networkInfo><interfaces><interface type="WIFI_INTERFACE" name="wlan0" ipAddress="192.0.2.10" ssid="Test WiFi" state="NETWORK_WIFI_CONNECTED" signal="EXCELLENT_SIGNAL"/></interfaces></networkInfo>`)
+			_, _ = fmt.Fprintf(w, `<networkInfo><interfaces>`+
+				`<interface type="WIFI_INTERFACE" name="wlan0" macAddress="AA:BB:CC:DD:EE:FF" ipAddress="192.0.2.10" ssid="Test WiFi" frequencyKHz="5200000" state="NETWORK_WIFI_CONNECTED" signal="%s"/>`+
+				`<interface type="WIFI_INTERFACE" name="wlan1" macAddress="AA:BB:CC:DD:EE:01" state="NETWORK_WIFI_DISCONNECTED" signal="POOR_SIGNAL"/>`+
+				`<interface type="ETHERNET_INTERFACE" name="eth0" macAddress="AA:BB:CC:DD:EE:02" state="NETWORK_ETHERNET_DISCONNECTED"/>`+
+				`</interfaces></networkInfo>`, fixture.networkInfoSignal)
+		case "/netStats":
+			fixture.netStatsGets.Add(1)
+			w.WriteHeader(fixture.netStatsStatus)
+			_, _ = io.WriteString(w, fixture.netStatsBody)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -273,12 +298,195 @@ func TestHandleGetDeviceSettingsProjectsOnlyAdvertisedControls(t *testing.T) {
 	if len(response.Data.Sources) != 1 || response.Data.Sources[0].SourceAccount != "AUX1" {
 		t.Fatalf("unexpected renameable sources: %+v", response.Data.Sources)
 	}
-	if response.Data.Network == nil || len(response.Data.Network.Interfaces) != 1 {
+	if response.Data.Network == nil || len(response.Data.Network.Interfaces) != 3 {
 		t.Fatalf("unexpected network projection: %+v", response.Data.Network)
+	}
+	connected := response.Data.Network.Interfaces[0]
+	if connected.FirmwareNetworkQuality != "Good" || connected.FirmwareNetworkQualitySource != "netStats" ||
+		connected.FirmwareNetworkQualityState != "conflict" || connected.NetworkInfoFirmwareQuality != "Poor" || connected.Band != "5GHz" {
+		t.Fatalf("firmware network quality conflict was not retained: %+v", connected)
+	}
+	if connected.Name != "wlan0" || connected.MACAddress != "AA:BB:CC:DD:EE:FF" {
+		t.Fatalf("/netStats identity replaced the physical /networkInfo interface: %+v", connected)
+	}
+	if fixture.netStatsGets.Load() != 1 {
+		t.Fatalf("/netStats GET count = %d, want 1", fixture.netStatsGets.Load())
 	}
 	if !support.WiFiOnboarding || response.Data.OnboardingURL != "/setup/" {
 		t.Fatalf("unexpected Wi-Fi onboarding projection: support=%+v url=%q",
 			support, response.Data.OnboardingURL)
+	}
+}
+
+func TestHandleGetDeviceSettingsNetworkStatsFallback(t *testing.T) {
+	tests := []struct {
+		name               string
+		advertised         bool
+		status             int
+		body               string
+		networkInfoQuality string
+		wantStatsRequests  int32
+		wantQuality        string
+		wantSource         string
+		wantState          string
+	}{
+		{
+			name:        "endpoint absent keeps networkInfo report",
+			advertised:  false,
+			status:      http.StatusOK,
+			wantQuality: "Poor",
+			wantSource:  "networkInfo",
+			wantState:   "reported",
+		},
+		{
+			name:              "temporary endpoint failure uses fallback",
+			advertised:        true,
+			status:            http.StatusServiceUnavailable,
+			body:              `<error>busy</error>`,
+			wantStatsRequests: 1,
+			wantQuality:       "Poor",
+			wantSource:        "networkInfo",
+			wantState:         "fallback",
+		},
+		{
+			name:              "malformed endpoint response uses fallback",
+			advertised:        true,
+			status:            http.StatusOK,
+			body:              `<network-data>`,
+			wantStatsRequests: 1,
+			wantQuality:       "Poor",
+			wantSource:        "networkInfo",
+			wantState:         "fallback",
+		},
+		{
+			name:       "conflicting identity uses fallback",
+			advertised: true,
+			status:     http.StatusOK,
+			body: `<network-data><devices><device><interfaces><interface>` +
+				`<running>true</running><kind>Wireless</kind><bindings><ipv4address>192.0.2.10</ipv4address></bindings>` +
+				`<ssid>Other WiFi</ssid><rssi>Excellent</rssi></interface></interfaces></device></devices></network-data>`,
+			wantStatsRequests: 1,
+			wantQuality:       "Poor",
+			wantSource:        "networkInfo",
+			wantState:         "fallback",
+		},
+		{
+			name:       "ambiguous identity uses fallback",
+			advertised: true,
+			status:     http.StatusOK,
+			body: `<network-data><devices><device><interfaces>` +
+				`<interface><running>true</running><kind>Wireless</kind><bindings><ipv4address>192.0.2.10</ipv4address></bindings><ssid>Test WiFi</ssid><rssi>Good</rssi></interface>` +
+				`<interface><running>true</running><kind>Wireless</kind><bindings><ipv4address>192.0.2.10</ipv4address></bindings><ssid>Test WiFi</ssid><rssi>Excellent</rssi></interface>` +
+				`</interfaces></device></devices></network-data>`,
+			wantStatsRequests: 1,
+			wantQuality:       "Poor",
+			wantSource:        "networkInfo",
+			wantState:         "fallback",
+		},
+		{
+			name:       "invalid nonempty RSSI uses fallback",
+			advertised: true,
+			status:     http.StatusOK,
+			body: `<network-data><devices><device><interfaces><interface>` +
+				`<running>true</running><kind>Wireless</kind><bindings><ipv4address>192.0.2.10</ipv4address></bindings>` +
+				`<ssid>Test WiFi</ssid><rssi>-54 dBm</rssi></interface></interfaces></device></devices></network-data>`,
+			wantStatsRequests: 1,
+			wantQuality:       "Poor",
+			wantSource:        "networkInfo",
+			wantState:         "fallback",
+		},
+		{
+			name:               "unknown RSSI without valid fallback is unavailable",
+			advertised:         true,
+			status:             http.StatusOK,
+			networkInfoQuality: "UNKNOWN_SIGNAL",
+			body: `<network-data><devices><device><interfaces><interface>` +
+				`<running>true</running><kind>Wireless</kind><bindings><ipv4address>192.0.2.10</ipv4address></bindings>` +
+				`<ssid>Test WiFi</ssid><rssi>Unknown</rssi></interface></interfaces></device></devices></network-data>`,
+			wantStatsRequests: 1,
+			wantState:         "unavailable",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSettingsSpeakerFixture(t, true)
+			fixture.netStatsAdvertised = test.advertised
+			fixture.netStatsStatus = test.status
+			fixture.netStatsBody = test.body
+			if test.networkInfoQuality != "" {
+				fixture.networkInfoSignal = test.networkInfoQuality
+			}
+			app := settingsTestApp(fixture)
+			recorder := httptest.NewRecorder()
+
+			app.HandleGetDeviceSettings(recorder, settingsRequest(http.MethodGet,
+				"/api/control/devices/speaker/settings", ""))
+			response := decodeSettingsResponse(t, recorder)
+			if recorder.Code != http.StatusOK || !response.Success || response.Data.Network == nil {
+				t.Fatalf("network fallback lost /networkInfo: status=%d response=%+v", recorder.Code, response)
+			}
+
+			connected := response.Data.Network.Interfaces[0]
+			if connected.FirmwareNetworkQuality != test.wantQuality ||
+				connected.FirmwareNetworkQualitySource != test.wantSource ||
+				connected.FirmwareNetworkQualityState != test.wantState ||
+				connected.NetworkInfoFirmwareQuality != "" {
+				t.Fatalf("firmware network quality state = %+v", connected)
+			}
+			if response.Data.Errors["networkStats"] != "" {
+				t.Fatalf("expected telemetry state became a section error: %+v", response.Data.Errors)
+			}
+			if fixture.netStatsGets.Load() != test.wantStatsRequests {
+				t.Fatalf("/netStats GET count = %d, want %d", fixture.netStatsGets.Load(), test.wantStatsRequests)
+			}
+		})
+	}
+}
+
+func TestCanonicalFirmwareNetworkQuality(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		valid bool
+	}{
+		{input: "FAIR_SIGNAL", want: "Fair", valid: true},
+		{input: "marginal_signal", want: "Marginal", valid: true},
+		{input: "Excellent", want: "Excellent", valid: true},
+		{input: "UNKNOWN_SIGNAL"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			got, valid := canonicalFirmwareNetworkQuality(test.input)
+			if got != test.want || valid != test.valid {
+				t.Fatalf("canonicalFirmwareNetworkQuality(%q) = (%q, %t), want (%q, %t)", test.input, got, valid, test.want, test.valid)
+			}
+		})
+	}
+}
+
+func TestHandleGetDeviceSettingsNetworkStatsAgreementKeepsPrecedence(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.networkInfoSignal = "FAIR_SIGNAL"
+	fixture.netStatsBody = strings.Replace(fixture.netStatsBody, "<rssi>Good</rssi>", "<rssi>fair</rssi>", 1)
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+
+	app.HandleGetDeviceSettings(recorder, settingsRequest(http.MethodGet,
+		"/api/control/devices/speaker/settings", ""))
+	response := decodeSettingsResponse(t, recorder)
+	if recorder.Code != http.StatusOK || !response.Success || response.Data.Network == nil {
+		t.Fatalf("network response = status %d %+v", recorder.Code, response)
+	}
+
+	connected := response.Data.Network.Interfaces[0]
+	if connected.FirmwareNetworkQuality != "Fair" || connected.FirmwareNetworkQualitySource != "netStats" ||
+		connected.FirmwareNetworkQualityState != "reported" || connected.NetworkInfoFirmwareQuality != "" {
+		t.Fatalf("agreeing firmware quality did not retain /netStats precedence: %+v", connected)
+	}
+	if response.Data.Errors["networkStats"] != "" {
+		t.Fatalf("agreeing firmware quality reported an error: %+v", response.Data.Errors)
 	}
 }
 

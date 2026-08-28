@@ -1243,6 +1243,18 @@ func (c *Client) GetNetworkInfo() (*models.NetworkInformation, error) {
 	return &networkInfo, nil
 }
 
+// GetNetworkStats retrieves firmware network data from the /netStats endpoint.
+func (c *Client) GetNetworkStats() (*models.NetworkStats, error) {
+	var networkStats models.NetworkStats
+
+	err := c.get("/netStats", &networkStats)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network stats: %w", err)
+	}
+
+	return &networkStats, nil
+}
+
 // Ping checks if the device is reachable by calling /info
 func (c *Client) Ping() error {
 	_, err := c.GetDeviceInfo()

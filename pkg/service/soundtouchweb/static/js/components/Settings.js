@@ -4,6 +4,10 @@ import {
     clockControls,
     clockDisplayPatch,
     deviceSettingsTitle,
+    firmwareNetworkQualityEvidence,
+    networkInterfaceGroups,
+    networkInterfaceName,
+    networkInterfaceSummary,
     settingsSections,
 } from '../settingsPresentation.mjs';
 
@@ -104,22 +108,6 @@ function SourceRenameRow({ source, busy, onRename }) {
     `;
 }
 
-function networkInterfaces(network) {
-    if (Array.isArray(network?.interfaces)) return network.interfaces;
-    if (Array.isArray(network?.interfaces?.interfaces)) return network.interfaces.interfaces;
-    return [];
-}
-
-function interfaceName(item) {
-    if (item.type === 'WIFI_INTERFACE') return item.ssid ? `Wi-Fi · ${item.ssid}` : 'Wi-Fi';
-    if (item.type === 'ETHERNET_INTERFACE') return 'Ethernet';
-    return item.name || item.type || 'Network interface';
-}
-
-function statusLabel(value) {
-    return value ? String(value).replace(/^NETWORK_/, '').replace(/_/g, ' ').toLowerCase() : '';
-}
-
 export function Settings({
     deviceId,
     targetName = '',
@@ -209,7 +197,7 @@ export function Settings({
     const support = snapshot?.support || {};
     const clock = snapshot?.clockDisplay || {};
     const clockControl = clockControls(snapshot);
-    const interfaces = networkInterfaces(snapshot?.network);
+    const networkInterfaces = networkInterfaceGroups(snapshot?.network);
     const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
     function updateClockDisplay(field, value, fallback) {
@@ -467,21 +455,33 @@ export function Settings({
                     <section class="settings-group">
                         <h4>Network</h4>
                         <${SectionErrors} snapshot=${snapshot} section="network" actionError=${actionErrors.network} />
-                        ${interfaces.length > 0 ? html`
-                            <div class="settings-network-list">
-                                ${interfaces.map((item, index) => html`
+                        ${networkInterfaces.connected.length > 0 ? html`
+                            <div class="settings-network-list settings-network-primary">
+                                ${networkInterfaces.connected.map((item, index) => html`
                                     <div class="settings-network-row" key=${item.macAddress || item.name || index}>
-                                        <strong>${interfaceName(item)}</strong>
-                                        <span>${[
-                                            statusLabel(item.state),
-                                            item.ipAddress,
-                                            statusLabel(item.signal),
-                                        ].filter(Boolean).join(' · ')}</span>
+                                        <strong>${networkInterfaceName(item)}</strong>
+                                        <span>${networkInterfaceSummary(item)}</span>
+                                        ${firmwareNetworkQualityEvidence(item) ? html`
+                                            <small class="settings-network-evidence">${firmwareNetworkQualityEvidence(item)}</small>
+                                        ` : null}
                                     </div>
                                 `)}
                             </div>
                         ` : snapshot.network ? html`
-                            <p class="settings-value">No network interfaces were reported.</p>
+                            <p class="settings-value">No connected network interfaces were reported.</p>
+                        ` : null}
+                        ${networkInterfaces.disconnected.length > 0 ? html`
+                            <details class="settings-network-technical">
+                                <summary>Technical details · ${networkInterfaces.disconnected.length} disconnected ${networkInterfaces.disconnected.length === 1 ? 'interface' : 'interfaces'}</summary>
+                                <div class="settings-network-list">
+                                    ${networkInterfaces.disconnected.map((item, index) => html`
+                                        <div class="settings-network-row" key=${item.macAddress || item.name || index}>
+                                            <strong>${networkInterfaceName(item, true)}</strong>
+                                            <span>${networkInterfaceSummary(item, true)}</span>
+                                        </div>
+                                    `)}
+                                </div>
+                            </details>
                         ` : null}
                         ${support.wifiOnboarding && snapshot.onboardingUrl ? html`
                             <a

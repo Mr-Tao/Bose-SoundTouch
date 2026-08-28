@@ -57,6 +57,81 @@ export function clockDisplayPatch(snapshot, field, value) {
     return null;
 }
 
+function networkInterfaces(network) {
+    if (Array.isArray(network?.interfaces)) return network.interfaces;
+    if (Array.isArray(network?.interfaces?.interfaces)) return network.interfaces.interfaces;
+    return [];
+}
+
+function isConnectedNetworkInterface(item) {
+    return item?.state === 'NETWORK_WIFI_CONNECTED'
+        || item?.state === 'NETWORK_ETHERNET_CONNECTED';
+}
+
+export function networkInterfaceGroups(network) {
+    const interfaces = networkInterfaces(network);
+    return {
+        connected: interfaces.filter(isConnectedNetworkInterface),
+        disconnected: interfaces.filter(item => !isConnectedNetworkInterface(item)),
+    };
+}
+
+export function networkInterfaceName(item, technical = false) {
+    if (item?.type === 'WIFI_INTERFACE') {
+        if (technical) return item.name ? `Wi-Fi interface · ${item.name}` : 'Wi-Fi interface';
+        return item.ssid ? `Wi-Fi · ${item.ssid}` : 'Wi-Fi';
+    }
+    if (item?.type === 'ETHERNET_INTERFACE') {
+        if (technical) return item.name ? `Ethernet interface · ${item.name}` : 'Ethernet interface';
+        return 'Ethernet';
+    }
+    return item?.name || item?.type || 'Network interface';
+}
+
+export function networkInterfaceSummary(item, technical = false) {
+    if (technical) {
+        return [
+            item?.state?.endsWith('_DISCONNECTED') ? 'Disconnected' : 'Not connected',
+            item?.ipAddress,
+            item?.band,
+        ].filter(Boolean).join(' · ');
+    }
+
+    return [item?.ipAddress || 'IP not reported', item?.band]
+        .filter(Boolean)
+        .join(' · ');
+}
+
+export function firmwareNetworkQualityEvidence(item) {
+    if (!item?.firmwareNetworkQuality && !item?.firmwareNetworkQualityState) return '';
+
+    const validQuality = ['Excellent', 'Good', 'Fair', 'Marginal', 'Poor']
+        .includes(item?.firmwareNetworkQuality)
+        ? item.firmwareNetworkQuality
+        : '';
+    if (!validQuality || item?.firmwareNetworkQualityState === 'unavailable') {
+        return 'Firmware network quality unavailable (topology-sensitive telemetry)';
+    }
+
+    let provenance = '';
+    if (item?.firmwareNetworkQualityState === 'fallback') {
+        provenance = '/networkInfo fallback';
+    } else if (item?.firmwareNetworkQualityState === 'conflict') {
+        const networkInfoQuality = ['Excellent', 'Good', 'Fair', 'Marginal', 'Poor']
+            .includes(item?.networkInfoFirmwareQuality)
+            ? item.networkInfoFirmwareQuality
+            : 'different value';
+        provenance = `/netStats; /networkInfo: ${networkInfoQuality}`;
+    } else if (item?.firmwareNetworkQualitySource === 'netStats') {
+        provenance = '/netStats';
+    } else if (item?.firmwareNetworkQualitySource === 'networkInfo') {
+        provenance = '/networkInfo';
+    }
+
+    const details = [provenance, 'topology-sensitive'].filter(Boolean).join('; ');
+    return `Firmware network quality: ${validQuality}${details ? ` (${details})` : ''}`;
+}
+
 export function settingsSections(snapshot) {
     const support = snapshot?.support || {};
     const errors = snapshot?.errors;

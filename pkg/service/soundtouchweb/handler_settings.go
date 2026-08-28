@@ -71,12 +71,17 @@ type settingsSource struct {
 }
 
 type settingsNetworkInterface struct {
-	Type      string `json:"type"`
-	Name      string `json:"name,omitempty"`
-	IPAddress string `json:"ipAddress,omitempty"`
-	SSID      string `json:"ssid,omitempty"`
-	State     string `json:"state,omitempty"`
-	Signal    string `json:"signal,omitempty"`
+	Type                         string `json:"type"`
+	Name                         string `json:"name,omitempty"`
+	MACAddress                   string `json:"macAddress,omitempty"`
+	IPAddress                    string `json:"ipAddress,omitempty"`
+	SSID                         string `json:"ssid,omitempty"`
+	Band                         string `json:"band,omitempty"`
+	State                        string `json:"state,omitempty"`
+	FirmwareNetworkQuality       string `json:"firmwareNetworkQuality,omitempty"`
+	FirmwareNetworkQualitySource string `json:"firmwareNetworkQualitySource,omitempty"`
+	FirmwareNetworkQualityState  string `json:"firmwareNetworkQualityState,omitempty"`
+	NetworkInfoFirmwareQuality   string `json:"networkInfoFirmwareQuality,omitempty"`
 }
 
 type settingsNetwork struct {
@@ -196,6 +201,26 @@ func settingsConnectionStatus(nowPlaying *models.NowPlaying) (string, string) {
 	return nowPlaying.ConnectionStatusInfo.Status, nowPlaying.ConnectionStatusInfo.DeviceName
 }
 
+func canonicalFirmwareNetworkQuality(value string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.TrimSuffix(normalized, "_signal")
+
+	switch normalized {
+	case "excellent":
+		return "Excellent", true
+	case "good":
+		return "Good", true
+	case "fair":
+		return "Fair", true
+	case "marginal":
+		return "Marginal", true
+	case "poor":
+		return "Poor", true
+	default:
+		return "", false
+	}
+}
+
 func readBasicDeviceSettings(device *webtypes.DeviceConnection, snapshot *deviceSettingsSnapshot) {
 	if snapshot.Support.ClockDisplay {
 		value, readErr := device.Client.GetClockDisplay()
@@ -301,20 +326,84 @@ func readNetworkDeviceSetting(
 
 	interfaces := value.GetInterfaces()
 	network := &settingsNetwork{Interfaces: make([]settingsNetworkInterface, 0, len(interfaces))}
+	connectedWiFiIndexes := make([]int, 0, 1)
 
 	for index := range interfaces {
 		iface := &interfaces[index]
-		network.Interfaces = append(network.Interfaces, settingsNetworkInterface{
-			Type:      iface.Type,
-			Name:      iface.Name,
-			IPAddress: iface.IPAddress,
-			SSID:      iface.SSID,
-			State:     iface.State,
-			Signal:    iface.Signal,
-		})
+
+		projected := settingsNetworkInterface{
+			Type:       iface.Type,
+			Name:       iface.Name,
+			MACAddress: iface.MacAddress,
+			IPAddress:  iface.IPAddress,
+			SSID:       iface.SSID,
+			Band:       iface.GetFrequencyBand(),
+			State:      iface.State,
+		}
+		if iface.IsWiFi() && iface.IsConnected() {
+			connectedWiFiIndexes = append(connectedWiFiIndexes, index)
+
+			quality, valid := canonicalFirmwareNetworkQuality(iface.Signal)
+			if valid {
+				projected.FirmwareNetworkQuality = quality
+				projected.FirmwareNetworkQualitySource = "networkInfo"
+				projected.FirmwareNetworkQualityState = "reported"
+			} else {
+				projected.FirmwareNetworkQualityState = "unavailable"
+			}
+		}
+
+		network.Interfaces = append(network.Interfaces, projected)
 	}
 
 	snapshot.Network = network
+
+	if len(connectedWiFiIndexes) == 0 || !supportedURLs.HasURL("/netStats") {
+		return
+	}
+
+	stats, statsErr := device.Client.GetNetworkStats()
+
+	for _, index := range connectedWiFiIndexes {
+		projected := &network.Interfaces[index]
+		if statsErr != nil {
+			if projected.FirmwareNetworkQuality != "" {
+				projected.FirmwareNetworkQualityState = "fallback"
+			}
+
+			continue
+		}
+
+		connectedWiFi := &interfaces[index]
+
+		activeWireless := stats.FindRunningWireless(connectedWiFi.IPAddress, connectedWiFi.SSID)
+		if activeWireless == nil {
+			if projected.FirmwareNetworkQuality != "" {
+				projected.FirmwareNetworkQualityState = "fallback"
+			}
+
+			continue
+		}
+
+		quality, valid := activeWireless.CanonicalRSSI()
+		if !valid {
+			if projected.FirmwareNetworkQuality != "" {
+				projected.FirmwareNetworkQualityState = "fallback"
+			}
+
+			continue
+		}
+
+		if projected.FirmwareNetworkQuality != "" && projected.FirmwareNetworkQuality != quality {
+			projected.NetworkInfoFirmwareQuality = projected.FirmwareNetworkQuality
+			projected.FirmwareNetworkQualityState = "conflict"
+		} else {
+			projected.FirmwareNetworkQualityState = "reported"
+		}
+
+		projected.FirmwareNetworkQuality = quality
+		projected.FirmwareNetworkQualitySource = "netStats"
+	}
 }
 
 func (app *WebApp) readDeviceSettings(device *webtypes.DeviceConnection) (*deviceSettingsSnapshot, error) {

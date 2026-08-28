@@ -5,6 +5,10 @@ import {
     clockControls,
     clockDisplayPatch,
     deviceSettingsTitle,
+    firmwareNetworkQualityEvidence,
+    networkInterfaceGroups,
+    networkInterfaceName,
+    networkInterfaceSummary,
     settingsSections,
 } from '../static/js/settingsPresentation.mjs';
 
@@ -123,6 +127,105 @@ test('network status is visible without Wi-Fi onboarding support', () => {
     }), ['network']);
 });
 
+test('network presentation separates connected interfaces from disconnected interfaces', () => {
+    const network = {
+        interfaces: [
+            {
+                type: 'WIFI_INTERFACE',
+                name: 'wlan0',
+                ipAddress: '192.0.2.10',
+                ssid: 'Test WiFi',
+                band: '5GHz',
+                state: 'NETWORK_WIFI_CONNECTED',
+                firmwareNetworkQuality: 'Marginal',
+                firmwareNetworkQualitySource: 'netStats',
+                firmwareNetworkQualityState: 'reported',
+            },
+            {
+                type: 'WIFI_INTERFACE',
+                name: 'wlan1',
+                macAddress: 'AA:BB:CC:DD:EE:01',
+                ipAddress: '192.0.2.11',
+                band: '2.4GHz',
+                state: 'NETWORK_WIFI_DISCONNECTED',
+            },
+            {
+                type: 'ETHERNET_INTERFACE',
+                name: 'eth0',
+                macAddress: 'AA:BB:CC:DD:EE:02',
+                state: 'NETWORK_ETHERNET_DISCONNECTED',
+            },
+        ],
+    };
+
+    const groups = networkInterfaceGroups(network);
+    assert.equal(groups.connected.length, 1);
+    assert.equal(groups.disconnected.length, 2);
+    assert.equal(networkInterfaceName(groups.connected[0]), 'Wi-Fi · Test WiFi');
+    assert.equal(
+        networkInterfaceSummary(groups.connected[0]),
+        '192.0.2.10 · 5GHz',
+    );
+    assert.equal(networkInterfaceName(groups.disconnected[0], true), 'Wi-Fi interface · wlan1');
+    assert.equal(
+        networkInterfaceSummary(groups.disconnected[0], true),
+        'Disconnected · 192.0.2.11 · 2.4GHz',
+    );
+});
+
+test('firmware network quality remains subordinate topology-sensitive evidence', () => {
+    const summary = networkInterfaceSummary({ ipAddress: '192.0.2.10', band: '5GHz' });
+    const evidence = firmwareNetworkQualityEvidence({
+        firmwareNetworkQuality: 'Good',
+        firmwareNetworkQualitySource: 'netStats',
+        firmwareNetworkQualityState: 'reported',
+    });
+
+    assert.equal(summary, '192.0.2.10 · 5GHz');
+    assert.equal(evidence, 'Firmware network quality: Good (/netStats; topology-sensitive)');
+    assert.equal(`${summary} ${evidence}`.includes('dBm'), false);
+    assert.equal(`${summary} ${evidence}`.includes('RSSI'), false);
+    assert.equal(`${summary} ${evidence}`.includes('Signal'), false);
+});
+
+test('firmware network quality conflict retains both endpoint values', () => {
+    assert.equal(firmwareNetworkQualityEvidence({
+        firmwareNetworkQuality: 'Good',
+        firmwareNetworkQualitySource: 'netStats',
+        firmwareNetworkQualityState: 'conflict',
+        networkInfoFirmwareQuality: 'Poor',
+    }), 'Firmware network quality: Good (/netStats; /networkInfo: Poor; topology-sensitive)');
+});
+
+test('Fair and Marginal remain distinct known firmware quality categories', () => {
+    assert.equal(firmwareNetworkQualityEvidence({
+        firmwareNetworkQuality: 'Fair',
+        firmwareNetworkQualitySource: 'networkInfo',
+        firmwareNetworkQualityState: 'reported',
+    }), 'Firmware network quality: Fair (/networkInfo; topology-sensitive)');
+    assert.equal(firmwareNetworkQualityEvidence({
+        firmwareNetworkQuality: 'Marginal',
+        firmwareNetworkQualitySource: 'netStats',
+        firmwareNetworkQualityState: 'reported',
+    }), 'Firmware network quality: Marginal (/netStats; topology-sensitive)');
+});
+
+test('firmware network quality fallback and unavailable states are explicit', () => {
+    assert.equal(firmwareNetworkQualityEvidence({
+        firmwareNetworkQuality: 'Poor',
+        firmwareNetworkQualitySource: 'networkInfo',
+        firmwareNetworkQualityState: 'fallback',
+    }), 'Firmware network quality: Poor (/networkInfo fallback; topology-sensitive)');
+
+    assert.equal(firmwareNetworkQualityEvidence({
+        firmwareNetworkQualityState: 'unavailable',
+    }), 'Firmware network quality unavailable (topology-sensitive telemetry)');
+    assert.equal(firmwareNetworkQualityEvidence({
+        firmwareNetworkQuality: '-54 dBm',
+        firmwareNetworkQualityState: 'reported',
+    }), 'Firmware network quality unavailable (topology-sensitive telemetry)');
+});
+
 test('Wi-Fi onboarding requires both capability and URL', () => {
     assert.deepEqual(settingsSections({
         support: { wifiOnboarding: true },
@@ -142,4 +245,11 @@ test('partial source and network read errors remain visible in order', () => {
             sources: 'source read failed',
         },
     }), ['sources', 'network']);
+});
+
+test('expected network telemetry disagreement is not a red section error', () => {
+    assert.deepEqual(settingsSections({
+        support: {},
+        errors: { networkStats: 'telemetry differs' },
+    }), []);
 });
