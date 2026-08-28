@@ -1,6 +1,7 @@
 package soundtouchweb
 
 import (
+	"net"
 	"strings"
 	"time"
 
@@ -192,7 +193,7 @@ func projectLogicalDeviceEntries(snapshot []deviceProjectionEntry) (
 
 		pair := masters[entry.ID]
 		devices[entry.ID] = deviceView{
-			Info:       projectedDeviceInfo(entry.Info, pair),
+			Info:       projectedDeviceInfo(entry.ID, entry.Info, pair),
 			Status:     entry.Status,
 			LastSeen:   entry.LastSeen,
 			StereoPair: pair,
@@ -394,7 +395,7 @@ func newZoneMember(
 	member := zoneMemberView{
 		Kind:         "speaker",
 		ControlID:    controlID,
-		IP:           controlID,
+		IP:           zoneMemberIPs[deviceID],
 		HardwareID:   deviceID,
 		DeviceIDs:    []string{deviceID},
 		Connectivity: webtypes.ConnectivityOffline,
@@ -415,6 +416,7 @@ func newZoneMember(
 		member.Model = view.Info.Type
 		member.Type = view.Info.Type
 	}
+	member.IP = projectedIPAddress(logicalID, view.Info, member.IP)
 
 	member.Connectivity = projectedConnectivity(view.Status)
 	member.Available = member.Connectivity != webtypes.ConnectivityOffline
@@ -492,7 +494,7 @@ func newZonePhysicalMember(
 		return member
 	}
 
-	member.IP = entry.ID
+	member.IP = projectedIPAddress(entry.ID, entry.Info, member.IP)
 	if entry.Info != nil {
 		member.Name = entry.Info.Name
 		member.Type = entry.Info.Type
@@ -637,12 +639,10 @@ func newStereoPairView(group *models.Group, byDeviceID map[string][]deviceProjec
 		if entry, ok := uniqueDeviceEntry(byDeviceID, role.DeviceID); ok {
 			if entry.Info != nil {
 				member.Name = entry.Info.Name
-				if entry.Info.IPAddress != "" {
-					member.IPAddress = entry.Info.IPAddress
-				}
+				member.IPAddress = projectedIPAddress(entry.ID, entry.Info, member.IPAddress)
 			}
 
-			member.Available = entry.Status != nil && entry.Status.IsConnected
+			member.Available = projectedConnectivity(entry.Status) != webtypes.ConnectivityOffline
 			if member.Available {
 				available++
 			}
@@ -663,15 +663,40 @@ func newStereoPairView(group *models.Group, byDeviceID map[string][]deviceProjec
 	}
 }
 
-func projectedDeviceInfo(info *models.DeviceInfo, pair *stereoPairView) *models.DeviceInfo {
-	if info == nil || pair == nil || pair.Name == "" || pair.Name == info.Name {
+func projectedDeviceInfo(controlID string, info *models.DeviceInfo, pair *stereoPairView) *models.DeviceInfo {
+	if info == nil {
+		return info
+	}
+
+	address := projectedIPAddress(controlID, info, "")
+	name := info.Name
+	if pair != nil && pair.Name != "" {
+		name = pair.Name
+	}
+	if address == info.IPAddress && name == info.Name {
 		return info
 	}
 
 	projected := *info
-	projected.Name = pair.Name
+	projected.IPAddress = address
+	projected.Name = name
 
 	return &projected
+}
+
+func projectedIPAddress(controlID string, info *models.DeviceInfo, fallback string) string {
+	candidates := []string{controlID, fallback}
+	if info != nil {
+		candidates = append([]string{info.IPAddress}, candidates...)
+	}
+
+	for _, candidate := range candidates {
+		if ip := net.ParseIP(strings.TrimSpace(candidate)); ip != nil {
+			return ip.String()
+		}
+	}
+
+	return ""
 }
 
 func logicalPairName(groupName string, members []stereoPairMemberView) string {

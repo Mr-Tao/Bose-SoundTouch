@@ -3,6 +3,7 @@ package soundtouchweb
 import (
 	"context"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/config"
 	"github.com/gesellix/bose-soundtouch/pkg/discovery"
+	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
 	"github.com/gesellix/bose-soundtouch/pkg/speaker"
 )
@@ -85,10 +87,9 @@ func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtyp
 		return nil
 	}
 
-	// Ensure IPAddress is set for the web UI
-	if info.IPAddress == "" {
-		info.IPAddress = host
-	}
+	// Keep the registry key stable for controls, but expose the speaker's
+	// numeric address separately for presentation and sorting.
+	info.IPAddress = resolvedDeviceIPAddress(host, info)
 
 	conn := webtypes.NewDeviceConnection(c, info)
 	conn.MarkHTTPSuccess(time.Now())
@@ -123,6 +124,44 @@ func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtyp
 	log.Printf("Added %s device %s (%s) at %s:%d", sanitizeLog(source), sanitizeLog(info.Name), sanitizeLog(info.Type), sanitizeLog(host), port)
 
 	return conn
+}
+
+func resolvedDeviceIPAddress(host string, info *models.DeviceInfo) string {
+	if info != nil {
+		if address := numericIPAddress(info.IPAddress); address != "" {
+			return address
+		}
+
+		for _, network := range info.NetworkInfo {
+			if address := numericIPAddress(network.IPAddress); address != "" {
+				return address
+			}
+		}
+	}
+
+	bareHost := hostOnly(host)
+	if address := numericIPAddress(bareHost); address != "" {
+		return address
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", bareHost)
+	if err == nil && len(addresses) > 0 {
+		return addresses[0].String()
+	}
+
+	return ""
+}
+
+func numericIPAddress(address string) string {
+	ip := net.ParseIP(strings.TrimSpace(address))
+	if ip == nil {
+		return ""
+	}
+
+	return ip.String()
 }
 
 // SeedExtraDevices registers any devices reported by the ExtraDeviceHosts hook

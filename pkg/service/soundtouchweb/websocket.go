@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/models"
@@ -233,9 +234,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 	defer func() {
 		conn.SetWebSocket(nil)
-		conn.UpdateStatus(func(status *webtypes.DeviceStatus) {
-			status.WebSocketConnected = false
-		})
+		conn.ObserveEventStream(false, time.Now())
 		conn.FinishWebSocketLoop()
 	}()
 
@@ -265,6 +264,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		// UpdateStatus so concurrent events and the periodic poller
 		// (UpdateDeviceStatus) cannot lose each other's writes.
 		wsClient.OnNowPlaying(func(event *models.NowPlayingUpdatedEvent) {
+			activity := time.Now()
 			np := &event.NowPlaying
 
 			// A /select returns 200 even when the source is rejected; the
@@ -276,9 +276,9 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 			prevSource = np.Source
 
-			conn.ApplySpeakerEvent(func(s *webtypes.DeviceStatus) {
+			conn.ApplySpeakerEventAt(activity, func(s *webtypes.DeviceStatus) {
 				s.NowPlaying = np
-				s.LastActivity = time.Now()
+				s.LastActivity = activity
 			})
 		})
 
@@ -287,13 +287,17 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		})
 
 		wsClient.OnConnectionState(func(event *models.ConnectionStateUpdatedEvent) {
-			conn.ApplySpeakerEvent(func(s *webtypes.DeviceStatus) {
-				s.SpeakerConnectionState = &webtypes.SpeakerConnectionState{
-					State:  event.ConnectionState.State,
-					Signal: event.ConnectionState.Signal,
-				}
-				s.LastActivity = time.Now()
-			})
+			if !speakerConnectionEventMatches(conn, event.DeviceID) {
+				log.Printf("Ignoring connection state for mismatched device %s on %s",
+					sanitizeLog(event.DeviceID), sanitizeLog(deviceID))
+
+				return
+			}
+
+			conn.ApplySpeakerConnectionEvent(webtypes.SpeakerConnectionState{
+				State:  event.ConnectionState.State,
+				Signal: event.ConnectionState.Signal,
+			}, time.Now())
 		})
 
 		wsClient.OnPresetUpdated(func(event *models.PresetUpdatedEvent) {
@@ -308,10 +312,12 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		})
 
 		wsClient.OnZoneUpdated(func(event *models.ZoneUpdatedEvent) {
+			conn.MarkEventStreamActivity(time.Now())
 			go app.refreshZonesAfterEvent(event.DeviceID, event.Zone.Master)
 		})
 
 		wsClient.OnNameUpdated(func(event *models.NameUpdatedEvent) {
+			conn.MarkEventStreamActivity(time.Now())
 			conn.ApplyNameEvent(event.Name.Value)
 		})
 
@@ -331,10 +337,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		}
 
 		conn.SetWebSocket(wsClient)
-
-		conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-			s.WebSocketConnected = true
-		})
+		conn.ObserveEventStream(true, time.Now())
 
 		log.Printf("WebSocket connected for device %s", sanitizeLog(deviceID))
 
@@ -355,16 +358,17 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 				return
 			case <-transportTicker.C:
+				observation := conn.BeginEventStreamObservation()
 				connected := wsClient.IsConnected()
+				if !conn.CompleteEventStreamObservation(observation, connected, time.Now()) {
+					continue
+				}
+
 				if connected == transportConnected {
 					continue
 				}
 
 				transportConnected = connected
-
-				conn.UpdateStatus(func(status *webtypes.DeviceStatus) {
-					status.WebSocketConnected = connected
-				})
 
 				if connected {
 					log.Printf("WebSocket reconnected for device %s", sanitizeLog(deviceID))
@@ -375,6 +379,20 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			}
 		}
 	}
+}
+
+func speakerConnectionEventMatches(conn *webtypes.DeviceConnection, eventDeviceID string) bool {
+	eventDeviceID = strings.TrimSpace(eventDeviceID)
+	if eventDeviceID == "" {
+		return true
+	}
+
+	info := conn.Info()
+	if info == nil || strings.TrimSpace(info.DeviceID) == "" {
+		return false
+	}
+
+	return strings.EqualFold(eventDeviceID, strings.TrimSpace(info.DeviceID))
 }
 
 // sleepOrDone waits for d to elapse or for the connection to be closed,
@@ -575,6 +593,7 @@ func anyStatusFetchSucceeded(errors ...error) bool {
 }
 
 func applyGroupUpdatedEvent(conn *webtypes.DeviceConnection, event *models.GroupUpdatedEvent) {
+	conn.MarkEventStreamActivity(time.Now())
 	conn.ApplyGroupEvent(&event.Group, time.Now())
 }
 

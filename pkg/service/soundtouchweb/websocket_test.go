@@ -112,6 +112,22 @@ func TestUpdateDeviceStatusPreservesGroupOnError(t *testing.T) {
 	}
 }
 
+func TestSpeakerConnectionEventMatchesRegisteredHardwareID(t *testing.T) {
+	conn := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "AA11BB22CC33"})
+
+	for _, eventDeviceID := range []string{"", "AA11BB22CC33", "aa11bb22cc33"} {
+		if !speakerConnectionEventMatches(conn, eventDeviceID) {
+			t.Fatalf("event device ID %q should match", eventDeviceID)
+		}
+	}
+	if speakerConnectionEventMatches(conn, "DEADBEEF0000") {
+		t.Fatal("mismatched speaker connection event was accepted")
+	}
+	if speakerConnectionEventMatches(webtypes.NewDeviceConnection(nil, nil), "AA11BB22CC33") {
+		t.Fatal("identified event matched a connection without device identity")
+	}
+}
+
 func TestUpdateDeviceStatusRefreshesDeviceName(t *testing.T) {
 	server := newStatusTestServer(t, http.StatusOK, `<group/>`)
 	defer server.Close()

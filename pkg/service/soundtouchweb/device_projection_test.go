@@ -12,14 +12,18 @@ import (
 )
 
 func projectionDevice(host, deviceID, name string, connected bool, group *models.Group) DeviceEntry {
+	return projectionDeviceAt(host, host, deviceID, name, connected, group)
+}
+
+func projectionDeviceAt(controlID, address, deviceID, name string, connected bool, group *models.Group) DeviceEntry {
 	conn := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
 		DeviceID:  deviceID,
 		Name:      name,
-		IPAddress: host,
+		IPAddress: address,
 	})
 	conn.SetStatus(&webtypes.DeviceStatus{IsConnected: connected, Group: group})
 
-	return DeviceEntry{ID: host, Device: conn}
+	return DeviceEntry{ID: controlID, Device: conn}
 }
 
 func projectionDeviceWithZone(
@@ -81,6 +85,23 @@ func TestProjectDeviceEntriesCollapsesStereoPairUnderMaster(t *testing.T) {
 
 	if _, ok := got["192.0.2.11"]; ok {
 		t.Error("physical right member must not be a second control target")
+	}
+}
+
+func TestProjectDeviceEntriesTreatsStaleStereoMemberAsAvailable(t *testing.T) {
+	group := testStereoGroup()
+	left := projectionDevice("192.0.2.10", "left-id", "Living Room", false, group)
+	left.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Connectivity = webtypes.ConnectivityStale
+	})
+	right := projectionDevice("192.0.2.11", "right-id", "Living Room", true, group)
+	right.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Connectivity = webtypes.ConnectivityOnline
+	})
+
+	pair := projectDeviceEntries([]DeviceEntry{left, right})["192.0.2.10"].StereoPair
+	if pair == nil || pair.AvailableMemberCount != 2 || pair.Degraded {
+		t.Fatalf("stale logical member was treated as offline: %+v", pair)
 	}
 }
 
@@ -162,6 +183,37 @@ func TestProjectDeviceEntriesCollapsesMasterConfirmedZone(t *testing.T) {
 	}
 	if _, exists := got["192.0.2.20"]; exists {
 		t.Fatal("zone member remained a separate control target")
+	}
+}
+
+func TestProjectDeviceEntriesKeepsHostnameControlIDsSeparateFromAddresses(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master: "master-id",
+		Members: []models.Member{
+			{DeviceID: "master-id", IP: "192.0.2.10"},
+			{DeviceID: "member-id", IP: "192.0.2.20"},
+		},
+	}
+
+	master := projectionDeviceAt("kitchen.local", "192.0.2.10", "master-id", "Kitchen", true, nil)
+	master.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Zone = zone
+	})
+	member := projectionDeviceAt("dining.local", "192.0.2.20", "member-id", "Dining", true, nil)
+
+	got := projectDeviceEntries([]DeviceEntry{master, member})
+	view, ok := got["kitchen.local"]
+	if !ok || len(got) != 1 || view.Zone == nil {
+		t.Fatalf("hostname-keyed zone projection = %+v", got)
+	}
+	if view.Info.IPAddress != "192.0.2.10" || view.Zone.MasterControlID != "kitchen.local" {
+		t.Fatalf("master address/control ID were not separate: %+v", view)
+	}
+
+	logical := view.Zone.Members[1]
+	if logical.ControlID != "dining.local" || logical.IP != "192.0.2.20" ||
+		len(logical.PhysicalMembers) != 1 || logical.PhysicalMembers[0].IP != "192.0.2.20" {
+		t.Fatalf("member address/control ID were not separate: %+v", logical)
 	}
 }
 

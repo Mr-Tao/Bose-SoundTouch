@@ -77,10 +77,18 @@ type DeviceConnection struct {
 
 	nextPollGeneration  uint64
 	lastPollGeneration  uint64
-	lastHTTPSuccess     time.Time
+	httpReachable       bool
 	consecutiveFailures int
 	speakerEventGen     uint64
 	pollEventGen        map[uint64]uint64
+
+	nextEventStreamGeneration  uint64
+	lastEventStreamGeneration  uint64
+	eventStreamConnected       bool
+	lastDirectSuccess          time.Time
+	speakerConnectionKnown     bool
+	speakerConnectionConnected bool
+	speakerConnectionObserved  time.Time
 
 	// groupMu orders polled /getGroup responses against real-time
 	// groupUpdated events. Starting a newer refresh or receiving an event
@@ -121,17 +129,17 @@ type DeviceStatus struct {
 	LastActivity           time.Time                `json:"lastActivity"`
 }
 
-// Connectivity is the player's view of HTTP reachability. It deliberately
-// excludes both the event WebSocket transport and the network state reported
-// by the speaker itself: either can flap while the control API remains usable.
+// Connectivity is the player's aggregate view of device HTTP reachability,
+// the event WebSocket transport, and the network state reported by the speaker.
+// A single transport flap cannot make a still-reachable speaker offline.
 type Connectivity string
 
 const (
-	// ConnectivityOnline means the latest HTTP poll reached the speaker.
+	// ConnectivityOnline means at least one direct player-to-speaker path is live.
 	ConnectivityOnline Connectivity = "online"
-	// ConnectivityStale means recent HTTP probes failed within the grace period.
+	// ConnectivityStale means direct paths are currently inconclusive or recently failed.
 	ConnectivityStale Connectivity = "stale"
-	// ConnectivityOffline means repeated HTTP failures exceeded the grace period.
+	// ConnectivityOffline means all direct paths failed beyond the grace period.
 	ConnectivityOffline Connectivity = "offline"
 )
 
@@ -141,8 +149,8 @@ const (
 )
 
 // SpeakerConnectionState is the network state reported by a SoundTouch
-// connectionStateUpdated event. It is diagnostic data, not proof that the
-// player can currently reach the speaker's HTTP API.
+// connectionStateUpdated event. It is supporting evidence and cannot override
+// a current HTTP or event-stream success by itself.
 type SpeakerConnectionState struct {
 	State  string `json:"state"`
 	Signal string `json:"signal,omitempty"`
@@ -530,14 +538,121 @@ func (c *DeviceConnection) BeginHTTPPoll() uint64 {
 }
 
 // ApplySpeakerEvent serializes a real-time speaker event against HTTP poll
-// completion. A poll that began before this event may still update health, but
-// cannot merge older payload fields over the event.
+// completion. A poll that began before this event may still update its own HTTP
+// input, but cannot merge older payload fields or demote the newer live event
+// stream observation.
 func (c *DeviceConnection) ApplySpeakerEvent(mut func(*DeviceStatus)) {
+	c.ApplySpeakerEventAt(time.Now(), mut)
+}
+
+// ApplySpeakerEventAt is the deterministic-time form used by event handlers
+// and tests. Receiving any event proves that the event stream is currently
+// usable, irrespective of the event's payload.
+func (c *DeviceConnection) ApplySpeakerEventAt(at time.Time, mut func(*DeviceStatus)) {
 	c.healthMu.Lock()
 	defer c.healthMu.Unlock()
 
 	c.speakerEventGen++
-	c.UpdateStatus(mut)
+	c.markEventStreamActivityLocked(at)
+	c.UpdateStatus(func(status *DeviceStatus) {
+		if mut != nil {
+			mut(status)
+		}
+		c.applyConnectivityLocked(status, at)
+	})
+}
+
+// ApplySpeakerConnectionEvent stores a speaker-reported connection state as a
+// separate supporting input. The event itself is also direct evidence that the
+// event stream is live. Unknown values remain diagnostic only.
+func (c *DeviceConnection) ApplySpeakerConnectionEvent(state SpeakerConnectionState, at time.Time) {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	c.speakerEventGen++
+	c.markEventStreamActivityLocked(at)
+	c.speakerConnectionObserved = at
+
+	switch strings.ToUpper(strings.TrimSpace(state.State)) {
+	case string(models.ConnectionStateConnected):
+		c.speakerConnectionKnown = true
+		c.speakerConnectionConnected = true
+	case string(models.ConnectionStateDisconnected):
+		c.speakerConnectionKnown = true
+		c.speakerConnectionConnected = false
+	default:
+		c.speakerConnectionKnown = false
+		c.speakerConnectionConnected = false
+	}
+
+	c.UpdateStatus(func(status *DeviceStatus) {
+		reported := state
+		status.SpeakerConnectionState = &reported
+		status.LastActivity = at
+		c.applyConnectivityLocked(status, at)
+	})
+}
+
+// BeginEventStreamObservation reserves an ordering generation before the
+// caller samples WebSocketClient.IsConnected. A speaker event arriving during
+// that sample receives a newer generation and prevents the stale sample from
+// overwriting it.
+func (c *DeviceConnection) BeginEventStreamObservation() uint64 {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	c.nextEventStreamGeneration++
+
+	return c.nextEventStreamGeneration
+}
+
+// CompleteEventStreamObservation applies a sampled transport state unless a
+// newer stream observation or speaker event already won. It reports whether
+// the observation was accepted.
+func (c *DeviceConnection) CompleteEventStreamObservation(generation uint64, connected bool, at time.Time) bool {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	if generation <= c.lastEventStreamGeneration {
+		return false
+	}
+
+	c.lastEventStreamGeneration = generation
+	c.eventStreamConnected = connected
+	if connected {
+		c.recordDirectSuccessLocked(at)
+	}
+
+	c.UpdateStatus(func(status *DeviceStatus) {
+		c.applyConnectivityLocked(status, at)
+	})
+
+	return true
+}
+
+// ObserveEventStream records an immediate transport transition without an
+// external sampling window.
+func (c *DeviceConnection) ObserveEventStream(connected bool, at time.Time) bool {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	c.nextEventStreamGeneration++
+	c.lastEventStreamGeneration = c.nextEventStreamGeneration
+	c.eventStreamConnected = connected
+	if connected {
+		c.recordDirectSuccessLocked(at)
+	}
+	c.UpdateStatus(func(status *DeviceStatus) {
+		c.applyConnectivityLocked(status, at)
+	})
+
+	return true
+}
+
+// MarkEventStreamActivity records an ordinary speaker event that is handled by
+// a field-specific path such as name or group updates.
+func (c *DeviceConnection) MarkEventStreamActivity(at time.Time) {
+	c.ObserveEventStream(true, at)
 }
 
 // CompleteHTTPPoll records the outcome of one HTTP status poll and applies its
@@ -566,19 +681,13 @@ func (c *DeviceConnection) CompleteHTTPPoll(
 		}
 	}
 
-	connectivity := ConnectivityStale
-
 	if success {
-		c.lastHTTPSuccess = at
+		c.httpReachable = true
 		c.consecutiveFailures = 0
-		connectivity = ConnectivityOnline
+		c.recordDirectSuccessLocked(at)
 	} else {
+		c.httpReachable = false
 		c.consecutiveFailures++
-		if c.consecutiveFailures >= offlineFailureThreshold &&
-			!c.lastHTTPSuccess.IsZero() &&
-			at.Sub(c.lastHTTPSuccess) >= offlineGracePeriod {
-			connectivity = ConnectivityOffline
-		}
 	}
 
 	c.UpdateStatus(func(status *DeviceStatus) {
@@ -586,16 +695,64 @@ func (c *DeviceConnection) CompleteHTTPPoll(
 			merge(status)
 		}
 
-		status.Connectivity = connectivity
-		status.HTTPReachable = success
-
-		status.IsConnected = connectivity != ConnectivityOffline
+		c.applyConnectivityLocked(status, at)
 		if success {
 			status.LastActivity = at
 		}
 	})
 
 	return true
+}
+
+func (c *DeviceConnection) markEventStreamActivityLocked(at time.Time) {
+	c.nextEventStreamGeneration++
+	c.lastEventStreamGeneration = c.nextEventStreamGeneration
+	c.eventStreamConnected = true
+	c.recordDirectSuccessLocked(at)
+}
+
+func (c *DeviceConnection) recordDirectSuccessLocked(at time.Time) {
+	if c.lastDirectSuccess.IsZero() || at.After(c.lastDirectSuccess) {
+		c.lastDirectSuccess = at
+	}
+}
+
+func (c *DeviceConnection) applyConnectivityLocked(status *DeviceStatus, at time.Time) {
+	connectivity := c.connectivityLocked(at)
+	status.Connectivity = connectivity
+	status.HTTPReachable = c.httpReachable
+	status.WebSocketConnected = c.eventStreamConnected
+	status.IsConnected = connectivity != ConnectivityOffline
+}
+
+func (c *DeviceConnection) connectivityLocked(at time.Time) Connectivity {
+	if c.httpReachable || c.eventStreamConnected {
+		return ConnectivityOnline
+	}
+
+	if c.speakerConnectionKnown && c.speakerConnectionConnected &&
+		withinConnectivityGrace(at, c.speakerConnectionObserved) {
+		return ConnectivityStale
+	}
+
+	if c.consecutiveFailures < offlineFailureThreshold ||
+		withinConnectivityGrace(at, c.lastDirectSuccess) {
+		return ConnectivityStale
+	}
+
+	return ConnectivityOffline
+}
+
+func withinConnectivityGrace(at, success time.Time) bool {
+	if success.IsZero() {
+		return false
+	}
+
+	if at.Before(success) {
+		return true
+	}
+
+	return at.Sub(success) < offlineGracePeriod
 }
 
 // MarkHTTPSuccess records a successful out-of-band HTTP request such as the

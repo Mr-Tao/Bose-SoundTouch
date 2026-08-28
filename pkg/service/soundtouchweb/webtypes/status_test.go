@@ -107,6 +107,134 @@ func TestHTTPPollStaysStaleBeforeGracePeriod(t *testing.T) {
 	}
 }
 
+func TestConnectivityAggregatesIndependentDirectInputs(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	conn.ObserveEventStream(true, started)
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("stream-only success = %+v", status)
+	}
+
+	firstFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(firstFailure, false, started.Add(30*time.Second), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("HTTP failure over live stream = %+v", status)
+	}
+
+	conn.ObserveEventStream(false, started.Add(30*time.Second))
+	status = conn.Status()
+	if status.Connectivity != ConnectivityStale || status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("first direct-path loss = %+v", status)
+	}
+
+	secondFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(secondFailure, false, started.Add(60*time.Second-time.Nanosecond), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("state before grace boundary = %+v", status)
+	}
+
+	thirdFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(thirdFailure, false, started.Add(60*time.Second), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOffline || status.IsConnected {
+		t.Fatalf("state at grace boundary = %+v", status)
+	}
+
+	conn.ObserveEventStream(true, started.Add(61*time.Second))
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("immediate stream recovery = %+v", status)
+	}
+}
+
+func TestOlderHTTPFailureCannotDemoteNewerStreamActivity(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	older := conn.BeginHTTPPoll()
+	conn.ObserveEventStream(true, started.Add(61*time.Second))
+	if !conn.CompleteHTTPPoll(older, false, started.Add(62*time.Second), nil) {
+		t.Fatal("latest HTTP-channel observation was unexpectedly rejected")
+	}
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("older HTTP failure demoted newer stream success: %+v", status)
+	}
+}
+
+func TestOlderStreamSampleCannotOverwriteNewerSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	older := conn.BeginEventStreamObservation()
+	conn.ApplySpeakerEventAt(started.Add(time.Second), func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 42}
+	})
+	if conn.CompleteEventStreamObservation(older, false, started.Add(2*time.Second)) {
+		t.Fatal("older sampled disconnect was unexpectedly accepted")
+	}
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("older sampled disconnect demoted event success: %+v", status)
+	}
+	if status.Volume == nil || status.Volume.ActualVolume != 42 {
+		t.Fatalf("speaker event payload was lost: %+v", status.Volume)
+	}
+}
+
+func TestSpeakerConnectionReportCannotOverrideDirectSuccess(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	conn.ApplySpeakerConnectionEvent(SpeakerConnectionState{
+		State: string(models.ConnectionStateDisconnected), Signal: "POOR",
+	}, started.Add(time.Second))
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("speaker report overrode direct success: %+v", status)
+	}
+	if status.SpeakerConnectionState == nil ||
+		status.SpeakerConnectionState.State != string(models.ConnectionStateDisconnected) {
+		t.Fatalf("speaker diagnostic was not retained: %+v", status.SpeakerConnectionState)
+	}
+
+	conn.ApplySpeakerConnectionEvent(SpeakerConnectionState{State: "UNKNOWN"}, started.Add(2*time.Second))
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.SpeakerConnectionState == nil ||
+		status.SpeakerConnectionState.State != "UNKNOWN" {
+		t.Fatalf("unknown diagnostic changed direct connectivity: %+v", status)
+	}
+}
+
+func TestInitialHTTPFailuresCanReachOffline(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	first := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(first, false, started, nil)
+	if status := conn.Status(); status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("first initial failure = %+v", status)
+	}
+
+	second := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(second, false, started.Add(time.Second), nil)
+	if status := conn.Status(); status.Connectivity != ConnectivityOffline || status.IsConnected {
+		t.Fatalf("second initial failure = %+v", status)
+	}
+}
+
 func TestHTTPPollOlderFailureCannotOverwriteNewerSuccess(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
 	started := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
