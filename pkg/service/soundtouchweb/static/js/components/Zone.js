@@ -6,8 +6,7 @@ import {
     zoneMemberCountSummary,
     zoneMemberMetadata,
 } from '../zonePresentation.mjs';
-import { Settings } from './Settings.js';
-import { SoundSettings } from './SoundSettings.js';
+import { MemberSettings } from './MemberSettings.js';
 import { ZoneMemberVolumeControl } from './ZoneMemberVolumeControl.js';
 
 const html = htm.bind(h);
@@ -162,13 +161,11 @@ export function Zone({ deviceId, devices, volumePreview = null }) {
                     </div>
                 ` : null}
 
-                <${SoundSettings} controlId=${resolved.controlId} member=${member} />
-                ${member?.deviceSettingsTarget?.controlId ? html`
-                    <${Settings}
-                        deviceId=${member.deviceSettingsTarget.controlId}
-                        targetName=${member.deviceSettingsTarget.name || metadata.name}
-                    />
-                ` : null}
+                <${MemberSettings}
+                    controlId=${resolved.controlId}
+                    member=${member}
+                    fallbackName=${metadata.name}
+                />
             </div>
         `;
     }

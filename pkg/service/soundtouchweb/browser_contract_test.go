@@ -140,9 +140,12 @@ func TestPlayerBrowserContract(t *testing.T) {
 				t.Fatalf("open member disclosure: %v", err)
 			}
 			assertBrowserMemberDisclosure(t, runContext)
-			assertBrowserSoundSettingsCollapsed(t, runContext)
-			openBrowserSoundSettings(t, runContext)
-			assertBrowserSoundSettings(t, runContext)
+			assertBrowserMemberSettingsCollapsed(t, runContext)
+			openBrowserMemberSettings(t, runContext)
+			assertBrowserMemberSettings(t, runContext)
+			if viewport.name == "desktop-1440x900" {
+				assertBrowserEmbeddedSettingsGenerationFence(t, runContext)
+			}
 			assertBrowserDetailLayout(t, runContext)
 			assertNoHorizontalDocumentOverflow(t, runContext, "open member disclosure")
 			exerciseDetailGroupVolumeControl(t, runContext, controls, app)
@@ -726,47 +729,146 @@ func assertBrowserMemberDisclosure(t *testing.T, ctx context.Context) {
 	assertBrowserExpression(t, ctx, "physical LEFT/RIGHT rows have no independent volume sliders", `document.querySelectorAll('.zone-physical-member input[type="range"]').length === 0`)
 }
 
-func assertBrowserSoundSettingsCollapsed(t *testing.T, ctx context.Context) {
+func assertBrowserMemberSettingsCollapsed(t *testing.T, ctx context.Context) {
 	t.Helper()
 
 	pairMember := ".zone-logical-member:nth-child(2)"
-	assertBrowserExpression(t, ctx, "zone root has no implicit sound settings", `document.querySelector('.device-detail > .sound-settings-section') === null`)
-	assertBrowserExpression(t, ctx, "pair member owns one collapsed sound settings surface", fmt.Sprintf(`document.querySelectorAll(%q).length === 1 && document.querySelector(%q)?.open === false`, pairMember+" > .sound-settings-section", pairMember+" > .sound-settings-section"))
+	assertBrowserExpression(t, ctx, "zone root has no implicit member settings", `document.querySelector('.device-detail > .member-settings-section') === null`)
+	assertBrowserExpression(t, ctx, "every logical member owns one collapsed settings disclosure", `Array.from(document.querySelectorAll('.zone-logical-member')).every(row => {
+		const disclosures = row.querySelectorAll(':scope > details');
+		return disclosures.length === 1 && disclosures[0].classList.contains('member-settings-section') && disclosures[0].open === false;
+	})`)
+	assertBrowserStrings(t, ctx, "member settings disclosure titles", `Array.from(document.querySelectorAll('.zone-logical-member > .member-settings-section > .settings-summary .section-title')).map(node => node.textContent.trim())`, []string{"Settings", "Settings"})
+	assertBrowserStrings(t, ctx, "member settings disclosure accessible names", `Array.from(document.querySelectorAll('.zone-logical-member > .member-settings-section > .settings-summary')).map(node => node.getAttribute('aria-label'))`, []string{
+		"Settings for " + contractDegradedName,
+		"Settings for " + contractPairName,
+	})
+	assertBrowserExpression(t, ctx, "peer sound and device disclosures are absent", `Array.from(document.querySelectorAll('.zone-logical-member')).every(row => row.querySelectorAll(':scope > .sound-settings-section, :scope > .settings-section').length === 0)`)
+	assertBrowserExpression(t, ctx, "device settings stay lazy while collapsed", `document.querySelectorAll('.member-settings-section .settings-loading, .member-settings-section .settings-load-error').length === 0`)
+	assertBrowserExpression(t, ctx, "collapsed member settings do not request physical device settings", `performance.getEntriesByType('resource').every(entry => !new URL(entry.name).pathname.includes('/settings/'))`)
 	assertBrowserExpression(t, ctx, "old prominent acoustic controls are absent", `document.querySelectorAll('.device-card .stereo-balance-slider, .device-card .bass-row, .controls .stereo-balance-slider, .controls .bass-row').length === 0`)
-	assertBrowserExpression(t, ctx, "device settings identify the physical pair master", fmt.Sprintf(`document.querySelector(%q)?.textContent.trim() === %q`, pairMember+" > .settings-section .section-title", "Device settings · "+contractRightName))
+	assertBrowserExpression(t, ctx, "device section identifies the physical pair master", fmt.Sprintf(`document.querySelector(%q)?.textContent.trim() === %q`, pairMember+" > .member-settings-section .device-settings-group > .member-settings-heading", "Device · "+contractRightName))
 }
 
-func openBrowserSoundSettings(t *testing.T, ctx context.Context) {
+func openBrowserMemberSettings(t *testing.T, ctx context.Context) {
 	t.Helper()
 
-	section := ".zone-logical-member:nth-child(2) > .sound-settings-section"
+	section := ".zone-logical-member:nth-child(2) > .member-settings-section"
 	if err := chromedp.Run(ctx,
 		chromedp.Click(section+" > .settings-summary", chromedp.ByQuery),
-		chromedp.WaitVisible(section+" .stepped-setting-controls", chromedp.ByQuery),
+		chromedp.WaitVisible(section+" .sound-settings-group .stepped-setting-controls", chromedp.ByQuery),
+		chromedp.Poll(fmt.Sprintf(`performance.getEntriesByType('resource').filter(entry => new URL(entry.name).pathname === %q).length === 1`, "/api/control/devices/"+contractPairRightHost+"/settings/"), nil),
 	); err != nil {
-		t.Fatalf("open pair sound settings: %v", err)
+		t.Fatalf("open pair member settings: %v", err)
 	}
 }
 
-func assertBrowserSoundSettings(t *testing.T, ctx context.Context) {
+func assertBrowserMemberSettings(t *testing.T, ctx context.Context) {
 	t.Helper()
 
-	section := ".zone-logical-member:nth-child(2) > .sound-settings-section"
-	assertBrowserExpression(t, ctx, "sound settings opened", fmt.Sprintf(`document.querySelector(%q)?.open === true`, section))
-	assertBrowserStrings(t, ctx, "scoped acoustic settings", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(control => [control.querySelector('.stepped-setting-label').textContent.trim(), control.querySelector('.stepped-setting-scope').textContent.trim(), control.querySelector('.stepped-setting-value').textContent.trim(), control.querySelector('.stepped-setting-footer span').textContent.trim()].join('|'))`, section+" .stepped-setting"), []string{
+	section := ".zone-logical-member:nth-child(2) > .member-settings-section"
+	soundSection := section + " > .member-settings-content > .sound-settings-group"
+	assertBrowserExpression(t, ctx, "member settings opened", fmt.Sprintf(`document.querySelector(%q)?.open === true`, section))
+	assertBrowserStrings(t, ctx, "subordinate member settings headings", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(node => node.textContent.trim())`, section+" > .member-settings-content > .member-settings-group > .member-settings-heading"), []string{
+		"Sound",
+		"Device · " + contractRightName,
+	})
+	assertBrowserExpression(t, ctx, "acoustic controls stay out of the physical device section", fmt.Sprintf(`document.querySelectorAll(%q).length === 0`, section+" .device-settings-group .stepped-setting"))
+	assertBrowserStrings(t, ctx, "scoped acoustic settings", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(control => [control.querySelector('.stepped-setting-label').textContent.trim(), control.querySelector('.stepped-setting-scope').textContent.trim(), control.querySelector('.stepped-setting-value').textContent.trim(), control.querySelector('.stepped-setting-footer span').textContent.trim()].join('|'))`, soundSection+" .stepped-setting"), []string{
 		strings.Join([]string{"Bass reduction", "Speaker · " + contractRightName, "-3", "Default 0"}, "|"),
 		strings.Join([]string{"Balance", "Stereo pair · " + contractPairName, "Centered", "Default Centered"}, "|"),
 	})
-	assertBrowserExpression(t, ctx, "discrete controls have stable touch targets", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).length === 4 && Array.from(document.querySelectorAll(%q)).every(button => { const rect = button.getBoundingClientRect(); return rect.width >= 44 && rect.height >= 44; })`, section+" .stepped-setting-step", section+" .stepped-setting-step"))
-	assertBrowserStrings(t, ctx, "scoped acoustic setting output labels", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(output => output.getAttribute('aria-label'))`, section+" .stepped-setting-value"), []string{
+	assertBrowserExpression(t, ctx, "discrete controls have stable touch targets", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).length === 4 && Array.from(document.querySelectorAll(%q)).every(button => { const rect = button.getBoundingClientRect(); return rect.width >= 44 && rect.height >= 44; })`, soundSection+" .stepped-setting-step", soundSection+" .stepped-setting-step"))
+	assertBrowserStrings(t, ctx, "scoped acoustic setting output labels", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(output => output.getAttribute('aria-label'))`, soundSection+" .stepped-setting-value"), []string{
 		"Bass reduction for Speaker · " + contractRightName + ": -3",
 		"Balance for Stereo pair · " + contractPairName + ": Centered",
 	})
-	assertBrowserStrings(t, ctx, "scoped reset labels", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(button => button.getAttribute('aria-label'))`, section+" .stepped-setting-reset"), []string{
+	assertBrowserStrings(t, ctx, "scoped reset labels", fmt.Sprintf(`Array.from(document.querySelectorAll(%q)).map(button => button.getAttribute('aria-label'))`, soundSection+" .stepped-setting-reset"), []string{
 		"Reset bass reduction for Speaker · " + contractRightName + " to 0",
 		"Reset balance for Stereo pair · " + contractPairName + " to Centered",
 	})
-	assertBrowserExpression(t, ctx, "range sliders are absent from sound settings", fmt.Sprintf(`document.querySelectorAll(%q).length === 0`, section+" input[type=range]"))
+	assertBrowserExpression(t, ctx, "range sliders are absent from sound settings", fmt.Sprintf(`document.querySelectorAll(%q).length === 0`, soundSection+" input[type=range]"))
+}
+
+func assertBrowserEmbeddedSettingsGenerationFence(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(async () => {
+			const [{ Settings }, { api }, { h, render }] = await Promise.all([
+				import('/app/static/js/components/Settings.js'),
+				import('/app/static/js/api.js'),
+				import('/app/static/js/dependencies.js'),
+			]);
+			const root = document.createElement('div');
+			root.id = 'settings-generation-contract';
+			document.body.append(root);
+			const requests = [];
+			const originalSettings = api.settings;
+			api.settings = deviceId => new Promise((resolve, reject) => {
+				requests.push({ deviceId, resolve, reject });
+			});
+			window.__settingsGenerationContract = {
+				requests,
+				renderDevice(deviceId) {
+					render(h(Settings, { deviceId, targetName: deviceId, embedded: true, active: true }), root);
+				},
+				cleanup() {
+					render(null, root);
+					root.remove();
+					api.settings = originalSettings;
+					delete window.__settingsGenerationContract;
+				},
+			};
+			window.__settingsGenerationContract.renderDevice('stale-success');
+		})()`, nil),
+		chromedp.Poll(`window.__settingsGenerationContract?.requests.length === 1`, nil),
+		chromedp.Evaluate(`window.__settingsGenerationContract.renderDevice('current-success')`, nil),
+		chromedp.Poll(`window.__settingsGenerationContract?.requests.length === 2`, nil),
+		chromedp.Evaluate(`window.__settingsGenerationContract.requests[1].resolve({ success: true, data: { support: {}, errors: { network: 'current response' } } })`, nil),
+		chromedp.Poll(`document.querySelector('#settings-generation-contract')?.textContent.includes('current response')`, nil),
+		chromedp.Evaluate(`(async () => {
+			window.__settingsGenerationContract.requests[0].resolve({ success: true, data: { support: {}, errors: { network: 'stale response' } } });
+			await new Promise(resolve => setTimeout(resolve, 20));
+		})()`, nil),
+	); err != nil {
+		t.Fatalf("exercise stale settings success: %v", err)
+	}
+
+	assertBrowserExpression(t, ctx, "stale settings success cannot replace current readback", `document.querySelector('#settings-generation-contract')?.textContent.includes('current response') && !document.querySelector('#settings-generation-contract')?.textContent.includes('stale response')`)
+
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__settingsGenerationContract.renderDevice('stale-error')`, nil),
+		chromedp.Poll(`window.__settingsGenerationContract?.requests.length === 3`, nil),
+		chromedp.Evaluate(`window.__settingsGenerationContract.renderDevice('current-after-error')`, nil),
+		chromedp.Poll(`window.__settingsGenerationContract?.requests.length === 4`, nil),
+		chromedp.Evaluate(`window.__settingsGenerationContract.requests[3].resolve({ success: true, data: { support: {}, errors: { network: 'current after error' } } })`, nil),
+		chromedp.Poll(`document.querySelector('#settings-generation-contract')?.textContent.includes('current after error')`, nil),
+		chromedp.Evaluate(`(async () => {
+			window.__settingsGenerationContract.requests[2].reject(new Error('stale rejection'));
+			await new Promise(resolve => setTimeout(resolve, 20));
+		})()`, nil),
+	); err != nil {
+		t.Fatalf("exercise stale settings error: %v", err)
+	}
+
+	assertBrowserExpression(t, ctx, "stale settings error cannot replace current readback", `document.querySelector('#settings-generation-contract')?.textContent.includes('current after error') && !document.querySelector('#settings-generation-contract')?.textContent.includes('stale rejection') && !document.querySelector('#settings-generation-contract .settings-load-error')`)
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__settingsGenerationContract.renderDevice('retry-target')`, nil),
+		chromedp.Poll(`window.__settingsGenerationContract?.requests.length === 5`, nil),
+		chromedp.Evaluate(`window.__settingsGenerationContract.requests[4].reject(new Error('retryable failure'))`, nil),
+		chromedp.Poll(`document.querySelector('#settings-generation-contract .settings-load-error')?.textContent.includes('retryable failure')`, nil),
+		chromedp.Click("#settings-generation-contract .settings-load-error button", chromedp.ByQuery),
+		chromedp.Poll(`window.__settingsGenerationContract?.requests.length === 6`, nil),
+		chromedp.Evaluate(`window.__settingsGenerationContract.requests[5].resolve({ success: true, data: { support: {}, errors: { network: 'retry response' } } })`, nil),
+		chromedp.Poll(`document.querySelector('#settings-generation-contract')?.textContent.includes('retry response') && !document.querySelector('#settings-generation-contract .settings-load-error')`, nil),
+	); err != nil {
+		t.Fatalf("retry current settings error: %v", err)
+	}
+
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`window.__settingsGenerationContract.cleanup()`, nil)); err != nil {
+		t.Fatalf("clean up settings generation contract: %v", err)
+	}
 }
 
 func assertBrowserListLayout(t *testing.T, ctx context.Context) {
@@ -799,7 +901,10 @@ func assertBrowserDetailLayout(t *testing.T, ctx context.Context) {
 		".zone-logical-metadata",
 		".zone-member-volume-row",
 		".zone-member-volume-slider",
-		".sound-settings-section",
+		".member-settings-section",
+		".member-settings-content",
+		".member-settings-group",
+		".member-settings-heading",
 		".stepped-setting",
 		".stepped-setting-controls",
 		".stepped-setting-step",
@@ -963,7 +1068,7 @@ func exerciseLogicalMemberControls(t *testing.T, ctx context.Context, recorder *
 	exerciseRetainedFinalVolumeFailure(t, ctx, recorder, memberInput)
 
 	recorder.reset()
-	pairSoundSettings := ".zone-logical-member:nth-child(2) > .sound-settings-section"
+	pairSoundSettings := ".zone-logical-member:nth-child(2) > .member-settings-section .sound-settings-group"
 	bassControl := pairSoundSettings + " .stepped-setting:nth-child(1)"
 	balanceControl := pairSoundSettings + " .stepped-setting:nth-child(2)"
 	assertUntouchedButtonBlurDoesNotWrite(t, ctx, recorder, balanceControl+` button[aria-label="Move balance one step right"]`)

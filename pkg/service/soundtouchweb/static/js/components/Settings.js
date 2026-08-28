@@ -120,16 +120,24 @@ function statusLabel(value) {
     return value ? String(value).replace(/^NETWORK_/, '').replace(/_/g, ' ').toLowerCase() : '';
 }
 
-export function Settings({ deviceId, targetName = '' }) {
+export function Settings({ deviceId, targetName = '', embedded = false, active = false }) {
     const [snapshot, setSnapshot] = useState(null);
     const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState('');
     const [busy, setBusy] = useState('');
     const [actionErrors, setActionErrors] = useState({});
     const requested = useRef(false);
+    const loadGeneration = useRef(0);
+    const generationDeviceId = useRef(deviceId);
+
+    if (generationDeviceId.current !== deviceId) {
+        generationDeviceId.current = deviceId;
+        loadGeneration.current += 1;
+    }
 
     useEffect(() => {
         setSnapshot(null);
+        setLoading(false);
         setLoadError('');
         setBusy('');
         setActionErrors({});
@@ -138,22 +146,29 @@ export function Settings({ deviceId, targetName = '' }) {
 
     async function load() {
         if (requested.current) return;
+        const generation = loadGeneration.current;
         requested.current = true;
         setLoading(true);
         setLoadError('');
         try {
             const response = await api.settings(deviceId);
+            if (generation !== loadGeneration.current) return;
             if (!response?.success || !response.data) {
                 throw new Error(response?.error || 'The speaker did not return its settings.');
             }
             setSnapshot(response.data);
         } catch (error) {
+            if (generation !== loadGeneration.current) return;
             setLoadError(errorText(error, 'Could not load settings. Check that the speaker is reachable.'));
             requested.current = false;
         } finally {
-            setLoading(false);
+            if (generation === loadGeneration.current) setLoading(false);
         }
     }
+
+    useEffect(() => {
+        if (embedded && active && !snapshot) load();
+    }, [embedded, active, deviceId, snapshot]);
 
     async function mutate(section, action, fallback) {
         if (busy) return;
@@ -196,12 +211,20 @@ export function Settings({ deviceId, targetName = '' }) {
         mutate('clock', () => api.setClockDisplay(deviceId, patch), fallback);
     }
 
+    const container = embedded ? 'section' : 'details';
+    const className = embedded
+        ? 'member-settings-group device-settings-group'
+        : 'settings-section';
+    const target = String(targetName || '').trim();
+
     return html`
-        <details class="settings-section" onToggle=${onToggle}>
-            <summary class="settings-summary">
+        <${container} class=${className} onToggle=${embedded ? undefined : onToggle}>
+            ${embedded ? html`
+                <h3 class="member-settings-heading">${target ? `Device · ${target}` : 'Device'}</h3>
+            ` : html`<summary class="settings-summary">
                 <span class="section-title">${deviceSettingsTitle(targetName)}</span>
                 <span class="settings-chevron" aria-hidden="true"></span>
-            </summary>
+            </summary>`}
 
             <div class="settings-content">
                 ${loading ? html`<div class="settings-loading" role="status">Loading settings…</div>` : null}
@@ -449,6 +472,6 @@ export function Settings({ deviceId, targetName = '' }) {
                     </section>
                 ` : null}
             </div>
-        </details>
+        </${container}>
     `;
 }

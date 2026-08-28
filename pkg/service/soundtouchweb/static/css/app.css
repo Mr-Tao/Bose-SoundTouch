@@ -489,7 +489,7 @@ img { display: block; max-width: 100%; }
 }
 
 /* ── Device and sound settings ──────────────────────────────────────────── */
-.settings-section, .sound-settings-section {
+.settings-section, .sound-settings-section, .member-settings-section {
     margin-top: 1.5rem;
     padding-top: 1.25rem;
     border-top: 1px solid var(--border);
@@ -515,7 +515,28 @@ img { display: block; max-width: 100%; }
     transition: transform .15s ease;
 }
 .settings-section[open] .settings-chevron,
-.sound-settings-section[open] .settings-chevron { transform: rotate(225deg); }
+.sound-settings-section[open] .settings-chevron,
+.member-settings-section[open] .settings-chevron { transform: rotate(225deg); }
+.member-settings-content {
+    min-width: 0;
+    margin: .15rem 0 0 .25rem;
+    padding-left: .75rem;
+    border-left: 1px solid var(--border);
+}
+.member-settings-group {
+    min-width: 0;
+    padding: .8rem 0;
+    border-top: 1px solid var(--border);
+}
+.member-settings-group:first-child { border-top: 0; }
+.member-settings-heading {
+    margin: 0 0 .15rem;
+    overflow-wrap: anywhere;
+    color: var(--text-dim);
+    font-size: .82rem;
+    font-weight: 600;
+    letter-spacing: 0;
+}
 .settings-content { padding-top: .25rem; }
 .sound-settings-content { padding-top: .25rem; }
 .stepped-setting {
@@ -1166,7 +1187,8 @@ img { display: block; max-width: 100%; }
     line-height: 1.35;
 }
 .zone-logical-member > .settings-section,
-.zone-logical-member > .sound-settings-section {
+.zone-logical-member > .sound-settings-section,
+.zone-logical-member > .member-settings-section {
     margin-top: .65rem;
     padding-top: .6rem;
 }
