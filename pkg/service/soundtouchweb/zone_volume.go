@@ -49,6 +49,8 @@ type zoneVolumeTopology struct {
 	snapshot  webtypes.ZoneTopology
 }
 
+const zoneVolumeReadbackAttempts = 2
+
 // HandleZoneVolume applies one proportional volume move to a logical zone.
 // The scalar is the highest current logical-member volume; every reachable
 // member moves by the same delta, preserving audible offsets except at 0/100
@@ -343,13 +345,47 @@ func (app *WebApp) applyVolumeTarget(
 			return
 		}
 
-		volumeGeneration := conn.BeginVolumeRefresh()
-		healthGeneration := conn.BeginHTTPPoll()
+		var (
+			volume  *models.Volume
+			readErr error
+		)
 
-		volume, readErr := conn.Client.GetVolume()
+		for range zoneVolumeReadbackAttempts {
+			volumeGeneration := conn.BeginVolumeRefresh()
+			healthGeneration := conn.BeginHTTPPoll()
+
+			volume, readErr = conn.Client.GetVolume()
+			if readErr != nil || volume == nil {
+				conn.CompleteHTTPPoll(healthGeneration, false, time.Now(), nil)
+
+				break
+			}
+
+			confirmed = app.applyCurrentVolumeReadback(
+				controlID,
+				conn,
+				groupTopology,
+				zoneTopology,
+				volumeGeneration,
+				volume,
+			)
+			conn.CompleteHTTPPoll(healthGeneration, true, time.Now(), nil)
+
+			if confirmed {
+				break
+			}
+
+			// SoundTouch commonly emits the volumeUpdated event caused by our
+			// write while the immediate /volume readback is in flight. Start
+			// one fresh read after that event instead of treating the expected
+			// ordering race as a failed member. A topology change still fails
+			// closed and no stale response is ever applied.
+			if !app.volumeTargetCurrent(controlID, conn, groupTopology, zoneTopology) {
+				break
+			}
+		}
+
 		if readErr != nil || volume == nil {
-			conn.CompleteHTTPPoll(healthGeneration, false, time.Now(), nil)
-
 			if writeErr != nil {
 				appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
 			}
@@ -362,16 +398,6 @@ func (app *WebApp) applyVolumeTarget(
 
 			return
 		}
-
-		confirmed = app.applyCurrentVolumeReadback(
-			controlID,
-			conn,
-			groupTopology,
-			zoneTopology,
-			volumeGeneration,
-			volume,
-		)
-		conn.CompleteHTTPPoll(healthGeneration, true, time.Now(), nil)
 
 		if !confirmed {
 			appendZoneVolumeError(member, "speaker topology or volume state changed during readback")

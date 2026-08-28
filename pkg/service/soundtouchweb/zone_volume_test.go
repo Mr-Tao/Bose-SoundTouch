@@ -305,17 +305,117 @@ func TestHandleZoneVolumeDoesNotConfirmRejectedFreshMismatchFromOlderCache(t *te
 		if result.DeviceID != "MEMBER" {
 			continue
 		}
-		if result.Actual != nil ||
-			!strings.Contains(result.Error, "state changed during readback") {
-			t.Fatalf("rejected stale readback was exposed as confirmed: %+v", result)
+		if result.Actual == nil || *result.Actual != 35 ||
+			!strings.Contains(result.Error, "does not both match requested") {
+			t.Fatalf("fresh retry did not expose the authoritative mismatch: %+v", result)
 		}
-		if cached := memberConn.Status().Volume.ActualVolume; cached != 40 {
-			t.Fatalf("newer event cache = %d, want 40", cached)
+		if cached := memberConn.Status().Volume.ActualVolume; cached != 35 {
+			t.Fatalf("fresh retry cache = %d, want 35", cached)
 		}
 
 		return
 	}
 	t.Fatal("member result missing")
+}
+
+func TestHandleZoneVolumeRetriesReadbackSupersededByMatchingEvent(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">MEMBER</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.10"},
+		{DeviceID: "MEMBER", IP: "192.0.2.20"},
+	}}
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	member := newVolumeSpeaker(t, 35, zoneXML)
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Kitchen", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Dining", member, 35, nil)
+	memberConn, _ := app.GetDevice("192.0.2.20")
+	member.setVolumeGetHook(func(request int) {
+		if request == 2 {
+			memberConn.ApplyVolumeEvent(
+				&models.Volume{TargetVolume: 40, ActualVolume: 40},
+				time.Now(),
+			)
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/zone/volume/40", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "volume": "40"})
+	response := httptest.NewRecorder()
+	app.HandleZoneVolume(response, req)
+
+	var payload struct {
+		Data zoneVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || payload.Data.Partial {
+		t.Fatalf("matching event race remained partial: status=%d data=%+v", response.Code, payload.Data)
+	}
+	if got := member.getCount(); got != 3 {
+		t.Fatalf("member volume reads = %d, want initial plus two readback attempts", got)
+	}
+	if _, posts := member.values(); fmt.Sprint(posts) != "[40]" {
+		t.Fatalf("member volume writes = %v, want one write despite the readback retry", posts)
+	}
+	for _, result := range payload.Data.Members {
+		if result.DeviceID == "MEMBER" &&
+			(result.Actual == nil || *result.Actual != 40 || result.Error != "") {
+			t.Fatalf("retried member result = %+v", result)
+		}
+	}
+}
+
+func TestHandleZoneVolumeBoundsRepeatedReadbackInvalidation(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">MEMBER</member></zone>`
+	zone := &models.ZoneInfo{Master: "MASTER", Members: []models.Member{
+		{DeviceID: "MASTER", IP: "192.0.2.10"},
+		{DeviceID: "MEMBER", IP: "192.0.2.20"},
+	}}
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	member := newVolumeSpeaker(t, 35, zoneXML)
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Kitchen", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Dining", member, 35, nil)
+	memberConn, _ := app.GetDevice("192.0.2.20")
+	member.setVolumeGetHook(func(request int) {
+		if request >= 2 {
+			memberConn.ApplyVolumeEvent(
+				&models.Volume{TargetVolume: 40, ActualVolume: 40},
+				time.Now(),
+			)
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/zone/volume/40", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "volume": "40"})
+	response := httptest.NewRecorder()
+	app.HandleZoneVolume(response, req)
+
+	var payload struct {
+		Data zoneVolumeResult `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Code != http.StatusOK || !payload.Data.Partial {
+		t.Fatalf("repeated event race was not bounded as partial: status=%d data=%+v", response.Code, payload.Data)
+	}
+	if got := member.getCount(); got != 3 {
+		t.Fatalf("member volume reads = %d, want initial plus %d attempts", got, zoneVolumeReadbackAttempts)
+	}
+	if _, posts := member.values(); fmt.Sprint(posts) != "[40]" {
+		t.Fatalf("member volume writes = %v, want one write despite bounded retries", posts)
+	}
+	for _, result := range payload.Data.Members {
+		if result.DeviceID == "MEMBER" &&
+			(result.Actual != nil || !strings.Contains(result.Error, "state changed during readback")) {
+			t.Fatalf("repeatedly invalidated result = %+v", result)
+		}
+	}
 }
 
 func TestHandleZoneVolumeRejectsZoneChangeDuringReadback(t *testing.T) {
@@ -355,6 +455,9 @@ func TestHandleZoneVolumeRejectsZoneChangeDuringReadback(t *testing.T) {
 	}
 	if response.Code != http.StatusOK || !payload.Data.Partial {
 		t.Fatalf("zone dissolution was confirmed: status=%d data=%+v", response.Code, payload.Data)
+	}
+	if got := member.getCount(); got != 2 {
+		t.Fatalf("topology-invalid member reads = %d, want no retry after initial readback", got)
 	}
 	for _, result := range payload.Data.Members {
 		if result.DeviceID != "MEMBER" {
