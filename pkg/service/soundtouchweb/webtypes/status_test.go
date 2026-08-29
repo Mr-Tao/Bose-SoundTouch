@@ -181,6 +181,23 @@ func TestEmptyGroupClearsCurrentClaim(t *testing.T) {
 	}
 }
 
+func TestPolledVolumePreservesUnrelatedSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	generation := conn.BeginVolumeRefresh()
+	conn.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.NowPlaying = &models.NowPlaying{Source: "SPOTIFY"}
+	})
+
+	if !conn.ApplyPolledVolume(generation, &models.Volume{TargetVolume: 42, ActualVolume: 42}) {
+		t.Fatal("unrelated speaker event invalidated volume readback")
+	}
+	status := conn.Status()
+	if status.Volume == nil || status.Volume.ActualVolume != 42 ||
+		status.NowPlaying == nil || status.NowPlaying.Source != "SPOTIFY" {
+		t.Fatalf("merged status = %+v", status)
+	}
+}
+
 func TestZoneCacheRequiresAuthoritativeMaster(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
 	zone := &models.ZoneInfo{
@@ -195,13 +212,54 @@ func TestZoneCacheRequiresAuthoritativeMaster(t *testing.T) {
 	if !conn.ApplyPolledZone(refresh, "MASTER", zone) {
 		t.Fatal("master-confirmed zone was not stored")
 	}
+	topology, current := conn.SnapshotZoneTopology()
+	if !current || topology.Zone == nil || !conn.ZoneTopologyCurrent(topology) {
+		t.Fatalf("confirmed zone topology = %+v, current=%v", topology, current)
+	}
 
 	memberRefresh := conn.BeginZoneRefresh()
+	if _, current := conn.SnapshotZoneTopology(); current {
+		t.Fatal("zone remained writable during refresh")
+	}
 	if conn.ApplyPolledZone(memberRefresh, "MEMBER", zone) {
 		t.Fatal("member response was accepted as authoritative")
 	}
+	if conn.ZoneTopologyCurrent(topology) {
+		t.Fatal("older topology remained current after rejected generation")
+	}
 	if conn.Status().Zone == nil || conn.Status().Zone.Master != "MASTER" {
 		t.Fatalf("member response cleared cached topology: %+v", conn.Status().Zone)
+	}
+}
+
+func TestUnchangedTopologyRefreshConfirmsWithoutReportingChange(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "MASTER"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	firstZone := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(firstZone, "MASTER", zone) {
+		t.Fatal("initial zone refresh did not report the topology change")
+	}
+	unchangedZone := conn.BeginZoneRefresh()
+	if conn.ApplyPolledZone(unchangedZone, "MASTER", zone) {
+		t.Fatal("unchanged zone refresh reported a dashboard-visible change")
+	}
+	if topology, current := conn.SnapshotZoneTopology(); !current || topology.Zone != zone {
+		t.Fatalf("unchanged zone was not confirmed: topology=%+v current=%v", topology, current)
+	}
+
+	groupRefresh := conn.BeginGroupRefresh()
+	if conn.ApplyPolledGroup(groupRefresh, nil) {
+		t.Fatal("confirmed standalone group state reported a dashboard-visible change")
+	}
+	if topology, current := conn.SnapshotGroupTopology(); !current || topology.Group != nil {
+		t.Fatalf("standalone group state was not confirmed: topology=%+v current=%v", topology, current)
 	}
 }
 

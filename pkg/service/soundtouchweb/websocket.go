@@ -151,13 +151,12 @@ func (app *WebApp) applyVolumeEvent(
 	conn *webtypes.DeviceConnection,
 	volume *models.Volume,
 ) bool {
-	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
-		changed := !reflect.DeepEqual(status.Volume, volume)
-		status.Volume = volume
-		status.LastActivity = time.Now()
+	changed := conn.ApplyVolumeEvent(volume, time.Now())
+	if changed {
+		app.QueueDeviceListBroadcast()
+	}
 
-		return changed
-	})
+	return changed
 }
 
 func (app *WebApp) applyConnectionStateEvent(
@@ -488,6 +487,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		groupGeneration = conn.BeginGroupRefresh()
 	}
 	zoneGeneration := conn.BeginZoneRefresh()
+	volumeGeneration := conn.BeginVolumeRefresh()
 
 	// Phase 1: slow network fetches. Local vars only, no shared state
 	// is touched yet. Errors are recorded so the merge below can tell
@@ -519,10 +519,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 			statusUpdated = true
 		}
 
-		if volumeErr == nil {
-			s.Volume = volume
-			statusUpdated = true
-		}
+		statusUpdated = statusUpdated || volumeErr == nil
 
 		if presetsErr == nil {
 			s.Presets = presets
@@ -546,6 +543,10 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		s.IsConnected = statusUpdated
 		s.LastActivity = time.Now()
 	})
+
+	if volumeErr == nil {
+		conn.ApplyPolledVolume(volumeGeneration, volume)
+	}
 
 	if stereoCapable && groupErr == nil {
 		conn.ApplyPolledGroup(groupGeneration, group)
