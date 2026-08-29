@@ -1,4 +1,4 @@
-.PHONY: all build build-cli test test-coverage test-http-client test-http-client-rotate check fmt vet lint clean dev help screenshots build-stockholm-image prepare-stockholm update-static-deps dev-docs dev-docs-tidy hugo
+.PHONY: all build build-cli test test-coverage test-browser test-http-client test-http-client-rotate check fmt vet lint clean dev help screenshots build-stockholm-image prepare-stockholm update-static-deps dev-docs dev-docs-tidy hugo
 
 # Load .env if present (simple KEY=VALUE format, no shell quoting)
 -include .env
@@ -146,6 +146,15 @@ test-coverage:
 	$(GOTEST) -v -coverprofile=coverage.out ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
+
+# Browser-level regression tests for the embedded player's static assets
+# (see pkg/service/soundtouchweb/browser_compatibility_test.go). Opt-in via
+# the "browsertest" build tag, not part of `test`/`check`, since they need a
+# Chrome/Chromium binary that chromedp can find on PATH or in a standard
+# install location.
+test-browser:
+	@echo "Running browser-level compatibility tests..."
+	$(GOTEST) -tags browsertest -v ./pkg/service/soundtouchweb/...
 
 check: fmt vet test test-http-client
 
@@ -501,6 +510,7 @@ help:
 	@echo "  build-linux-armv7 - Build for Linux ARMv7 (kernel 3.14+ compatible, CGO_ENABLED=0)"
 	@echo "  test          - Run tests"
 	@echo "  test-coverage - Run tests with coverage report"
+	@echo "  test-browser             - Run browser-level (chromedp) player compatibility tests"
 	@echo "  test-http-client         - Run .http integration tests via Docker Compose"
 	@echo "  test-http-client-rotate  - Archive tests/integration/testdata/ before a fresh run (non-destructive)"
 	@echo "  check         - Run fmt, vet, and tests"
