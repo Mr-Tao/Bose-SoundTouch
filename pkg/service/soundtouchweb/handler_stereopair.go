@@ -277,6 +277,7 @@ func (app *WebApp) completeStereoPairMutation(
 // newer lifecycle observation.
 func (app *WebApp) applyStereoPairProjection(result stereopair.Result) {
 	activity := time.Now()
+	changed := false
 
 	for i := range result.Members {
 		member := &result.Members[i]
@@ -285,8 +286,14 @@ func (app *WebApp) applyStereoPairProjection(result stereopair.Result) {
 		}
 
 		if conn, ok := app.deviceByStereoPairIPAddress(member.IPAddress); ok && conn != nil {
-			conn.ApplyGroupEvent(member.Group, activity)
+			if conn.ApplyGroupEvent(member.Group, activity) {
+				changed = true
+			}
 		}
+	}
+
+	if changed {
+		app.QueueDeviceListBroadcast()
 	}
 }
 
