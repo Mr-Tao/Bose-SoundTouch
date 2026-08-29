@@ -74,10 +74,11 @@ func TestPlayerRendersNatively(t *testing.T) {
 	}
 }
 
-// TestPlayerRendersUnderForcedShimMode exercises the actual old-Safari code
-// path -- es-module-shims resolving the same import map and vendored files
-// the real app uses -- without needing physical iPadOS 15 hardware. It
-// serves a variant of index.html that forces es-module-shims into shimMode
+// TestPlayerRendersUnderForcedShimMode exercises es-module-shims resolving the
+// same import map and vendored files the real app uses. It does not emulate
+// Safari or the production feature-detection loader; those require a target-
+// browser canary. The test serves a page that forces es-module-shims into
+// shimMode
 // (see the library's README: shimMode is triggered by
 // window.esmsInitOptions.shimMode or by using importmap-shim/module-shim
 // script types), which routes every browser -- including this ordinary
