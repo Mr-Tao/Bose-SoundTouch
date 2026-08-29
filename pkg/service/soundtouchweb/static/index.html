@@ -8,6 +8,23 @@
         <link rel="icon" type="image/svg+xml" href="/app/static/img/favicon.svg" />
         <link rel="alternate icon" href="/app/static/img/favicon.ico" />
         <link rel="stylesheet" href="/app/static/css/app.css" />
+        <!--
+        Safari on iPadOS 15 supports native ES modules but not import maps
+        (added in Safari 16.4), which left the page blank there (#649). This
+        polyfills import map support for that browser; on every browser with
+        native support (Chrome, Firefox, modern Safari) it detects that and
+        does nothing, so it's safe to always load.
+        -->
+        <script async src="/app/static/lib/es-module-shims.js"></script>
+        <script type="importmap">
+        {
+            "imports": {
+                "preact": "/app/static/lib/preact.module.js",
+                "preact/hooks": "/app/static/lib/preact-hooks.module.js",
+                "htm": "/app/static/lib/htm.module.js"
+            }
+        }
+        </script>
     </head>
     <body>
         <div id="app"></div>
