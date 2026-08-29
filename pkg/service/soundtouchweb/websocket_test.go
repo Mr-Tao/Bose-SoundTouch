@@ -2,10 +2,6 @@ package soundtouchweb
 
 import (
 	"errors"
-	"github.com/gesellix/bose-soundtouch/pkg/client"
-	"github.com/gesellix/bose-soundtouch/pkg/models"
-	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
-	"github.com/gorilla/websocket"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +9,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gesellix/bose-soundtouch/pkg/client"
+	"github.com/gesellix/bose-soundtouch/pkg/models"
+	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
+	"github.com/gorilla/websocket"
 )
 
 func TestUpdateDeviceStatusRefreshesGroup(t *testing.T) {
