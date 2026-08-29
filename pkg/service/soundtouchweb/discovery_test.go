@@ -256,7 +256,15 @@ func TestSeedExtraDevicesSerializesConcurrentRuns(t *testing.T) {
 	var infoRequests atomic.Int32
 	release := make(chan struct{})
 
+	// Only /info blocks and counts. A successful registration spawns its own
+	// background status-update request (see the comment below), which must
+	// not be mistaken for a second concurrent seed probe.
 	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/info" {
+			http.NotFound(w, r)
+			return
+		}
+
 		infoRequests.Add(1)
 		<-release // block until the test lets the handler respond
 
@@ -285,6 +293,14 @@ func TestSeedExtraDevicesSerializesConcurrentRuns(t *testing.T) {
 	if got := infoRequests.Load(); got != 1 {
 		t.Fatalf("/info request count = %d, want 1 (concurrent seeds were not serialized)", got)
 	}
+
+	// AddDeviceByHost spawns a one-shot status-update goroutine and a 30s-
+	// ticker poll loop on successful registration (see
+	// TestDiscoverDevicesRetriesConfiguredHosts). Give them a moment to
+	// finish before the deferred server.Close() runs, so a still-in-flight
+	// request against the closing httptest server doesn't produce log noise
+	// or -race flakiness.
+	time.Sleep(50 * time.Millisecond)
 }
 
 func TestRemoveDeviceIfMatchKeepsReplacement(t *testing.T) {
