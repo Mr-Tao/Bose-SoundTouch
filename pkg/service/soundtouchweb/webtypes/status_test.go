@@ -209,6 +209,64 @@ func TestApplyGroupEventIgnoresRoleOrder(t *testing.T) {
 	}
 }
 
+func TestStatusPollCannotOverwriteNewerSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	poll := conn.BeginStatusPoll()
+
+	conn.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 99}
+	})
+
+	if conn.CompleteStatusPoll(poll, func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 42}
+	}) {
+		t.Fatal("poll that began before a speaker event was applied")
+	}
+
+	if got := conn.Status().Volume; got == nil || got.ActualVolume != 99 {
+		t.Fatalf("speaker event was overwritten by older poll data: %+v", got)
+	}
+}
+
+func TestNewerStatusPollSupersedesOlderPoll(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	older := conn.BeginStatusPoll()
+	newer := conn.BeginStatusPoll()
+
+	if !conn.CompleteStatusPoll(newer, func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 30}
+	}) {
+		t.Fatal("newer poll was not applied")
+	}
+
+	if conn.CompleteStatusPoll(older, func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 10}
+	}) {
+		t.Fatal("older poll completed after a newer poll was applied")
+	}
+
+	if got := conn.Status().Volume; got == nil || got.ActualVolume != 30 {
+		t.Fatalf("newer poll state was overwritten: %+v", got)
+	}
+}
+
+func TestDuplicateSpeakerEventStillInvalidatesOlderPoll(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{Volume: &models.Volume{ActualVolume: 25}})
+	poll := conn.BeginStatusPoll()
+
+	conn.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 25}
+		status.LastActivity = time.Now()
+	})
+
+	if conn.CompleteStatusPoll(poll, func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 10}
+	}) {
+		t.Fatal("poll that preceded duplicate speaker evidence was applied")
+	}
+}
+
 func TestStatusSnapshotIsolation(t *testing.T) {
 	// A snapshot returned by Status() must NOT change when a later
 	// UpdateStatus replaces a pointer field. This proves the atomic

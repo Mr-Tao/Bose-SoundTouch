@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/models"
@@ -110,6 +111,90 @@ func (app *WebApp) registerGlobalWebSocket(conn *websocket.Conn) error {
 			Type: "devices",
 			Data: app.deviceViewSnapshot(),
 		})
+	})
+}
+
+// applySpeakerStatusEvent stores one speaker event and immediately publishes
+// a fresh device projection when its dashboard-visible payload changed.
+func (app *WebApp) applySpeakerStatusEvent(
+	conn *webtypes.DeviceConnection,
+	mut func(*webtypes.DeviceStatus) bool,
+) bool {
+	changed := false
+
+	conn.ApplySpeakerEvent(func(status *webtypes.DeviceStatus) {
+		changed = mut(status)
+	})
+
+	if changed {
+		app.QueueDeviceListBroadcast()
+	}
+
+	return changed
+}
+
+func (app *WebApp) applyNowPlayingEvent(
+	conn *webtypes.DeviceConnection,
+	nowPlaying *models.NowPlaying,
+) bool {
+	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+		changed := !reflect.DeepEqual(status.NowPlaying, nowPlaying)
+		status.NowPlaying = nowPlaying
+		status.LastActivity = time.Now()
+
+		return changed
+	})
+}
+
+func (app *WebApp) applyVolumeEvent(
+	conn *webtypes.DeviceConnection,
+	volume *models.Volume,
+) bool {
+	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+		changed := !reflect.DeepEqual(status.Volume, volume)
+		status.Volume = volume
+		status.LastActivity = time.Now()
+
+		return changed
+	})
+}
+
+func (app *WebApp) applyConnectionStateEvent(
+	conn *webtypes.DeviceConnection,
+	connected bool,
+) bool {
+	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+		changed := status.IsConnected != connected
+		status.IsConnected = connected
+		status.LastActivity = time.Now()
+
+		return changed
+	})
+}
+
+func (app *WebApp) applyPresetEvent(
+	conn *webtypes.DeviceConnection,
+	presets *models.Presets,
+) bool {
+	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+		changed := !reflect.DeepEqual(status.Presets, presets)
+		status.Presets = presets
+		status.LastActivity = time.Now()
+
+		return changed
+	})
+}
+
+func (app *WebApp) applyBassEvent(
+	conn *webtypes.DeviceConnection,
+	bass *models.Bass,
+) bool {
+	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+		changed := !reflect.DeepEqual(status.Bass, bass)
+		status.Bass = bass
+		status.LastActivity = time.Now()
+
+		return changed
 	})
 }
 
@@ -277,35 +362,27 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 			prevSource = np.Source
 
-			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.NowPlaying = np
-				s.LastActivity = time.Now()
-			})
+			app.applyNowPlayingEvent(conn, np)
 		})
 
 		wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
-			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.Volume = &event.Volume
-				s.LastActivity = time.Now()
-			})
+			app.applyVolumeEvent(conn, &event.Volume)
 		})
 
 		wsClient.OnConnectionState(func(event *models.ConnectionStateUpdatedEvent) {
-			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.IsConnected = event.ConnectionState.IsConnected()
-				s.LastActivity = time.Now()
-			})
+			app.applyConnectionStateEvent(conn, event.ConnectionState.IsConnected())
 		})
 
 		wsClient.OnPresetUpdated(func(event *models.PresetUpdatedEvent) {
-			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.Presets = &event.Presets
-				s.LastActivity = time.Now()
-			})
+			app.applyPresetEvent(conn, &event.Presets)
+		})
+
+		wsClient.OnBassUpdated(func(event *models.BassUpdatedEvent) {
+			app.applyBassEvent(conn, &event.Bass)
 		})
 
 		wsClient.OnGroupUpdated(func(event *models.GroupUpdatedEvent) {
-			applyGroupUpdatedEvent(conn, event)
+			app.applyGroupUpdatedEvent(conn, event)
 		})
 
 		if err := wsClient.Connect(); err != nil {
@@ -325,9 +402,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 		conn.WebSocket = wsClient
 
-		conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-			s.IsConnected = true
-		})
+		app.applyConnectionStateEvent(conn, true)
 
 		log.Printf("WebSocket connected for device %s", sanitizeLog(deviceID))
 
@@ -343,9 +418,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		// Block until the device-side WebSocket disconnects.
 		wsClient.Wait()
 
-		conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-			s.IsConnected = false
-		})
+		app.applyConnectionStateEvent(conn, false)
 
 		log.Printf("WebSocket disconnected for device %s — reconnecting in %s", sanitizeLog(deviceID), backoff)
 
@@ -388,6 +461,8 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		return
 	}
 
+	pollGeneration := conn.BeginStatusPoll()
+
 	// /getGroup must be gated to ST10 models -- see Client.GetGroup's doc
 	// comment (verified against real hardware: a ST20 never replies at all,
 	// hanging until the client's timeout instead of returning quickly).
@@ -419,7 +494,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	// Phase 2: fast merge. Only fields we successfully fetched
 	// overwrite; everything else keeps the value other goroutines may
 	// have just written.
-	conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
+	conn.CompleteStatusPoll(pollGeneration, func(s *webtypes.DeviceStatus) {
 		statusUpdated := false
 
 		if nowPlayingErr == nil {
@@ -463,8 +538,16 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	}
 }
 
-func applyGroupUpdatedEvent(conn *webtypes.DeviceConnection, event *models.GroupUpdatedEvent) {
-	conn.ApplyGroupEvent(&event.Group, time.Now())
+func (app *WebApp) applyGroupUpdatedEvent(
+	conn *webtypes.DeviceConnection,
+	event *models.GroupUpdatedEvent,
+) bool {
+	changed := conn.ApplyGroupEvent(&event.Group, time.Now())
+	if changed {
+		app.QueueDeviceListBroadcast()
+	}
+
+	return changed
 }
 
 // HandleDeviceWebSocket handles individual device WebSocket connections for real-time device-specific updates

@@ -47,6 +47,12 @@ type DeviceConnection struct {
 
 	status atomic.Pointer[DeviceStatus]
 
+	statusOrderMu             sync.Mutex
+	nextStatusPollGeneration  uint64
+	lastStatusPollGeneration  uint64
+	speakerEventGeneration    uint64
+	statusPollEventGeneration map[uint64]uint64
+
 	// groupMu orders polled /getGroup responses against real-time
 	// groupUpdated events. Starting a newer refresh or receiving an event
 	// invalidates any older in-flight poll.
@@ -126,6 +132,66 @@ func (c *DeviceConnection) Close() {
 // concurrent changes from other goroutines.
 func (c *DeviceConnection) SetStatus(s *DeviceStatus) {
 	c.status.Store(s)
+}
+
+// BeginStatusPoll reserves an ordering generation before a status poll starts
+// network I/O. CompleteStatusPoll uses it to reject an older poll after either
+// a newer poll or a real-time speaker event has supplied fresher state.
+func (c *DeviceConnection) BeginStatusPoll() uint64 {
+	c.statusOrderMu.Lock()
+	defer c.statusOrderMu.Unlock()
+
+	c.nextStatusPollGeneration++
+	if c.statusPollEventGeneration == nil {
+		c.statusPollEventGeneration = make(map[uint64]uint64)
+	}
+
+	c.statusPollEventGeneration[c.nextStatusPollGeneration] = c.speakerEventGeneration
+
+	return c.nextStatusPollGeneration
+}
+
+// ApplySpeakerEvent serializes a real-time speaker event against status-poll
+// completion. Even a duplicate event invalidates polls that started before it:
+// the event is newer evidence than their fetched payload.
+func (c *DeviceConnection) ApplySpeakerEvent(mut func(*DeviceStatus)) {
+	c.statusOrderMu.Lock()
+	defer c.statusOrderMu.Unlock()
+
+	c.speakerEventGeneration++
+	c.UpdateStatus(mut)
+}
+
+// CompleteStatusPoll applies a poll result only when no newer poll has already
+// completed and no speaker event arrived after this poll began.
+func (c *DeviceConnection) CompleteStatusPoll(
+	generation uint64,
+	mut func(*DeviceStatus),
+) bool {
+	c.statusOrderMu.Lock()
+	defer c.statusOrderMu.Unlock()
+
+	eventGeneration, knownGeneration := c.statusPollEventGeneration[generation]
+	delete(c.statusPollEventGeneration, generation)
+
+	if generation <= c.lastStatusPollGeneration {
+		return false
+	}
+
+	c.lastStatusPollGeneration = generation
+	for olderGeneration := range c.statusPollEventGeneration {
+		if olderGeneration < generation {
+			delete(c.statusPollEventGeneration, olderGeneration)
+		}
+	}
+
+	if !knownGeneration || eventGeneration != c.speakerEventGeneration {
+		return false
+	}
+
+	c.UpdateStatus(mut)
+
+	return true
 }
 
 // UpdateStatus atomically applies mut to a copy of the current status

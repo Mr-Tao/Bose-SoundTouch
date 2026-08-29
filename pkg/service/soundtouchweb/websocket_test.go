@@ -2,6 +2,10 @@ package soundtouchweb
 
 import (
 	"errors"
+	"github.com/gesellix/bose-soundtouch/pkg/client"
+	"github.com/gesellix/bose-soundtouch/pkg/models"
+	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
+	"github.com/gorilla/websocket"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,11 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/gesellix/bose-soundtouch/pkg/client"
-	"github.com/gesellix/bose-soundtouch/pkg/models"
-	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
-	"github.com/gorilla/websocket"
 )
 
 func TestUpdateDeviceStatusRefreshesGroup(t *testing.T) {
@@ -142,6 +141,7 @@ func TestUpdateDeviceStatusNotConnectedWhenOnlyGroupSucceeds(t *testing.T) {
 }
 
 func TestApplyGroupUpdatedEventReplacesGroup(t *testing.T) {
+	app := NewWebApp()
 	conn := webtypes.NewDeviceConnection(nil, nil)
 	previousActivity := time.Unix(1, 0)
 	conn.SetStatus(&webtypes.DeviceStatus{
@@ -154,7 +154,9 @@ func TestApplyGroupUpdatedEventReplacesGroup(t *testing.T) {
 	event := &models.GroupUpdatedEvent{
 		Group: models.Group{ID: "pair-new", Name: "Renamed Pair"},
 	}
-	applyGroupUpdatedEvent(conn, event)
+	if !app.applyGroupUpdatedEvent(conn, event) {
+		t.Fatal("new group event should publish a changed projection")
+	}
 
 	status := conn.Status()
 	if status.Group != &event.Group || status.Group.ID != "pair-new" {
@@ -170,7 +172,9 @@ func TestApplyGroupUpdatedEventReplacesGroup(t *testing.T) {
 	}
 
 	teardown := &models.GroupUpdatedEvent{Group: models.Group{}}
-	applyGroupUpdatedEvent(conn, teardown)
+	if !app.applyGroupUpdatedEvent(conn, teardown) {
+		t.Fatal("teardown event should publish a changed projection")
+	}
 
 	if conn.Status().Group != nil {
 		t.Errorf("teardown event did not clear the group: %+v", conn.Status().Group)
@@ -542,5 +546,213 @@ func TestWebSocketWriteBatchRefreshesDeadlineForHealthyWriter(t *testing.T) {
 	deadline, ok := healthy.lastDeadline()
 	if !ok || deadline.Before(started.Add(timeout/2)) {
 		t.Fatalf("healthy writer deadline = %v, want a fresh deadline after %v", deadline, started)
+	}
+}
+
+func TestSpeakerEventHelpersPublishOnlyChangedPayloads(t *testing.T) {
+	app := NewWebApp()
+	conn := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+
+	nowPlaying := &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO", Track: "Test station"}
+	if !app.applyNowPlayingEvent(conn, nowPlaying) {
+		t.Fatal("new now-playing payload was not reported as changed")
+	}
+	if app.applyNowPlayingEvent(conn, nowPlaying) {
+		t.Fatal("duplicate now-playing payload was reported as changed")
+	}
+
+	volume := &models.Volume{ActualVolume: 25, TargetVolume: 25}
+	if !app.applyVolumeEvent(conn, volume) {
+		t.Fatal("new volume payload was not reported as changed")
+	}
+	if app.applyVolumeEvent(conn, volume) {
+		t.Fatal("duplicate volume payload was reported as changed")
+	}
+
+	if !app.applyConnectionStateEvent(conn, true) {
+		t.Fatal("new connection state was not reported as changed")
+	}
+	if app.applyConnectionStateEvent(conn, true) {
+		t.Fatal("duplicate connection state was reported as changed")
+	}
+
+	presets := &models.Presets{Preset: []models.Preset{{ID: 1}}}
+	if !app.applyPresetEvent(conn, presets) {
+		t.Fatal("new presets payload was not reported as changed")
+	}
+	if app.applyPresetEvent(conn, presets) {
+		t.Fatal("duplicate presets payload was reported as changed")
+	}
+
+	bass := &models.Bass{ActualBass: -2}
+	if !app.applyBassEvent(conn, bass) {
+		t.Fatal("new bass payload was not reported as changed")
+	}
+	if app.applyBassEvent(conn, bass) {
+		t.Fatal("duplicate bass payload was reported as changed")
+	}
+}
+
+func TestSpeakerEventPublishesImmediateDeviceProjection(t *testing.T) {
+	app := NewWebApp()
+	device := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	device.SetStatus(&webtypes.DeviceStatus{
+		Volume:      &models.Volume{ActualVolume: 10, TargetVolume: 10},
+		IsConnected: true,
+	})
+	app.AddDevice("speaker", device)
+
+	serverConnection := make(chan *websocket.Conn, 1)
+	releaseServer := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := app.Upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade test WebSocket: %v", err)
+
+			return
+		}
+		serverConnection <- conn
+		<-releaseServer
+		_ = conn.Close()
+	}))
+
+	client, response, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(server.URL, "http"), nil,
+	)
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if err != nil {
+		close(releaseServer)
+		server.Close()
+		t.Fatalf("dial test WebSocket: %v", err)
+	}
+	remote := <-serverConnection
+	t.Cleanup(func() {
+		app.removeGlobalWebSocketClient(remote)
+		_ = client.Close()
+		close(releaseServer)
+		server.Close()
+	})
+
+	if err := app.registerGlobalWebSocket(remote); err != nil {
+		t.Fatalf("register browser WebSocket: %v", err)
+	}
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set initial read deadline: %v", err)
+	}
+	var initial webtypes.WebSocketMessage
+	if err := client.ReadJSON(&initial); err != nil {
+		t.Fatalf("read initial device projection: %v", err)
+	}
+
+	app.webSocketWriteMu.Lock()
+	writerLocked := true
+	defer func() {
+		if writerLocked {
+			app.webSocketWriteMu.Unlock()
+		}
+	}()
+
+	applied := make(chan bool, 1)
+	go func() {
+		applied <- app.applyVolumeEvent(device, &models.Volume{ActualVolume: 25, TargetVolume: 25})
+	}()
+
+	select {
+	case changed := <-applied:
+		if !changed {
+			t.Fatal("volume event was not applied")
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("speaker event blocked on browser WebSocket I/O")
+	}
+
+	app.webSocketWriteMu.Unlock()
+	writerLocked = false
+
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set event read deadline: %v", err)
+	}
+	var update webtypes.WebSocketMessage
+	if err := client.ReadJSON(&update); err != nil {
+		t.Fatalf("read immediate device projection: %v", err)
+	}
+	if update.Type != "devices" {
+		t.Fatalf("event frame type = %q, want devices", update.Type)
+	}
+
+	devices, ok := update.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("event projection = %#v, want device map", update.Data)
+	}
+	speaker, ok := devices["speaker"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("speaker projection = %#v, want object", devices["speaker"])
+	}
+	status, ok := speaker["status"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("speaker status = %#v, want object", speaker["status"])
+	}
+	volume, ok := status["volume"].(map[string]interface{})
+	if !ok || volume["ActualVolume"] != float64(25) {
+		t.Fatalf("projected volume = %#v, want 25", status["volume"])
+	}
+}
+
+func TestQueuedDeviceBroadcastCoalescesBurst(t *testing.T) {
+	app := NewWebApp()
+
+	app.webSocketWriteMu.Lock()
+	writerLocked := true
+	defer func() {
+		if writerLocked {
+			app.webSocketWriteMu.Unlock()
+		}
+	}()
+
+	app.QueueDeviceListBroadcast()
+	deadline := time.Now().Add(time.Second)
+	for {
+		app.deviceBroadcastMu.Lock()
+		running := app.deviceBroadcastRunning
+		pending := app.deviceBroadcastPending
+		app.deviceBroadcastMu.Unlock()
+		if running && !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("broadcast worker did not begin its blocked write")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	for range 100 {
+		app.QueueDeviceListBroadcast()
+	}
+
+	app.deviceBroadcastMu.Lock()
+	if !app.deviceBroadcastPending {
+		app.deviceBroadcastMu.Unlock()
+		t.Fatal("burst did not retain one coalesced follow-up")
+	}
+	app.deviceBroadcastMu.Unlock()
+
+	app.webSocketWriteMu.Unlock()
+	writerLocked = false
+
+	deadline = time.Now().Add(time.Second)
+	for {
+		app.deviceBroadcastMu.Lock()
+		running := app.deviceBroadcastRunning
+		pending := app.deviceBroadcastPending
+		app.deviceBroadcastMu.Unlock()
+		if !running && !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("coalesced worker did not drain: running=%v pending=%v", running, pending)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
