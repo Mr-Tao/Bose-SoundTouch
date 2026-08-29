@@ -30,7 +30,7 @@ func DeleteMargeGroupGeneration(httpClient *http.Client, ref GenerationRef) erro
 		return nil
 	}
 
-	if ref.ExpectedGroup == nil || !sameGroupConfiguration(current, ref.ExpectedGroup) ||
+	if ref.ExpectedGroup == nil || !sameGroupTopology(current, ref.ExpectedGroup) ||
 		current.ID != ref.GroupID || current.MasterDeviceID != ref.DeviceID ||
 		!groupContainsDevice(current, ref.DeviceID) {
 		return fmt.Errorf("delete Marge group generation: device is associated with unrelated generation or topology %q",

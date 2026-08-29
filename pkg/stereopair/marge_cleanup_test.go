@@ -356,6 +356,41 @@ func TestDeleteMargeGroupGenerationRejectsSubstitutedMemberBeforeDelete(t *testi
 	}
 }
 
+func TestDeleteMargeGroupGenerationAcceptsNameDrift(t *testing.T) {
+	current := margeTestGroup("PAIR1")
+	current.Name = "Renamed on speaker"
+	deleted := false
+	deleteCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deleteCalls++
+			deleted = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if deleted {
+			_, _ = w.Write([]byte(`<group/>`))
+			return
+		}
+		data, _ := xml.Marshal(current)
+		_, _ = w.Write(data)
+	}))
+	defer server.Close()
+
+	expected := margeTestGroup("PAIR1")
+	expected.Name = "Original snapshot"
+	err := DeleteMargeGroupGeneration(server.Client(), GenerationRef{
+		MargeURL: server.URL, AccountID: "ACCOUNT1", GroupID: "PAIR1", DeviceID: "LEFT-ID",
+		ExpectedGroup: expected,
+	})
+	if err != nil {
+		t.Fatalf("DeleteMargeGroupGeneration: %v", err)
+	}
+	if deleteCalls != 1 {
+		t.Fatalf("DELETE calls = %d, want 1", deleteCalls)
+	}
+}
+
 func TestDeleteMargeGroupGenerationTreatsVerifiedAbsenceAsIdempotent(t *testing.T) {
 	deleteCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

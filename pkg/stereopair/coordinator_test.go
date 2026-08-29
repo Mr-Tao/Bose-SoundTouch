@@ -852,7 +852,7 @@ func TestRenameDetectsPhysicalChangeDuringPersistence(t *testing.T) {
 	}
 }
 
-func TestRenamePostconditionMismatchIsDegraded(t *testing.T) {
+func TestRenamePartialFailureIsDegradedAndRetryable(t *testing.T) {
 	group := configuredGroup("Old Name")
 	left := readyClient(leftID, "Left")
 	right := readyClient(rightID, "Right")
@@ -871,6 +871,19 @@ func TestRenamePostconditionMismatchIsDegraded(t *testing.T) {
 	}
 	if result.Members[1].Verified || result.Members[1].VerificationError == nil {
 		t.Fatalf("RIGHT mismatch not reported: %+v", result.Members[1])
+	}
+
+	right.updateErr = nil
+	result, err = coordinator.Rename(RenameRequest{
+		MemberIPAddress: rightIP,
+		ExpectedGroupID: "PAIR-ID",
+		Name:            "New Name",
+	})
+	if err != nil || result.Status != StatusSucceeded {
+		t.Fatalf("retry result = %+v, err = %v", result, err)
+	}
+	if left.group.Name != "New Name" || right.group.Name != "New Name" {
+		t.Fatalf("retry did not converge names: LEFT=%q RIGHT=%q", left.group.Name, right.group.Name)
 	}
 }
 
@@ -985,6 +998,51 @@ func TestDissolveRemovesAndVerifiesEveryMember(t *testing.T) {
 		if !member.Verified || member.Group == nil || !member.Group.IsEmpty() {
 			t.Errorf("member not verified empty: %+v", member)
 		}
+	}
+}
+
+func TestDissolveRecoversOneSidedRenameDrift(t *testing.T) {
+	left := readyClient(leftID, "Left")
+	right := readyClient(rightID, "Right")
+	left.group = configuredGroup("Renamed pair")
+	right.group = configuredGroup("Original pair")
+	coordinator := New(factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}))
+
+	result, err := coordinator.Dissolve(DissolveRequest{
+		MemberIPAddress: leftIP,
+		ExpectedGroupID: "PAIR-ID",
+	})
+	if err != nil || result.Status != StatusSucceeded {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	if left.removeCalls != 1 || right.removeCalls != 1 {
+		t.Fatalf("remove calls LEFT=%d RIGHT=%d, want 1/1", left.removeCalls, right.removeCalls)
+	}
+}
+
+func TestSameGroupTopologyIgnoresNameButRejectsIdentityDrift(t *testing.T) {
+	original := configuredGroup("Original pair")
+	renamed := cloneGroup(original)
+	renamed.Name = "Renamed pair"
+	if !sameGroupTopology(original, renamed) {
+		t.Fatal("name-only drift changed group topology")
+	}
+
+	tests := map[string]func(*models.Group){
+		"group ID": func(group *models.Group) { group.ID = "OTHER-ID" },
+		"master":   func(group *models.Group) { group.MasterDeviceID = rightID },
+		"role":     func(group *models.Group) { group.Roles.Roles[1].Role = "LEFT" },
+		"device":   func(group *models.Group) { group.Roles.Roles[1].DeviceID = "OTHER-ID" },
+		"IP":       func(group *models.Group) { group.Roles.Roles[1].IPAddress = "198.51.100.11" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			changed := cloneGroup(original)
+			mutate(changed)
+			if sameGroupTopology(original, changed) {
+				t.Fatalf("%s drift was accepted as the same topology", name)
+			}
+		})
 	}
 }
 
