@@ -78,6 +78,7 @@ type DeviceConnection struct {
 	bassOperationMu    sync.Mutex
 	balanceOperationMu sync.Mutex
 	balanceWriteMu     sync.Mutex
+	nowPlayingMu       sync.Mutex
 	zoneWriteMu        sync.RWMutex
 
 	nextPollGeneration  uint64
@@ -104,9 +105,10 @@ type DeviceConnection struct {
 
 	// zoneMu protects the last topology confirmed by a zone master. Member
 	// responses and failed refreshes must not dissolve a logical zone.
-	zoneMu                  sync.Mutex
-	zoneGeneration          uint64
-	confirmedZoneGeneration uint64
+	zoneMu                          sync.Mutex
+	zoneGeneration                  uint64
+	confirmedZoneGeneration         uint64
+	pendingZoneProjectionGeneration uint64
 
 	// done is closed by Close when the device is removed from the
 	// registry, signalling its background goroutines (the status poller
@@ -162,6 +164,22 @@ const (
 type SpeakerConnectionState struct {
 	State  string `json:"state"`
 	Signal string `json:"signal,omitempty"`
+}
+
+type connectivityProjection struct {
+	connectivity       Connectivity
+	httpReachable      bool
+	webSocketConnected bool
+	isConnected        bool
+}
+
+func projectedConnectivity(status *DeviceStatus) connectivityProjection {
+	return connectivityProjection{
+		connectivity:       status.Connectivity,
+		httpReachable:      status.HTTPReachable,
+		webSocketConnected: status.WebSocketConnected,
+		isConnected:        status.IsConnected,
+	}
 }
 
 // NewDeviceConnection creates a fully-initialised connection. The
@@ -220,11 +238,20 @@ func (c *DeviceConnection) ApplyPolledName(generation uint64, name string) bool 
 // ApplyNameEvent stores the newest nameUpdated event and invalidates all
 // in-flight /name requests.
 func (c *DeviceConnection) ApplyNameEvent(name string) {
+	c.ApplyNameEventChanged(name)
+}
+
+// ApplyNameEventChanged additionally reports whether the projected name changed.
+func (c *DeviceConnection) ApplyNameEventChanged(name string) bool {
 	c.nameMu.Lock()
 	defer c.nameMu.Unlock()
 
+	current := c.deviceName.Load()
+	changed := current == nil || *current != name
 	c.nameGen++
 	c.storeDeviceName(name)
+
+	return changed
 }
 
 // BeginVolumeRefresh starts a field-specific generation for an asynchronous
@@ -259,14 +286,37 @@ func (c *DeviceConnection) ApplyPolledVolume(generation uint64, volume *models.V
 // ApplyVolumeEvent stores the newest volumeUpdated event and invalidates all
 // in-flight /volume readbacks. It also participates in full-poll ordering.
 func (c *DeviceConnection) ApplyVolumeEvent(volume *models.Volume, activity time.Time) {
+	c.ApplyVolumeEventChanged(volume, activity)
+}
+
+// ApplyVolumeEventChanged additionally reports whether the browser-visible
+// projection changed.
+func (c *DeviceConnection) ApplyVolumeEventChanged(volume *models.Volume, activity time.Time) bool {
 	c.volumeMu.Lock()
 	defer c.volumeMu.Unlock()
 
+	changed := false
 	c.volumeGen++
-	c.ApplySpeakerEvent(func(status *DeviceStatus) {
+	connectivityChanged := c.ApplySpeakerEventChanged(func(status *DeviceStatus) {
+		changed = !reflect.DeepEqual(status.Volume, volume)
 		status.Volume = volume
 		status.LastActivity = activity
 	})
+
+	return changed || connectivityChanged
+}
+
+// ApplyPresetEvent stores the newest presetsUpdated event in the same ordering
+// domain as full status polls and reports whether its projection changed.
+func (c *DeviceConnection) ApplyPresetEvent(presets *models.Presets, activity time.Time) bool {
+	changed := false
+	connectivityChanged := c.ApplySpeakerEventChanged(func(status *DeviceStatus) {
+		changed = !reflect.DeepEqual(status.Presets, presets)
+		status.Presets = presets
+		status.LastActivity = activity
+	})
+
+	return changed || connectivityChanged
 }
 
 // WithVolumeOperation serializes a volume write and its mandatory readback for
@@ -330,15 +380,25 @@ func (c *DeviceConnection) ApplyPolledBassWithRevision(generation uint64, bass *
 // ApplyBassEvent stores the newest bassUpdated event and invalidates all
 // in-flight /bass readbacks. It also participates in full-poll ordering.
 func (c *DeviceConnection) ApplyBassEvent(bass *models.Bass, activity time.Time) {
+	c.ApplyBassEventChanged(bass, activity)
+}
+
+// ApplyBassEventChanged additionally reports whether the browser-visible
+// projection changed.
+func (c *DeviceConnection) ApplyBassEventChanged(bass *models.Bass, activity time.Time) bool {
 	c.bassMu.Lock()
 	defer c.bassMu.Unlock()
 
+	changed := false
 	c.bassGen++
-	c.ApplySpeakerEvent(func(status *DeviceStatus) {
+	connectivityChanged := c.ApplySpeakerEventChanged(func(status *DeviceStatus) {
+		changed = !reflect.DeepEqual(status.Bass, bass)
 		status.Bass = bass
 		status.BassRevision++
 		status.LastActivity = activity
 	})
+
+	return changed || connectivityChanged
 }
 
 // WithBalanceOperation serializes balance endpoint traffic for this physical
@@ -727,25 +787,45 @@ func (c *DeviceConnection) BeginHTTPPoll() uint64 {
 // input, but cannot merge older payload fields or demote the newer live event
 // stream observation.
 func (c *DeviceConnection) ApplySpeakerEvent(mut func(*DeviceStatus)) {
-	c.ApplySpeakerEventAt(time.Now(), mut)
+	c.ApplySpeakerEventChanged(mut)
+}
+
+// ApplySpeakerEventChanged additionally reports whether the browser-visible
+// connectivity projection changed.
+func (c *DeviceConnection) ApplySpeakerEventChanged(mut func(*DeviceStatus)) bool {
+	return c.ApplySpeakerEventAtChanged(time.Now(), mut)
 }
 
 // ApplySpeakerEventAt is the deterministic-time form used by event handlers
 // and tests. Receiving any event proves that the event stream is currently
 // usable, irrespective of the event's payload.
 func (c *DeviceConnection) ApplySpeakerEventAt(at time.Time, mut func(*DeviceStatus)) {
+	c.ApplySpeakerEventAtChanged(at, mut)
+}
+
+// ApplySpeakerEventAtChanged is the deterministic-time form that additionally
+// reports whether the browser-visible connectivity projection changed.
+func (c *DeviceConnection) ApplySpeakerEventAtChanged(at time.Time, mut func(*DeviceStatus)) bool {
 	c.healthMu.Lock()
 	defer c.healthMu.Unlock()
 
 	c.speakerEventGen++
 	c.markEventStreamActivityLocked(at)
+
+	changed := false
+
 	c.UpdateStatus(func(status *DeviceStatus) {
+		previousConnectivity := projectedConnectivity(status)
+
 		if mut != nil {
 			mut(status)
 		}
 
 		c.applyConnectivityLocked(status, at)
+		changed = previousConnectivity != projectedConnectivity(status)
 	})
+
+	return changed
 }
 
 // ApplyNowPlayingEvent stores a now-playing event in the same ordering domain
@@ -755,6 +835,47 @@ func (c *DeviceConnection) ApplyNowPlayingEvent(
 	nowPlaying *models.NowPlaying,
 	at time.Time,
 ) string {
+	previousSource, _ := c.ApplyNowPlayingEventChanged(nowPlaying, at)
+
+	return previousSource
+}
+
+// ApplyNowPlayingEventChanged stores a now-playing event and additionally
+// reports whether its browser-visible projection changed.
+func (c *DeviceConnection) ApplyNowPlayingEventChanged(
+	nowPlaying *models.NowPlaying,
+	at time.Time,
+) (string, bool) {
+	return c.ApplyNowPlayingEventChangedBefore(nowPlaying, at, nil)
+}
+
+// ApplyNowPlayingEventChangedBefore serializes a pre-apply ordering barrier
+// with full-poll now-playing merges. The callback may reserve related topology
+// generations before the event becomes visible to browser projection.
+func (c *DeviceConnection) ApplyNowPlayingEventChangedBefore(
+	nowPlaying *models.NowPlaying,
+	at time.Time,
+	beforeApply func(previousSource string),
+) (string, bool) {
+	c.nowPlayingMu.Lock()
+	defer c.nowPlayingMu.Unlock()
+
+	previousSource := ""
+	if status := c.Status(); status != nil && status.NowPlaying != nil {
+		previousSource = status.NowPlaying.Source
+	}
+
+	if beforeApply != nil {
+		beforeApply(previousSource)
+	}
+
+	return c.applyNowPlayingEventChanged(nowPlaying, at)
+}
+
+func (c *DeviceConnection) applyNowPlayingEventChanged(
+	nowPlaying *models.NowPlaying,
+	at time.Time,
+) (string, bool) {
 	c.healthMu.Lock()
 	defer c.healthMu.Unlock()
 
@@ -762,24 +883,38 @@ func (c *DeviceConnection) ApplyNowPlayingEvent(
 	c.markEventStreamActivityLocked(at)
 
 	previousSource := ""
+	changed := false
 
 	c.UpdateStatus(func(status *DeviceStatus) {
+		previousConnectivity := projectedConnectivity(status)
+
 		if status.NowPlaying != nil {
 			previousSource = status.NowPlaying.Source
 		}
 
+		changed = !reflect.DeepEqual(status.NowPlaying, nowPlaying)
 		status.NowPlaying = nowPlaying
 		status.LastActivity = at
 		c.applyConnectivityLocked(status, at)
+		changed = changed || previousConnectivity != projectedConnectivity(status)
 	})
 
-	return previousSource
+	return previousSource, changed
 }
 
 // ApplySpeakerConnectionEvent stores a speaker-reported connection state as a
 // separate supporting input. The event itself is also direct evidence that the
 // event stream is live. Unknown values remain diagnostic only.
 func (c *DeviceConnection) ApplySpeakerConnectionEvent(state SpeakerConnectionState, at time.Time) {
+	c.ApplySpeakerConnectionEventChanged(state, at)
+}
+
+// ApplySpeakerConnectionEventChanged additionally reports whether the
+// browser-visible state changed.
+func (c *DeviceConnection) ApplySpeakerConnectionEventChanged(
+	state SpeakerConnectionState,
+	at time.Time,
+) bool {
 	c.healthMu.Lock()
 	defer c.healthMu.Unlock()
 
@@ -799,12 +934,20 @@ func (c *DeviceConnection) ApplySpeakerConnectionEvent(state SpeakerConnectionSt
 		c.speakerConnectionConnected = false
 	}
 
+	changed := false
+
 	c.UpdateStatus(func(status *DeviceStatus) {
+		previousConnectivity := projectedConnectivity(status)
+
 		reported := state
+		changed = !reflect.DeepEqual(status.SpeakerConnectionState, &reported)
 		status.SpeakerConnectionState = &reported
 		status.LastActivity = at
 		c.applyConnectivityLocked(status, at)
+		changed = changed || previousConnectivity != projectedConnectivity(status)
 	})
+
+	return changed
 }
 
 // BeginEventStreamObservation reserves an ordering generation before the
@@ -824,11 +967,23 @@ func (c *DeviceConnection) BeginEventStreamObservation() uint64 {
 // newer stream observation or speaker event already won. It reports whether
 // the observation was accepted.
 func (c *DeviceConnection) CompleteEventStreamObservation(generation uint64, connected bool, at time.Time) bool {
+	accepted, _ := c.CompleteEventStreamObservationChanged(generation, connected, at)
+
+	return accepted
+}
+
+// CompleteEventStreamObservationChanged additionally reports whether the
+// accepted sample changed the browser-visible connectivity projection.
+func (c *DeviceConnection) CompleteEventStreamObservationChanged(
+	generation uint64,
+	connected bool,
+	at time.Time,
+) (bool, bool) {
 	c.healthMu.Lock()
 	defer c.healthMu.Unlock()
 
 	if generation <= c.lastEventStreamGeneration {
-		return false
+		return false, false
 	}
 
 	c.lastEventStreamGeneration = generation
@@ -838,16 +993,29 @@ func (c *DeviceConnection) CompleteEventStreamObservation(generation uint64, con
 		c.recordDirectSuccessLocked(at)
 	}
 
+	changed := false
+
 	c.UpdateStatus(func(status *DeviceStatus) {
+		previousConnectivity := projectedConnectivity(status)
+
 		c.applyConnectivityLocked(status, at)
+		changed = previousConnectivity != projectedConnectivity(status)
 	})
 
-	return true
+	return true, changed
 }
 
 // ObserveEventStream records an immediate transport transition without an
 // external sampling window.
 func (c *DeviceConnection) ObserveEventStream(connected bool, at time.Time) bool {
+	c.ObserveEventStreamChanged(connected, at)
+
+	return true
+}
+
+// ObserveEventStreamChanged additionally reports whether the browser-visible
+// connectivity projection changed.
+func (c *DeviceConnection) ObserveEventStreamChanged(connected bool, at time.Time) bool {
 	c.healthMu.Lock()
 	defer c.healthMu.Unlock()
 
@@ -859,17 +1027,28 @@ func (c *DeviceConnection) ObserveEventStream(connected bool, at time.Time) bool
 		c.recordDirectSuccessLocked(at)
 	}
 
+	changed := false
+
 	c.UpdateStatus(func(status *DeviceStatus) {
+		previousConnectivity := projectedConnectivity(status)
+
 		c.applyConnectivityLocked(status, at)
+		changed = previousConnectivity != projectedConnectivity(status)
 	})
 
-	return true
+	return changed
 }
 
 // MarkEventStreamActivity records an ordinary speaker event that is handled by
 // a field-specific path such as name or group updates.
 func (c *DeviceConnection) MarkEventStreamActivity(at time.Time) {
-	c.ObserveEventStream(true, at)
+	c.MarkEventStreamActivityChanged(at)
+}
+
+// MarkEventStreamActivityChanged additionally reports whether the
+// browser-visible connectivity projection changed.
+func (c *DeviceConnection) MarkEventStreamActivityChanged(at time.Time) bool {
+	return c.ObserveEventStreamChanged(true, at)
 }
 
 // CompleteHTTPPoll records the outcome of one HTTP status poll and applies its
@@ -881,6 +1060,9 @@ func (c *DeviceConnection) CompleteHTTPPoll(
 	at time.Time,
 	merge func(*DeviceStatus),
 ) bool {
+	c.nowPlayingMu.Lock()
+	defer c.nowPlayingMu.Unlock()
+
 	c.healthMu.Lock()
 	defer c.healthMu.Unlock()
 
@@ -1103,9 +1285,20 @@ func normalizeGroup(group *models.Group) *models.Group {
 	return group
 }
 
-// BeginZoneRefresh starts a new generation for an asynchronous master
-// /getZone request. Starting a new refresh invalidates any older response.
+// BeginZoneRefresh starts a write-safety generation for an asynchronous master
+// /getZone request. It invalidates older responses without hiding the retained
+// browser projection during routine polling.
 func (c *DeviceConnection) BeginZoneRefresh() uint64 {
+	return c.beginZoneRefresh(false)
+}
+
+// BeginZoneProjectionRefresh additionally hides the retained zone until this
+// topology-event readback succeeds, fails, or is rejected.
+func (c *DeviceConnection) BeginZoneProjectionRefresh() uint64 {
+	return c.beginZoneRefresh(true)
+}
+
+func (c *DeviceConnection) beginZoneRefresh(hideProjection bool) uint64 {
 	var generation uint64
 
 	c.zoneWriteMu.Lock()
@@ -1115,9 +1308,40 @@ func (c *DeviceConnection) BeginZoneRefresh() uint64 {
 	defer c.zoneMu.Unlock()
 
 	c.zoneGeneration++
+
 	generation = c.zoneGeneration
+	if hideProjection || c.pendingZoneProjectionGeneration != 0 {
+		c.pendingZoneProjectionGeneration = generation
+	}
 
 	return generation
+}
+
+// StatusForProjection captures status and whether its cached zone is awaiting
+// authoritative confirmation under one zone-generation lock. Callers can hide
+// an uncertain topology without racing a newly reserved refresh.
+func (c *DeviceConnection) StatusForProjection() (*DeviceStatus, bool) {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	return c.Status(), c.pendingZoneProjectionGeneration != 0
+}
+
+// AbandonZoneRefresh retires one current projection refresh without accepting
+// its result. The retained cache becomes visible again, while the generation
+// remains unconfirmed so zone-owned writes still fail closed.
+func (c *DeviceConnection) AbandonZoneRefresh(generation uint64) bool {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	if generation != c.zoneGeneration ||
+		c.pendingZoneProjectionGeneration != generation {
+		return false
+	}
+
+	c.pendingZoneProjectionGeneration = 0
+
+	return true
 }
 
 // ApplyPolledZone stores topology only when it was returned by the queried
@@ -1129,11 +1353,31 @@ func (c *DeviceConnection) ApplyPolledZone(
 	queriedDeviceID string,
 	zone *models.ZoneInfo,
 ) bool {
+	accepted, _ := c.ApplyPolledZoneChanged(generation, queriedDeviceID, zone)
+
+	return accepted
+}
+
+// ApplyPolledZoneChanged additionally reports whether the browser projection
+// changed. A current but invalid response retires only the temporary projection
+// barrier; it does not confirm the generation or replace the retained cache.
+func (c *DeviceConnection) ApplyPolledZoneChanged(
+	generation uint64,
+	queriedDeviceID string,
+	zone *models.ZoneInfo,
+) (bool, bool) {
 	c.zoneMu.Lock()
 	defer c.zoneMu.Unlock()
 
-	if generation != c.zoneGeneration || zone == nil {
-		return false
+	if generation != c.zoneGeneration {
+		return false, false
+	}
+
+	projectionChanged := c.pendingZoneProjectionGeneration == generation
+	c.pendingZoneProjectionGeneration = 0
+
+	if zone == nil {
+		return false, projectionChanged
 	}
 
 	master := strings.TrimSpace(zone.Master)
@@ -1142,13 +1386,13 @@ func (c *DeviceConnection) ApplyPolledZone(
 	if queriedDeviceID == "" ||
 		(master == "" && len(zone.Members) != 0) ||
 		(master != "" && master != queriedDeviceID) {
-		return false
+		return false, projectionChanged
 	}
 
 	c.confirmedZoneGeneration = generation
-	c.replaceZone(normalizeZone(zone))
+	zoneChanged := c.replaceZone(normalizeZone(zone))
 
-	return true
+	return true, projectionChanged || zoneChanged
 }
 
 func (c *DeviceConnection) replaceZone(zone *models.ZoneInfo) bool {

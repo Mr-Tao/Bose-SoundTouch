@@ -27,10 +27,11 @@ type deviceView struct {
 // building a response, otherwise group membership and the emitted status can
 // describe different moments.
 type deviceProjectionEntry struct {
-	ID       string
-	Info     *models.DeviceInfo
-	Status   *webtypes.DeviceStatus
-	LastSeen time.Time
+	ID                 string
+	Info               *models.DeviceInfo
+	Status             *webtypes.DeviceStatus
+	LastSeen           time.Time
+	ZoneRefreshPending bool
 }
 
 // stereoPairView describes the physical members represented by a logical
@@ -129,11 +130,13 @@ func captureDeviceProjectionEntries(snapshot []DeviceEntry) []deviceProjectionEn
 			continue
 		}
 
+		status, zoneRefreshPending := entry.Device.StatusForProjection()
 		captured = append(captured, deviceProjectionEntry{
-			ID:       entry.ID,
-			Info:     entry.Device.Info(),
-			Status:   entry.Device.Status(),
-			LastSeen: entry.LastSeen,
+			ID:                 entry.ID,
+			Info:               entry.Device.Info(),
+			Status:             status,
+			LastSeen:           entry.LastSeen,
+			ZoneRefreshPending: zoneRefreshPending,
 		})
 	}
 
@@ -252,7 +255,7 @@ func projectZoneViews(
 	claims := make(map[string]int)
 
 	for _, entry := range snapshot {
-		if entry.Info == nil || entry.Status == nil ||
+		if entry.Info == nil || entry.Status == nil || entry.ZoneRefreshPending ||
 			!validMasterZone(entry.Info.DeviceID, entry.Status.Zone) {
 			continue
 		}

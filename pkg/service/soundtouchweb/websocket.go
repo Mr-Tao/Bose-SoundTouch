@@ -6,8 +6,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
 	"github.com/go-chi/chi/v5"
@@ -234,7 +236,11 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 	defer func() {
 		conn.SetWebSocket(nil)
-		conn.ObserveEventStream(false, time.Now())
+
+		if conn.ObserveEventStreamChanged(false, time.Now()) {
+			app.QueueDeviceListBroadcast()
+		}
+
 		conn.FinishWebSocketLoop()
 	}()
 
@@ -259,61 +265,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		}
 
 		wsClient := conn.Client.NewWebSocketClient(nil)
-
-		// Setup event handlers. Each handler funnels its change through
-		// UpdateStatus so concurrent events and the periodic poller
-		// (UpdateDeviceStatus) cannot lose each other's writes.
-		wsClient.OnNowPlaying(func(event *models.NowPlayingUpdatedEvent) {
-			prevSource = app.applyNowPlayingUpdatedEvent(deviceID, conn, event, prevSource)
-		})
-
-		wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
-			conn.ApplyVolumeEvent(&event.Volume, time.Now())
-		})
-
-		wsClient.OnConnectionState(func(event *models.ConnectionStateUpdatedEvent) {
-			if !speakerConnectionEventMatches(conn, event.DeviceID) {
-				log.Printf("Ignoring connection state for mismatched device %s on %s",
-					sanitizeLog(event.DeviceID), sanitizeLog(deviceID))
-
-				return
-			}
-
-			conn.ApplySpeakerConnectionEvent(webtypes.SpeakerConnectionState{
-				State:  event.ConnectionState.State,
-				Signal: event.ConnectionState.Signal,
-			}, time.Now())
-		})
-
-		wsClient.OnPresetUpdated(func(event *models.PresetUpdatedEvent) {
-			conn.ApplySpeakerEvent(func(s *webtypes.DeviceStatus) {
-				s.Presets = &event.Presets
-				s.LastActivity = time.Now()
-			})
-		})
-
-		wsClient.OnBassUpdated(func(event *models.BassUpdatedEvent) {
-			app.applyBassUpdatedEvent(conn, event)
-		})
-
-		wsClient.OnGroupUpdated(func(event *models.GroupUpdatedEvent) {
-			applyGroupUpdatedEvent(conn, event)
-		})
-
-		wsClient.OnBalanceUpdated(func(event *models.BalanceUpdatedEvent) {
-			app.applyBalanceUpdatedEvent(deviceID, conn, event)
-		})
-
-		wsClient.OnZoneUpdated(func(event *models.ZoneUpdatedEvent) {
-			conn.MarkEventStreamActivity(time.Now())
-
-			go app.refreshZonesAfterEvent(event.DeviceID, event.Zone.Master)
-		})
-
-		wsClient.OnNameUpdated(func(event *models.NameUpdatedEvent) {
-			conn.MarkEventStreamActivity(time.Now())
-			conn.ApplyNameEvent(event.Name.Value)
-		})
+		app.registerDeviceWebSocketHandlers(deviceID, conn, wsClient, &prevSource)
 
 		if err := wsClient.Connect(); err != nil {
 			log.Printf("Failed to connect WebSocket for device %s: %v (retrying in %s)", sanitizeLog(deviceID), err, backoff)
@@ -331,7 +283,10 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		}
 
 		conn.SetWebSocket(wsClient)
-		conn.ObserveEventStream(true, time.Now())
+
+		if conn.ObserveEventStreamChanged(true, time.Now()) {
+			app.QueueDeviceListBroadcast()
+		}
 
 		log.Printf("WebSocket connected for device %s", sanitizeLog(deviceID))
 
@@ -355,8 +310,18 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 				observation := conn.BeginEventStreamObservation()
 
 				connected := wsClient.IsConnected()
-				if !conn.CompleteEventStreamObservation(observation, connected, time.Now()) {
+
+				accepted, projectionChanged := conn.CompleteEventStreamObservationChanged(
+					observation,
+					connected,
+					time.Now(),
+				)
+				if !accepted {
 					continue
+				}
+
+				if projectionChanged {
+					app.QueueDeviceListBroadcast()
 				}
 
 				if connected == transportConnected {
@@ -364,7 +329,6 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 				}
 
 				transportConnected = connected
-
 				if connected {
 					log.Printf("WebSocket reconnected for device %s", sanitizeLog(deviceID))
 					go app.UpdateDeviceStatus(deviceID, conn)
@@ -374,6 +338,84 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			}
 		}
 	}
+}
+
+// registerDeviceWebSocketHandlers keeps event projection separate from the
+// transport supervisor. Each callback uses ordered DeviceConnection helpers so
+// concurrent events and periodic polling cannot lose each other's writes.
+func (app *WebApp) registerDeviceWebSocketHandlers(
+	deviceID string,
+	conn *webtypes.DeviceConnection,
+	wsClient *client.WebSocketClient,
+	previousSource *string,
+) {
+	wsClient.OnNowPlaying(func(event *models.NowPlayingUpdatedEvent) {
+		*previousSource = app.applyNowPlayingUpdatedEvent(
+			deviceID,
+			conn,
+			event,
+			*previousSource,
+		)
+	})
+
+	wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
+		if conn.ApplyVolumeEventChanged(&event.Volume, time.Now()) {
+			app.QueueDeviceListBroadcast()
+		}
+	})
+
+	wsClient.OnConnectionState(func(event *models.ConnectionStateUpdatedEvent) {
+		if !speakerConnectionEventMatches(conn, event.DeviceID) {
+			log.Printf("Ignoring connection state for mismatched device %s on %s",
+				sanitizeLog(event.DeviceID), sanitizeLog(deviceID))
+
+			return
+		}
+
+		if conn.ApplySpeakerConnectionEventChanged(webtypes.SpeakerConnectionState{
+			State:  event.ConnectionState.State,
+			Signal: event.ConnectionState.Signal,
+		}, time.Now()) {
+			app.QueueDeviceListBroadcast()
+		}
+	})
+
+	wsClient.OnPresetUpdated(func(event *models.PresetUpdatedEvent) {
+		if conn.ApplyPresetEvent(&event.Presets, time.Now()) {
+			app.QueueDeviceListBroadcast()
+		}
+	})
+
+	wsClient.OnBassUpdated(func(event *models.BassUpdatedEvent) {
+		app.applyBassUpdatedEvent(conn, event)
+	})
+
+	wsClient.OnGroupUpdated(func(event *models.GroupUpdatedEvent) {
+		if applyGroupUpdatedEvent(conn, event) {
+			app.QueueDeviceListBroadcast()
+		}
+	})
+
+	wsClient.OnBalanceUpdated(func(event *models.BalanceUpdatedEvent) {
+		app.applyBalanceUpdatedEvent(deviceID, conn, event)
+	})
+
+	wsClient.OnZoneUpdated(func(event *models.ZoneUpdatedEvent) {
+		if conn.MarkEventStreamActivityChanged(time.Now()) {
+			app.QueueDeviceListBroadcast()
+		}
+
+		go app.refreshZonesAfterEvent(event.DeviceID, event.Zone.Master)
+	})
+
+	wsClient.OnNameUpdated(func(event *models.NameUpdatedEvent) {
+		activityChanged := conn.MarkEventStreamActivityChanged(time.Now())
+		nameChanged := conn.ApplyNameEventChanged(event.Name.Value)
+
+		if activityChanged || nameChanged {
+			app.QueueDeviceListBroadcast()
+		}
+	})
 }
 
 func speakerConnectionEventMatches(conn *webtypes.DeviceConnection, eventDeviceID string) bool {
@@ -415,17 +457,33 @@ func (app *WebApp) applyNowPlayingUpdatedEvent(
 		logNowPlayingError(deviceID, source, nowPlaying.SourceAccount)
 	}
 
-	previousCachedSource := conn.ApplyNowPlayingEvent(nowPlaying, activity)
+	var zoneRefreshes []pendingZoneRefresh
 
-	if !isStandbySource(previousCachedSource) && isStandbySource(source) {
-		eventDeviceID := strings.TrimSpace(event.DeviceID)
-		if info := conn.Info(); info != nil && strings.TrimSpace(info.DeviceID) != "" {
-			eventDeviceID = strings.TrimSpace(info.DeviceID)
-		}
+	_, changed := conn.ApplyNowPlayingEventChangedBefore(
+		nowPlaying,
+		activity,
+		func(previousCachedSource string) {
+			if !isStandbySource(source) || isStandbySource(previousCachedSource) {
+				return
+			}
 
-		if eventDeviceID != "" {
-			app.refreshCachedZonesAfterStandby(eventDeviceID, conn)
-		}
+			eventDeviceID := strings.TrimSpace(event.DeviceID)
+			if info := conn.Info(); info != nil && strings.TrimSpace(info.DeviceID) != "" {
+				eventDeviceID = strings.TrimSpace(info.DeviceID)
+			}
+
+			if eventDeviceID != "" {
+				zoneRefreshes = app.prepareCachedZonesAfterStandby(eventDeviceID, conn)
+			}
+		},
+	)
+
+	if changed || len(zoneRefreshes) > 0 {
+		app.QueueDeviceListBroadcast()
+	}
+
+	if len(zoneRefreshes) > 0 {
+		go app.completeAuthoritativeZoneRefreshBatch(zoneRefreshes)
 	}
 
 	return source
@@ -497,10 +555,24 @@ func (app *WebApp) UpdateDeviceStatus(deviceID string, conn *webtypes.DeviceConn
 		conn.ApplyPolledName(nameGeneration, poll.name.Value)
 	}
 
+	zoneProjectionChanged := false
+
 	if poll.zoneErr == nil {
 		if info := conn.Info(); info != nil {
-			conn.ApplyPolledZone(zoneGeneration, info.DeviceID, poll.zone)
+			_, zoneProjectionChanged = conn.ApplyPolledZoneChanged(
+				zoneGeneration,
+				info.DeviceID,
+				poll.zone,
+			)
+		} else {
+			zoneProjectionChanged = conn.AbandonZoneRefresh(zoneGeneration)
 		}
+	} else {
+		zoneProjectionChanged = conn.AbandonZoneRefresh(zoneGeneration)
+	}
+
+	if zoneProjectionChanged {
+		app.QueueDeviceListBroadcast()
 	}
 }
 
@@ -635,9 +707,12 @@ func anyStatusFetchSucceeded(errors ...error) bool {
 	return false
 }
 
-func applyGroupUpdatedEvent(conn *webtypes.DeviceConnection, event *models.GroupUpdatedEvent) {
-	conn.MarkEventStreamActivity(time.Now())
-	conn.ApplyGroupEvent(&event.Group, time.Now())
+func applyGroupUpdatedEvent(conn *webtypes.DeviceConnection, event *models.GroupUpdatedEvent) bool {
+	activity := time.Now()
+	activityChanged := conn.MarkEventStreamActivityChanged(activity)
+	groupChanged := conn.ApplyGroupEvent(&event.Group, activity)
+
+	return activityChanged || groupChanged
 }
 
 func (app *WebApp) applyBassUpdatedEvent(
@@ -649,6 +724,7 @@ func (app *WebApp) applyBassUpdatedEvent(
 	}
 
 	applied := false
+	activityChanged := conn.MarkEventStreamActivityChanged(time.Now())
 
 	conn.WithBassOperation(func() {
 		if conn.Client == nil {
@@ -663,13 +739,10 @@ func (app *WebApp) applyBassUpdatedEvent(
 		}
 
 		applied = conn.ApplyPolledBass(generation, bass)
-		if applied {
-			conn.MarkEventStreamActivity(time.Now())
-		}
 	})
 
-	if applied {
-		app.BroadcastDeviceList()
+	if applied || activityChanged {
+		app.QueueDeviceListBroadcast()
 	}
 }
 
@@ -683,6 +756,7 @@ func (app *WebApp) applyBalanceUpdatedEvent(
 	}
 
 	applied := false
+	activityChanged := conn.MarkEventStreamActivityChanged(time.Now())
 
 	conn.WithBalanceOperation(func() {
 		if conn.Client == nil || !app.confirmedStereoBalanceTarget(deviceID, conn) {
@@ -702,9 +776,8 @@ func (app *WebApp) applyBalanceUpdatedEvent(
 		applied = app.applyBalanceReadback(deviceID, conn, refresh, balance)
 	})
 
-	if applied {
-		conn.MarkEventStreamActivity(time.Now())
-		app.BroadcastDeviceList()
+	if applied || activityChanged {
+		app.QueueDeviceListBroadcast()
 	}
 }
 
@@ -712,6 +785,12 @@ func (app *WebApp) applyBalanceUpdatedEvent(
 // event is not authoritative: the current master is queried through /getZone
 // before cached topology changes. Cached masters containing the event source
 // are included so a dissolve event with no new master can clear the old zone.
+type pendingZoneRefresh struct {
+	masterDeviceID string
+	connection     *webtypes.DeviceConnection
+	generation     uint64
+}
+
 func (app *WebApp) refreshZonesAfterEvent(eventDeviceID, eventMasterID string) {
 	candidates := map[string]struct{}{}
 	if eventDeviceID != "" {
@@ -731,19 +810,18 @@ func (app *WebApp) refreshZonesAfterEvent(eventDeviceID, eventMasterID string) {
 		candidates[status.Zone.Master] = struct{}{}
 	}
 
-	for masterID := range candidates {
-		app.refreshAuthoritativeZone(masterID)
-	}
+	app.completeAuthoritativeZoneRefreshBatch(
+		app.prepareAuthoritativeZoneRefreshes(candidates),
+	)
 }
 
-// refreshCachedZonesAfterStandby invalidates the event speaker's
-// in-flight zone poll synchronously, then reserves generations for cached
-// masters containing it. Network reads happen after this ordering barrier.
-func (app *WebApp) refreshCachedZonesAfterStandby(
+// prepareCachedZonesAfterStandby reserves generations for every cached master
+// containing the event speaker. Network reads happen after this ordering
+// barrier, so older master responses cannot revive the invalidated topology.
+func (app *WebApp) prepareCachedZonesAfterStandby(
 	eventDeviceID string,
 	eventConnection *webtypes.DeviceConnection,
-) {
-	eventGeneration := eventConnection.BeginZoneRefresh()
+) []pendingZoneRefresh {
 	candidates := map[string]struct{}{}
 
 	for _, entry := range app.DeviceSnapshot() {
@@ -755,13 +833,30 @@ func (app *WebApp) refreshCachedZonesAfterStandby(
 		candidates[status.Zone.Master] = struct{}{}
 	}
 
-	type pendingRefresh struct {
-		masterDeviceID string
-		connection     *webtypes.DeviceConnection
-		generation     uint64
+	refreshes := app.prepareAuthoritativeZoneRefreshes(candidates)
+	eventReserved := false
+
+	for _, refresh := range refreshes {
+		if refresh.connection == eventConnection {
+			eventReserved = true
+
+			break
+		}
 	}
 
-	refreshes := make([]pendingRefresh, 0, len(candidates))
+	if !eventReserved {
+		// Even an uncached member can have an older full /getZone poll in flight.
+		// Invalidate it without hiding a zone projection that it does not own.
+		eventConnection.BeginZoneRefresh()
+	}
+
+	return refreshes
+}
+
+func (app *WebApp) prepareAuthoritativeZoneRefreshes(
+	candidates map[string]struct{},
+) []pendingZoneRefresh {
+	refreshes := make([]pendingZoneRefresh, 0, len(candidates))
 
 	for masterID := range candidates {
 		masterIP := app.findIPByHwID(masterID)
@@ -771,53 +866,62 @@ func (app *WebApp) refreshCachedZonesAfterStandby(
 			continue
 		}
 
-		generation := eventGeneration
-		if master != eventConnection {
-			generation = master.BeginZoneRefresh()
-		}
-
-		refreshes = append(refreshes, pendingRefresh{
+		refreshes = append(refreshes, pendingZoneRefresh{
 			masterDeviceID: masterID,
 			connection:     master,
-			generation:     generation,
+			generation:     master.BeginZoneProjectionRefresh(),
 		})
 	}
 
-	for _, pending := range refreshes {
-		go app.completeAuthoritativeZoneRefresh(
-			pending.masterDeviceID,
-			pending.connection,
-			pending.generation,
-		)
-	}
+	return refreshes
 }
 
-func (app *WebApp) refreshAuthoritativeZone(masterDeviceID string) {
-	masterIP := app.findIPByHwID(masterDeviceID)
-
-	master, ok := app.GetDevice(masterIP)
-	if !ok || master.Client == nil {
+func (app *WebApp) completeAuthoritativeZoneRefreshBatch(refreshes []pendingZoneRefresh) {
+	if len(refreshes) == 0 {
 		return
 	}
 
-	generation := master.BeginZoneRefresh()
-	app.completeAuthoritativeZoneRefresh(masterDeviceID, master, generation)
-}
-
-func (app *WebApp) completeAuthoritativeZoneRefresh(
-	masterDeviceID string,
-	master *webtypes.DeviceConnection,
-	generation uint64,
-) {
-	zone, err := master.Client.GetZone()
-	if err != nil {
-		log.Printf("Failed to refresh zone master %s: %v", sanitizeLog(masterDeviceID), err)
-		return
+	type zoneRefreshResult struct {
+		refresh pendingZoneRefresh
+		zone    *models.ZoneInfo
+		err     error
 	}
 
-	if master.ApplyPolledZone(generation, masterDeviceID, zone) {
-		app.BroadcastDeviceList()
+	results := make([]zoneRefreshResult, len(refreshes))
+
+	var wait sync.WaitGroup
+	wait.Add(len(refreshes))
+
+	for index, refresh := range refreshes {
+		go func(index int, refresh pendingZoneRefresh) {
+			defer wait.Done()
+
+			zone, err := refresh.connection.Client.GetZone()
+			results[index] = zoneRefreshResult{refresh: refresh, zone: zone, err: err}
+		}(index, refresh)
 	}
+
+	wait.Wait()
+
+	_ = app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		for _, result := range results {
+			if result.err != nil {
+				log.Printf("Failed to refresh zone master %s: %v",
+					sanitizeLog(result.refresh.masterDeviceID), result.err)
+				result.refresh.connection.AbandonZoneRefresh(result.refresh.generation)
+
+				continue
+			}
+
+			result.refresh.connection.ApplyPolledZoneChanged(
+				result.refresh.generation,
+				result.refresh.masterDeviceID,
+				result.zone,
+			)
+		}
+
+		return app.broadcastDeviceListLocked(batch)
+	})
 }
 
 // HandleDeviceWebSocket handles individual device WebSocket connections for real-time device-specific updates

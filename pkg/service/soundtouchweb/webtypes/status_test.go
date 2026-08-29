@@ -192,6 +192,25 @@ func TestOlderStreamSampleCannotOverwriteNewerSpeakerEvent(t *testing.T) {
 	}
 }
 
+func TestCompleteEventStreamObservationReportsProjectionChange(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
+	conn.ObserveEventStream(true, started)
+
+	observation := conn.BeginEventStreamObservation()
+	accepted, changed := conn.CompleteEventStreamObservationChanged(
+		observation,
+		false,
+		started.Add(time.Second),
+	)
+	if !accepted || !changed {
+		t.Fatalf("accepted=%v changed=%v, want accepted connectivity change", accepted, changed)
+	}
+	if status := conn.Status(); status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("sampled disconnect projection = %+v", status)
+	}
+}
+
 func TestSpeakerConnectionReportCannotOverrideDirectSuccess(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
 	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
@@ -386,7 +405,7 @@ func TestZoneCacheRejectsMalformedMasterlessResponse(t *testing.T) {
 		t.Fatal("initial zone was not stored")
 	}
 
-	malformed := conn.BeginZoneRefresh()
+	malformed := conn.BeginZoneProjectionRefresh()
 	if conn.ApplyPolledZone(malformed, "MASTER", &models.ZoneInfo{
 		Members: []models.Member{{DeviceID: "MEMBER", IP: "192.0.2.20"}},
 	}) {
@@ -394,6 +413,110 @@ func TestZoneCacheRejectsMalformedMasterlessResponse(t *testing.T) {
 	}
 	if conn.Status().Zone == nil || conn.Status().Zone.Master != "MASTER" {
 		t.Fatalf("malformed response cleared cached topology: %+v", conn.Status().Zone)
+	}
+	if status, pending := conn.StatusForProjection(); pending ||
+		status.Zone == nil || status.Zone.Master != "MASTER" {
+		t.Fatalf("malformed response hid retained projection: status=%+v pending=%v",
+			status, pending)
+	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("malformed response confirmed an unsafe topology: %+v current=%v",
+			snapshot, current)
+	}
+}
+
+func TestAbandonedZoneRefreshRevealsCacheButKeepsWritesUnsafe(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	failed := conn.BeginZoneProjectionRefresh()
+	if _, pending := conn.StatusForProjection(); !pending {
+		t.Fatal("in-flight refresh did not hide the retained projection")
+	}
+	if !conn.AbandonZoneRefresh(failed) {
+		t.Fatal("current failed refresh was not retired")
+	}
+	if status, pending := conn.StatusForProjection(); pending ||
+		status.Zone == nil || status.Zone.Master != "MASTER" {
+		t.Fatalf("abandoned refresh did not reveal retained projection: status=%+v pending=%v",
+			status, pending)
+	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("abandoned refresh left zone-owned writes enabled: %+v current=%v",
+			snapshot, current)
+	}
+}
+
+func TestRoutineZoneRefreshKeepsConfirmedProjectionVisible(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	routine := conn.BeginZoneRefresh()
+	if status, pending := conn.StatusForProjection(); pending ||
+		status.Zone == nil || status.Zone.Master != "MASTER" {
+		t.Fatalf("routine poll hid healthy projection: status=%+v pending=%v", status, pending)
+	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("routine poll left zone-owned writes enabled: %+v current=%v", snapshot, current)
+	}
+	if !conn.ApplyPolledZone(routine, "MASTER", zone) {
+		t.Fatal("routine refresh result was not accepted")
+	}
+}
+
+func TestRoutineZoneRefreshInheritsActiveProjectionBarrier(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	conn.BeginZoneProjectionRefresh()
+	routine := conn.BeginZoneRefresh()
+	if _, pending := conn.StatusForProjection(); !pending {
+		t.Fatal("superseding routine poll dropped the active projection barrier")
+	}
+	if !conn.AbandonZoneRefresh(routine) {
+		t.Fatal("superseding routine poll did not own the projection barrier")
+	}
+	if status, pending := conn.StatusForProjection(); pending ||
+		status.Zone == nil || status.Zone.Master != "MASTER" {
+		t.Fatalf("failed superseding poll did not restore retained projection: status=%+v pending=%v",
+			status, pending)
+	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("failed superseding poll left zone-owned writes enabled: %+v current=%v",
+			snapshot, current)
 	}
 }
 
@@ -561,6 +684,40 @@ func TestUpdateStatus_PreservesUnchangedFields(t *testing.T) {
 
 	if !got.IsConnected {
 		t.Error("IsConnected not preserved")
+	}
+}
+
+func TestSpeakerEventChangeReporting(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "Original"})
+	at := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
+
+	volume := &models.Volume{ActualVolume: 25, TargetVolume: 25}
+	if !conn.ApplyVolumeEventChanged(volume, at) ||
+		conn.ApplyVolumeEventChanged(volume, at.Add(time.Second)) {
+		t.Fatal("volume event change reporting did not distinguish a duplicate")
+	}
+
+	presets := &models.Presets{Preset: []models.Preset{{ID: 1}}}
+	if !conn.ApplyPresetEvent(presets, at) || conn.ApplyPresetEvent(presets, at.Add(time.Second)) {
+		t.Fatal("preset event change reporting did not distinguish a duplicate")
+	}
+
+	nowPlaying := &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO", Track: "Station"}
+	if _, changed := conn.ApplyNowPlayingEventChanged(nowPlaying, at); !changed {
+		t.Fatal("new now-playing event was not reported as changed")
+	}
+	if _, changed := conn.ApplyNowPlayingEventChanged(nowPlaying, at.Add(time.Second)); changed {
+		t.Fatal("duplicate now-playing event was reported as changed")
+	}
+
+	connection := SpeakerConnectionState{State: string(models.ConnectionStateConnected), Signal: "GOOD_SIGNAL"}
+	if !conn.ApplySpeakerConnectionEventChanged(connection, at) ||
+		conn.ApplySpeakerConnectionEventChanged(connection, at.Add(time.Second)) {
+		t.Fatal("connection event change reporting did not distinguish a duplicate")
+	}
+
+	if !conn.ApplyNameEventChanged("Renamed") || conn.ApplyNameEventChanged("Renamed") {
+		t.Fatal("name event change reporting did not distinguish a duplicate")
 	}
 }
 

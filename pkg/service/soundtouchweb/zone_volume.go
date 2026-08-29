@@ -133,10 +133,23 @@ func (app *WebApp) revalidateZone(masterDeviceID string) (zoneVolumeTopology, er
 
 	zone, err := master.Client.GetZone()
 	if err != nil {
+		if master.AbandonZoneRefresh(generation) {
+			app.QueueDeviceListBroadcast()
+		}
+
 		return zoneVolumeTopology{}, fmt.Errorf("refresh zone master: %w", err)
 	}
 
-	if !master.ApplyPolledZone(generation, masterDeviceID, zone) {
+	accepted, projectionChanged := master.ApplyPolledZoneChanged(
+		generation,
+		masterDeviceID,
+		zone,
+	)
+	if projectionChanged {
+		app.QueueDeviceListBroadcast()
+	}
+
+	if !accepted {
 		return zoneVolumeTopology{}, fmt.Errorf("zone topology changed during refresh")
 	}
 

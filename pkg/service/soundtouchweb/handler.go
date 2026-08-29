@@ -45,6 +45,10 @@ type WebApp struct {
 	// must not indefinitely delay a lifecycle response waiting for older frames.
 	webSocketWriteTimeout time.Duration
 
+	deviceBroadcastMu      sync.Mutex
+	deviceBroadcastPending bool
+	deviceBroadcastRunning bool
+
 	Version    string
 	Commit     string
 	Date       string
@@ -896,23 +900,63 @@ func (app *WebApp) HandleDevicePowerStatus(w http.ResponseWriter, r *http.Reques
 
 // BroadcastDeviceList sends updated device list to all connected WebSocket clients
 func (app *WebApp) BroadcastDeviceList() {
-	clients := app.globalWebSocketClients()
-
 	_ = app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
-		message := webtypes.WebSocketMessage{
-			Type: "devices",
-			Data: app.deviceViewSnapshot(),
-		}
-
-		for _, client := range clients {
-			if err := batch.writeJSON(client, message); err != nil {
-				log.Printf("Failed to send device update to WebSocket client: %v", err)
-				app.removeGlobalWebSocketClient(client)
-			}
-		}
-
-		return nil
+		return app.broadcastDeviceListLocked(batch)
 	})
+}
+
+func (app *WebApp) broadcastDeviceListLocked(batch webSocketWriteBatch) error {
+	clients := app.globalWebSocketClients()
+	message := webtypes.WebSocketMessage{
+		Type: "devices",
+		Data: app.deviceViewSnapshot(),
+	}
+
+	for _, client := range clients {
+		if err := batch.writeJSON(client, message); err != nil {
+			log.Printf("Failed to send device update to WebSocket client: %v", err)
+			app.removeGlobalWebSocketClient(client)
+		}
+	}
+
+	return nil
+}
+
+// QueueDeviceListBroadcast schedules one device projection without blocking a
+// speaker's event read loop on browser I/O. At most one worker runs per app;
+// events during a slow write are coalesced into one follow-up snapshot rather
+// than expanding into an unbounded queue or set of goroutines.
+func (app *WebApp) QueueDeviceListBroadcast() {
+	app.deviceBroadcastMu.Lock()
+
+	app.deviceBroadcastPending = true
+	if app.deviceBroadcastRunning {
+		app.deviceBroadcastMu.Unlock()
+
+		return
+	}
+
+	app.deviceBroadcastRunning = true
+	app.deviceBroadcastMu.Unlock()
+
+	go app.runDeviceListBroadcasts()
+}
+
+func (app *WebApp) runDeviceListBroadcasts() {
+	for {
+		app.deviceBroadcastMu.Lock()
+		if !app.deviceBroadcastPending {
+			app.deviceBroadcastRunning = false
+			app.deviceBroadcastMu.Unlock()
+
+			return
+		}
+
+		app.deviceBroadcastPending = false
+		app.deviceBroadcastMu.Unlock()
+
+		app.BroadcastDeviceList()
+	}
 }
 
 // BeginDiscovery reserves a monotonically increasing generation before a

@@ -2,6 +2,7 @@ package soundtouchweb
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -132,6 +133,118 @@ func readBroadcastDevices(t *testing.T, conn *websocket.Conn) map[string]deviceV
 	}
 
 	return projected
+}
+
+func TestQueuedSpeakerEventPublicationDoesNotBlockOnBrowserWriter(t *testing.T) {
+	app := NewWebApp()
+	device := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
+		DeviceID: "speaker-id",
+		Name:     "Speaker",
+	})
+	device.SetStatus(&webtypes.DeviceStatus{
+		Volume:       &models.Volume{ActualVolume: 10, TargetVolume: 10},
+		Connectivity: webtypes.ConnectivityOnline,
+		IsConnected:  true,
+	})
+	app.AddDevice("192.0.2.10", device)
+	browser := registerBroadcastWebSocket(t, app)
+
+	app.webSocketWriteMu.Lock()
+	writerLocked := true
+	defer func() {
+		if writerLocked {
+			app.webSocketWriteMu.Unlock()
+		}
+	}()
+
+	applied := make(chan bool, 1)
+	go func() {
+		changed := device.ApplyVolumeEventChanged(
+			&models.Volume{ActualVolume: 25, TargetVolume: 25},
+			time.Now(),
+		)
+		if changed {
+			app.QueueDeviceListBroadcast()
+		}
+		applied <- changed
+	}()
+
+	select {
+	case changed := <-applied:
+		if !changed {
+			t.Fatal("volume event was not reported as changed")
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("speaker event blocked on browser WebSocket I/O")
+	}
+
+	app.webSocketWriteMu.Unlock()
+	writerLocked = false
+
+	projected := readBroadcastDevices(t, browser)
+	got := projected["192.0.2.10"].Status.Volume
+	if got == nil || got.ActualVolume != 25 {
+		t.Fatalf("projected volume = %+v, want 25", got)
+	}
+}
+
+func TestQueuedDeviceBroadcastCoalescesBurst(t *testing.T) {
+	app := NewWebApp()
+	browser := registerBroadcastWebSocket(t, app)
+
+	app.webSocketWriteMu.Lock()
+	writerLocked := true
+	defer func() {
+		if writerLocked {
+			app.webSocketWriteMu.Unlock()
+		}
+	}()
+
+	app.QueueDeviceListBroadcast()
+	deadline := time.Now().Add(time.Second)
+	for {
+		app.deviceBroadcastMu.Lock()
+		running := app.deviceBroadcastRunning
+		pending := app.deviceBroadcastPending
+		app.deviceBroadcastMu.Unlock()
+		if running && !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("broadcast worker did not begin its blocked write")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	for range 100 {
+		app.QueueDeviceListBroadcast()
+	}
+	app.deviceBroadcastMu.Lock()
+	if !app.deviceBroadcastPending {
+		app.deviceBroadcastMu.Unlock()
+		t.Fatal("burst did not retain one coalesced follow-up")
+	}
+	app.deviceBroadcastMu.Unlock()
+
+	app.webSocketWriteMu.Unlock()
+	writerLocked = false
+	_ = readBroadcastDevices(t, browser)
+	_ = readBroadcastDevices(t, browser)
+
+	deadline = time.Now().Add(time.Second)
+	for {
+		app.deviceBroadcastMu.Lock()
+		running := app.deviceBroadcastRunning
+		pending := app.deviceBroadcastPending
+		app.deviceBroadcastMu.Unlock()
+		if !running && !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("coalesced worker did not drain: running=%v pending=%v", running, pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestUpdateDeviceStatusRefreshesGroup(t *testing.T) {
@@ -556,12 +669,18 @@ func TestRefreshZonesAfterEventPreservesCacheOnMasterError(t *testing.T) {
 	app := NewWebApp()
 	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
 	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Member", member, 20, nil)
+	browser := registerBroadcastWebSocket(t, app)
 
 	app.refreshZonesAfterEvent("MEMBER", "")
 
 	masterConn, _ := app.GetDevice("192.0.2.10")
 	if masterConn.Status().Zone == nil || masterConn.Status().Zone.Master != "MASTER" {
 		t.Fatalf("failed refresh discarded cached topology: %+v", masterConn.Status().Zone)
+	}
+	projected := readBroadcastDevices(t, browser)
+	if projected["192.0.2.10"].Zone == nil ||
+		projected["192.0.2.10"].Zone.MasterDeviceID != "MASTER" {
+		t.Fatalf("failed refresh hid cached topology from browser: %+v", projected)
 	}
 }
 
@@ -575,6 +694,12 @@ func TestNowPlayingStandbyRefreshesAndClearsDissolvedZone(t *testing.T) {
 	}
 	master := newVolumeSpeaker(t, 20, `<zone />`)
 	member := newVolumeSpeaker(t, 20, `<zone />`)
+	zoneReadStarted := make(chan struct{})
+	releaseZoneRead := make(chan struct{})
+	master.setZoneGetHook(func(int) {
+		close(zoneReadStarted)
+		<-releaseZoneRead
+	})
 
 	app := NewWebApp()
 	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
@@ -595,9 +720,12 @@ func TestNowPlayingStandbyRefreshesAndClearsDissolvedZone(t *testing.T) {
 	}
 
 	projected := readBroadcastDevices(t, browser)
-	if len(projected) != 2 {
-		t.Fatalf("dissolved projection contains %d devices, want 2: %+v", len(projected), projected)
+	if len(projected) != 2 || projected["192.0.2.10"].Zone != nil {
+		t.Fatalf("pending dissolve projection retained stale topology: %+v", projected)
 	}
+	<-zoneReadStarted
+	close(releaseZoneRead)
+	projected = readBroadcastDevices(t, browser)
 	if masterConn.Status().Zone != nil || projected["192.0.2.10"].Zone != nil {
 		t.Fatalf("confirmed dissolved zone survived: status=%+v projection=%+v",
 			masterConn.Status().Zone, projected["192.0.2.10"].Zone)
@@ -626,6 +754,12 @@ func TestNowPlayingStandbyPreservesAuthoritativeZone(t *testing.T) {
 	}
 	master := newVolumeSpeaker(t, 20, zoneXML)
 	member := newVolumeSpeaker(t, 20, zoneXML)
+	zoneReadStarted := make(chan struct{})
+	releaseZoneRead := make(chan struct{})
+	master.setZoneGetHook(func(int) {
+		close(zoneReadStarted)
+		<-releaseZoneRead
+	})
 
 	app := NewWebApp()
 	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
@@ -640,6 +774,16 @@ func TestNowPlayingStandbyPreservesAuthoritativeZone(t *testing.T) {
 	app.applyNowPlayingUpdatedEvent("192.0.2.10", masterConn, event, "LOCAL_INTERNET_RADIO")
 
 	projected := readBroadcastDevices(t, browser)
+	if projected["192.0.2.10"].Zone != nil {
+		t.Fatalf("pending authoritative refresh exposed stale zone: %+v", projected)
+	}
+	<-zoneReadStarted
+	app.applyNowPlayingUpdatedEvent("192.0.2.10", masterConn, event, "STANDBY")
+	if got := master.zoneGetCount(); got != 1 {
+		t.Fatalf("duplicate retained STANDBY launched %d /getZone requests, want 1", got)
+	}
+	close(releaseZoneRead)
+	projected = readBroadcastDevices(t, browser)
 	if masterConn.Status().Zone == nil || projected["192.0.2.10"].Zone == nil {
 		t.Fatalf("authoritative zone was discarded: status=%+v projection=%+v",
 			masterConn.Status().Zone, projected["192.0.2.10"].Zone)
@@ -659,6 +803,12 @@ func TestStandbyEventInvalidatesOlderZonePollAfterMissedPlayEvent(t *testing.T) 
 	}
 	master := newVolumeSpeaker(t, 20, `<zone />`)
 	member := newVolumeSpeaker(t, 20, `<zone />`)
+	zoneReadStarted := make(chan struct{})
+	releaseZoneRead := make(chan struct{})
+	master.setZoneGetHook(func(int) {
+		close(zoneReadStarted)
+		<-releaseZoneRead
+	})
 
 	app := NewWebApp()
 	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
@@ -687,12 +837,83 @@ func TestStandbyEventInvalidatesOlderZonePollAfterMissedPlayEvent(t *testing.T) 
 	if masterConn.ApplyPolledZone(staleZoneGeneration, "MASTER", zone) {
 		t.Fatal("pre-standby zone poll was accepted after standby invalidation")
 	}
+	projected := readBroadcastDevices(t, browser)
+	if projected["192.0.2.10"].Zone != nil {
+		t.Fatalf("pending standby refresh exposed stale zone: %+v", projected)
+	}
+	<-zoneReadStarted
+	close(releaseZoneRead)
 	_ = readBroadcastDevices(t, browser)
 	if masterConn.Status().Zone != nil {
 		t.Fatalf("confirmed dissolved zone survived: %+v", masterConn.Status().Zone)
 	}
 	if got := master.zoneGetCount(); got != 1 {
 		t.Fatalf("master /getZone requests = %d, want 1", got)
+	}
+}
+
+func TestSupersededStandbyRefreshStillPublishesFinalProjection(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">MEMBER</member></zone>`
+	zone := &models.ZoneInfo{}
+	if err := xml.Unmarshal([]byte(zoneXML), zone); err != nil {
+		t.Fatalf("decode cached zone: %v", err)
+	}
+	master := newVolumeSpeaker(t, 20, `<zone />`)
+	master.queueZoneResponses(`<zone />`, zoneXML)
+	member := newVolumeSpeaker(t, 20, `<zone />`)
+	zoneReadStarted := make(chan struct{})
+	releaseZoneRead := make(chan struct{})
+	master.setZoneGetHook(func(request int) {
+		if request != 1 {
+			return
+		}
+
+		close(zoneReadStarted)
+		<-releaseZoneRead
+	})
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Member", member, 20, nil)
+	browser := registerBroadcastWebSocket(t, app)
+	masterConn, _ := app.GetDevice("192.0.2.10")
+	memberConn, _ := app.GetDevice("192.0.2.20")
+
+	event := &models.NowPlayingUpdatedEvent{
+		DeviceID:   "MEMBER",
+		NowPlaying: models.NowPlaying{Source: "STANDBY"},
+	}
+	app.applyNowPlayingUpdatedEvent(
+		"192.0.2.20",
+		memberConn,
+		event,
+		"LOCAL_INTERNET_RADIO",
+	)
+	_ = readBroadcastDevices(t, browser)
+	<-zoneReadStarted
+
+	pollDone := make(chan struct{})
+	go func() {
+		app.UpdateDeviceStatus("192.0.2.10", masterConn)
+		close(pollDone)
+	}()
+	select {
+	case <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("superseding full status poll did not complete")
+	}
+
+	projected := readBroadcastDevices(t, browser)
+	if projected["192.0.2.10"].Zone == nil ||
+		projected["192.0.2.10"].Zone.MasterDeviceID != "MASTER" {
+		t.Fatalf("superseding poll did not publish authoritative zone: %+v", projected)
+	}
+
+	close(releaseZoneRead)
+	projected = readBroadcastDevices(t, browser)
+	if projected["192.0.2.10"].Zone == nil ||
+		projected["192.0.2.10"].Zone.MasterDeviceID != "MASTER" {
+		t.Fatalf("superseded standby refresh overwrote authoritative zone: %+v", projected)
 	}
 }
 

@@ -29,9 +29,11 @@ type volumeSpeaker struct {
 	volumeError     bool
 	reportedTarget  *int
 	volumeResponses []int
+	zoneResponses   []string
 	volumeGets      int
 	zoneGets        int
 	onVolumeGet     func(int)
+	onZoneGet       func(int)
 }
 
 func newVolumeSpeaker(t *testing.T, initial int, zone string) *volumeSpeaker {
@@ -43,8 +45,18 @@ func newVolumeSpeaker(t *testing.T, initial int, zone string) *volumeSpeaker {
 		case r.Method == http.MethodGet && r.URL.Path == "/getZone":
 			speaker.mu.Lock()
 			speaker.zoneGets++
+			zoneGets := speaker.zoneGets
+			zone := speaker.zone
+			if len(speaker.zoneResponses) != 0 {
+				zone = speaker.zoneResponses[0]
+				speaker.zoneResponses = speaker.zoneResponses[1:]
+			}
+			onZoneGet := speaker.onZoneGet
 			speaker.mu.Unlock()
-			_, _ = io.WriteString(w, speaker.zone)
+			if onZoneGet != nil {
+				onZoneGet(zoneGets)
+			}
+			_, _ = io.WriteString(w, zone)
 		case r.Method == http.MethodGet && r.URL.Path == "/volume":
 			speaker.mu.Lock()
 			volume := speaker.volume
@@ -126,9 +138,21 @@ func (speaker *volumeSpeaker) queueVolumeResponses(values ...int) {
 	speaker.mu.Unlock()
 }
 
+func (speaker *volumeSpeaker) queueZoneResponses(values ...string) {
+	speaker.mu.Lock()
+	speaker.zoneResponses = append(speaker.zoneResponses, values...)
+	speaker.mu.Unlock()
+}
+
 func (speaker *volumeSpeaker) setVolumeGetHook(hook func(int)) {
 	speaker.mu.Lock()
 	speaker.onVolumeGet = hook
+	speaker.mu.Unlock()
+}
+
+func (speaker *volumeSpeaker) setZoneGetHook(hook func(int)) {
+	speaker.mu.Lock()
+	speaker.onZoneGet = hook
 	speaker.mu.Unlock()
 }
 
