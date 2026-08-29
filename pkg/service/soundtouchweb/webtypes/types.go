@@ -748,6 +748,34 @@ func (c *DeviceConnection) ApplySpeakerEventAt(at time.Time, mut func(*DeviceSta
 	})
 }
 
+// ApplyNowPlayingEvent stores a now-playing event in the same ordering domain
+// as full HTTP polls and returns the source it replaced. Callers can therefore
+// detect a real transition without a read-before-update race.
+func (c *DeviceConnection) ApplyNowPlayingEvent(
+	nowPlaying *models.NowPlaying,
+	at time.Time,
+) string {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	c.speakerEventGen++
+	c.markEventStreamActivityLocked(at)
+
+	previousSource := ""
+
+	c.UpdateStatus(func(status *DeviceStatus) {
+		if status.NowPlaying != nil {
+			previousSource = status.NowPlaying.Source
+		}
+
+		status.NowPlaying = nowPlaying
+		status.LastActivity = at
+		c.applyConnectivityLocked(status, at)
+	})
+
+	return previousSource
+}
+
 // ApplySpeakerConnectionEvent stores a speaker-reported connection state as a
 // separate supporting input. The event itself is also direct evidence that the
 // event stream is live. Unknown values remain diagnostic only.

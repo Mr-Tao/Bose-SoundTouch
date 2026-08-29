@@ -264,22 +264,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		// UpdateStatus so concurrent events and the periodic poller
 		// (UpdateDeviceStatus) cannot lose each other's writes.
 		wsClient.OnNowPlaying(func(event *models.NowPlayingUpdatedEvent) {
-			activity := time.Now()
-			np := &event.NowPlaying
-
-			// A /select returns 200 even when the source is rejected; the
-			// failure shows up here as a transition to an error source. Log it
-			// so it lands in a diagnostic export without needing a live trace.
-			if np.Source != prevSource && isErrorSource(np.Source) {
-				logNowPlayingError(deviceID, np.Source, np.SourceAccount)
-			}
-
-			prevSource = np.Source
-
-			conn.ApplySpeakerEventAt(activity, func(s *webtypes.DeviceStatus) {
-				s.NowPlaying = np
-				s.LastActivity = activity
-			})
+			prevSource = app.applyNowPlayingUpdatedEvent(deviceID, conn, event, prevSource)
 		})
 
 		wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
@@ -403,6 +388,51 @@ func speakerConnectionEventMatches(conn *webtypes.DeviceConnection, eventDeviceI
 	}
 
 	return strings.EqualFold(eventDeviceID, strings.TrimSpace(info.DeviceID))
+}
+
+// applyNowPlayingUpdatedEvent stores one speaker event and treats a transition
+// into standby as a zone invalidation hint. POWER is a toggle, so its HTTP
+// response cannot safely clear topology; /getZone on the cached master remains
+// authoritative.
+func (app *WebApp) applyNowPlayingUpdatedEvent(
+	deviceID string,
+	conn *webtypes.DeviceConnection,
+	event *models.NowPlayingUpdatedEvent,
+	previousSource string,
+) string {
+	if conn == nil || event == nil {
+		return previousSource
+	}
+
+	activity := time.Now()
+	nowPlaying := &event.NowPlaying
+	source := nowPlaying.Source
+
+	// A /select returns 200 even when the source is rejected; the failure shows
+	// up here as a transition to an error source. Keep the transition log in the
+	// same event seam as the standby invalidation below.
+	if source != previousSource && isErrorSource(source) {
+		logNowPlayingError(deviceID, source, nowPlaying.SourceAccount)
+	}
+
+	previousCachedSource := conn.ApplyNowPlayingEvent(nowPlaying, activity)
+
+	if !isStandbySource(previousCachedSource) && isStandbySource(source) {
+		eventDeviceID := strings.TrimSpace(event.DeviceID)
+		if info := conn.Info(); info != nil && strings.TrimSpace(info.DeviceID) != "" {
+			eventDeviceID = strings.TrimSpace(info.DeviceID)
+		}
+
+		if eventDeviceID != "" {
+			app.refreshCachedZonesAfterStandby(eventDeviceID, conn)
+		}
+	}
+
+	return source
+}
+
+func isStandbySource(source string) bool {
+	return strings.EqualFold(strings.TrimSpace(source), "STANDBY")
 }
 
 // sleepOrDone waits for d to elapse or for the connection to be closed,
@@ -706,6 +736,62 @@ func (app *WebApp) refreshZonesAfterEvent(eventDeviceID, eventMasterID string) {
 	}
 }
 
+// refreshCachedZonesAfterStandby invalidates the event speaker's
+// in-flight zone poll synchronously, then reserves generations for cached
+// masters containing it. Network reads happen after this ordering barrier.
+func (app *WebApp) refreshCachedZonesAfterStandby(
+	eventDeviceID string,
+	eventConnection *webtypes.DeviceConnection,
+) {
+	eventGeneration := eventConnection.BeginZoneRefresh()
+	candidates := map[string]struct{}{}
+
+	for _, entry := range app.DeviceSnapshot() {
+		status := entry.Device.Status()
+		if status == nil || status.Zone == nil || !status.Zone.IsInZone(eventDeviceID) {
+			continue
+		}
+
+		candidates[status.Zone.Master] = struct{}{}
+	}
+
+	type pendingRefresh struct {
+		masterDeviceID string
+		connection     *webtypes.DeviceConnection
+		generation     uint64
+	}
+
+	refreshes := make([]pendingRefresh, 0, len(candidates))
+
+	for masterID := range candidates {
+		masterIP := app.findIPByHwID(masterID)
+
+		master, ok := app.GetDevice(masterIP)
+		if !ok || master.Client == nil {
+			continue
+		}
+
+		generation := eventGeneration
+		if master != eventConnection {
+			generation = master.BeginZoneRefresh()
+		}
+
+		refreshes = append(refreshes, pendingRefresh{
+			masterDeviceID: masterID,
+			connection:     master,
+			generation:     generation,
+		})
+	}
+
+	for _, pending := range refreshes {
+		go app.completeAuthoritativeZoneRefresh(
+			pending.masterDeviceID,
+			pending.connection,
+			pending.generation,
+		)
+	}
+}
+
 func (app *WebApp) refreshAuthoritativeZone(masterDeviceID string) {
 	masterIP := app.findIPByHwID(masterDeviceID)
 
@@ -715,7 +801,14 @@ func (app *WebApp) refreshAuthoritativeZone(masterDeviceID string) {
 	}
 
 	generation := master.BeginZoneRefresh()
+	app.completeAuthoritativeZoneRefresh(masterDeviceID, master, generation)
+}
 
+func (app *WebApp) completeAuthoritativeZoneRefresh(
+	masterDeviceID string,
+	master *webtypes.DeviceConnection,
+	generation uint64,
+) {
 	zone, err := master.Client.GetZone()
 	if err != nil {
 		log.Printf("Failed to refresh zone master %s: %v", sanitizeLog(masterDeviceID), err)

@@ -565,6 +565,137 @@ func TestRefreshZonesAfterEventPreservesCacheOnMasterError(t *testing.T) {
 	}
 }
 
+func TestNowPlayingStandbyRefreshesAndClearsDissolvedZone(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+	master := newVolumeSpeaker(t, 20, `<zone />`)
+	member := newVolumeSpeaker(t, 20, `<zone />`)
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Member", member, 20, nil)
+	browser := registerBroadcastWebSocket(t, app)
+
+	masterConn, _ := app.GetDevice("192.0.2.10")
+	memberConn, _ := app.GetDevice("192.0.2.20")
+	event := &models.NowPlayingUpdatedEvent{
+		DeviceID:   "MEMBER",
+		NowPlaying: models.NowPlaying{Source: "STANDBY"},
+	}
+	gotSource := app.applyNowPlayingUpdatedEvent(
+		"192.0.2.20", memberConn, event, "LOCAL_INTERNET_RADIO",
+	)
+	if gotSource != "STANDBY" {
+		t.Fatalf("source = %q, want STANDBY", gotSource)
+	}
+
+	projected := readBroadcastDevices(t, browser)
+	if len(projected) != 2 {
+		t.Fatalf("dissolved projection contains %d devices, want 2: %+v", len(projected), projected)
+	}
+	if masterConn.Status().Zone != nil || projected["192.0.2.10"].Zone != nil {
+		t.Fatalf("confirmed dissolved zone survived: status=%+v projection=%+v",
+			masterConn.Status().Zone, projected["192.0.2.10"].Zone)
+	}
+	if got := master.zoneGetCount(); got != 1 {
+		t.Fatalf("master /getZone requests = %d, want 1", got)
+	}
+	if got := member.zoneGetCount(); got != 0 {
+		t.Fatalf("member /getZone requests = %d, want 0", got)
+	}
+
+	app.applyNowPlayingUpdatedEvent("192.0.2.20", memberConn, event, gotSource)
+	if got := master.zoneGetCount(); got != 1 {
+		t.Fatalf("master /getZone requests after repeated STANDBY = %d, want 1", got)
+	}
+}
+
+func TestNowPlayingStandbyPreservesAuthoritativeZone(t *testing.T) {
+	zoneXML := `<zone master="MASTER"><member ipaddress="192.0.2.10">MASTER</member><member ipaddress="192.0.2.20">MEMBER</member></zone>`
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+	master := newVolumeSpeaker(t, 20, zoneXML)
+	member := newVolumeSpeaker(t, 20, zoneXML)
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Member", member, 20, nil)
+	browser := registerBroadcastWebSocket(t, app)
+
+	masterConn, _ := app.GetDevice("192.0.2.10")
+	event := &models.NowPlayingUpdatedEvent{
+		DeviceID:   "MASTER",
+		NowPlaying: models.NowPlaying{Source: "STANDBY"},
+	}
+	app.applyNowPlayingUpdatedEvent("192.0.2.10", masterConn, event, "LOCAL_INTERNET_RADIO")
+
+	projected := readBroadcastDevices(t, browser)
+	if masterConn.Status().Zone == nil || projected["192.0.2.10"].Zone == nil {
+		t.Fatalf("authoritative zone was discarded: status=%+v projection=%+v",
+			masterConn.Status().Zone, projected["192.0.2.10"].Zone)
+	}
+	if got := master.zoneGetCount(); got != 1 {
+		t.Fatalf("master /getZone requests = %d, want 1", got)
+	}
+}
+
+func TestStandbyEventInvalidatesOlderZonePollAfterMissedPlayEvent(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+	master := newVolumeSpeaker(t, 20, `<zone />`)
+	member := newVolumeSpeaker(t, 20, `<zone />`)
+
+	app := NewWebApp()
+	addVolumeDevice(app, "192.0.2.10", "MASTER", "Master", master, 20, zone)
+	addVolumeDevice(app, "192.0.2.20", "MEMBER", "Member", member, 20, nil)
+	browser := registerBroadcastWebSocket(t, app)
+	masterConn, _ := app.GetDevice("192.0.2.10")
+
+	// Model an HTTP poll that started while the cached source was standby, then
+	// observed playback without the corresponding WebSocket event.
+	staleZoneGeneration := masterConn.BeginZoneRefresh()
+	masterConn.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.NowPlaying = &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO"}
+	})
+
+	event := &models.NowPlayingUpdatedEvent{
+		DeviceID:   "MASTER",
+		NowPlaying: models.NowPlaying{Source: "STANDBY"},
+	}
+	gotSource := app.applyNowPlayingUpdatedEvent(
+		"192.0.2.10", masterConn, event, "STANDBY",
+	)
+	if gotSource != "STANDBY" {
+		t.Fatalf("source = %q, want STANDBY", gotSource)
+	}
+
+	if masterConn.ApplyPolledZone(staleZoneGeneration, "MASTER", zone) {
+		t.Fatal("pre-standby zone poll was accepted after standby invalidation")
+	}
+	_ = readBroadcastDevices(t, browser)
+	if masterConn.Status().Zone != nil {
+		t.Fatalf("confirmed dissolved zone survived: %+v", masterConn.Status().Zone)
+	}
+	if got := master.zoneGetCount(); got != 1 {
+		t.Fatalf("master /getZone requests = %d, want 1", got)
+	}
+}
+
 func TestUpdateDeviceStatusSkipsGroupForNonStereoModel(t *testing.T) {
 	var groupRequested atomic.Bool
 	var balanceRequested atomic.Bool

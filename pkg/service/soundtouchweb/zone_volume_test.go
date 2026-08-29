@@ -30,6 +30,7 @@ type volumeSpeaker struct {
 	reportedTarget  *int
 	volumeResponses []int
 	volumeGets      int
+	zoneGets        int
 	onVolumeGet     func(int)
 }
 
@@ -40,6 +41,9 @@ func newVolumeSpeaker(t *testing.T, initial int, zone string) *volumeSpeaker {
 	speaker.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/getZone":
+			speaker.mu.Lock()
+			speaker.zoneGets++
+			speaker.mu.Unlock()
 			_, _ = io.WriteString(w, speaker.zone)
 		case r.Method == http.MethodGet && r.URL.Path == "/volume":
 			speaker.mu.Lock()
@@ -140,6 +144,13 @@ func (speaker *volumeSpeaker) getCount() int {
 	defer speaker.mu.Unlock()
 
 	return speaker.volumeGets
+}
+
+func (speaker *volumeSpeaker) zoneGetCount() int {
+	speaker.mu.Lock()
+	defer speaker.mu.Unlock()
+
+	return speaker.zoneGets
 }
 
 func addVolumeDevice(
