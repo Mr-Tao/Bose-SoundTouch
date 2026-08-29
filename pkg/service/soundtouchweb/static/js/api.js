@@ -6,7 +6,7 @@ async function req(url, opts = {}) {
 }
 
 export const api = {
-    devices: () => req('/api/control/devices'),
+    devices: () => req('/api/control/devices', { cache: 'no-store' }),
     device: (id) => req(`/api/control/devices/${id}`),
     removeDevice: (id) => req(`/api/control/devices/${id}`, { method: 'DELETE' }),
     settings: (id) => req(`/api/control/devices/${id}/settings/`),
@@ -52,7 +52,7 @@ export const api = {
     }),
     power: (id) => req(`/api/control/devices/${id}/power`, { method: 'POST' }),
     recents: (id) => req(`/api/control/devices/${id}/recents`),
-    zone: (id) => req(`/api/control/devices/${id}/zone`),
+    zone: (id) => req(`/api/control/devices/${id}/zone`, { cache: 'no-store' }),
     zoneAdd: (masterId, slaveId) => req(`/api/control/devices/${masterId}/zone/add/${slaveId}`, { method: 'POST' }),
     zoneRemove: (masterId, slaveId) => req(`/api/control/devices/${masterId}/zone/remove/${slaveId}`, { method: 'POST' }),
     zoneDissolve: (id) => req(`/api/control/devices/${id}/zone/dissolve`, { method: 'POST' }),

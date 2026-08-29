@@ -1,4 +1,4 @@
-import { h, htm, useEffect, useState } from '../dependencies.js';
+import { h, htm, useEffect, useRef, useState } from '../dependencies.js';
 import { api } from '../api.js';
 import { resolvedZoneMember } from '../devicePresentation.mjs';
 import {
@@ -41,15 +41,29 @@ export function Zone({ deviceId, devices, volumePreview = null }) {
     const [zone, setZone] = useState(null);
     const [loading, setLoading] = useState(true);
     const [showPicker, setShowPicker] = useState(false);
+    const mounted = useRef(true);
+    const refreshGeneration = useRef(0);
     const canGroup = currentSourceAllowsMultiroom(devices?.[deviceId]);
 
     function refresh() {
+        if (!mounted.current) return;
+
+        const generation = ++refreshGeneration.current;
         api.zone(deviceId).then(resp => {
-            if (resp.success) setZone(resp.data);
-        }).finally(() => setLoading(false));
+            if (generation === refreshGeneration.current && resp.success) setZone(resp.data);
+        }).finally(() => {
+            if (generation === refreshGeneration.current) setLoading(false);
+        });
     }
 
-    useEffect(() => { refresh(); }, [deviceId]);
+    useEffect(() => {
+        mounted.current = true;
+        refresh();
+        return () => {
+            mounted.current = false;
+            refreshGeneration.current++;
+        };
+    }, [deviceId]);
     useEffect(() => {
         if (!canGroup) setShowPicker(false);
     }, [canGroup]);

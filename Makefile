@@ -153,7 +153,7 @@ test-frontend:
 
 test-browser:
 	@echo "Running player browser contract tests..."
-	$(GOTEST) -tags=browser -run '^TestPlayerBrowserContract$$' -count=1 ./pkg/service/soundtouchweb
+	$(GOTEST) -tags=browser -run '^TestPlayerBrowser(Contract|ResumesAfterSuspendedWebSocket)$$' -count=1 ./pkg/service/soundtouchweb
 
 check: fmt vet test test-http-client
 

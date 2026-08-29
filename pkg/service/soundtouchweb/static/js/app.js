@@ -26,6 +26,16 @@ import {
 
 const html = htm.bind(h);
 
+function zoneTopologyKey(deviceId, zone) {
+    if (!zone) return `${deviceId}:standalone`;
+
+    const members = (zone.members || []).map(member => {
+        const physical = (member.physicalMembers || []).map(item => item.deviceId).join('+');
+        return `${member.controlId || ''}:${physical}`;
+    });
+    return `${deviceId}:${zone.masterControlId || ''}:${members.join(',')}`;
+}
+
 function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify, onRemove }) {
     const device = devices[deviceId];
     const [zoneVolumePreview, setZoneVolumePreview] = useState(null);
@@ -162,7 +172,7 @@ function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify, onR
                 onChanged=${onDevicesChanged}
                 notify=${notify}
             />
-            <${Zone} deviceId=${deviceId} devices=${devices}
+            <${Zone} key=${zoneTopologyKey(deviceId, device.zone)} deviceId=${deviceId} devices=${devices}
                 volumePreview=${zoneVolumePreview?.controlId === deviceId
                     ? zoneVolumePreview.volumes
                     : null} />
@@ -239,12 +249,18 @@ function App() {
             .catch(err => console.error('Failed to fetch version:', err));
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${protocol}//${location.host}/api/control/ws`);
-        let reconnectTimer;
+        const websocketURL = `${protocol}//${location.host}/api/control/ws`;
+        let ws = null;
+        let reconnectTimer = null;
+        let reconnectDelay = 1000;
+        let refreshInFlight = false;
+        let projectionGeneration = 0;
+        let stopped = false;
 
-        ws.onmessage = (event) => {
+        function handleMessage(event) {
             const msg = JSON.parse(event.data);
             if (msg.type === 'devices') {
+                projectionGeneration++;
                 setDevices(msg.data || {});
             } else if (msg.type === 'discovery_status') {
                 console.log('[DEBUG_LOG] discovery_status:', msg.data);
@@ -260,6 +276,7 @@ function App() {
                     showToast(`Found ${msg.data.deviceCount} device(s)`);
                 }
             } else if (msg.type === 'status_update' && msg.deviceId) {
+                projectionGeneration++;
                 setDevices(prev => {
                     if (!prev[msg.deviceId]) return prev;
                     return {
@@ -268,15 +285,87 @@ function App() {
                     };
                 });
             }
-        };
+        }
 
-        ws.onclose = () => {
-            reconnectTimer = setTimeout(() => location.reload(), 5000);
-        };
+        async function refreshVisibleDevices() {
+            if (stopped || refreshInFlight) return;
+
+            refreshInFlight = true;
+            const generation = projectionGeneration;
+            try {
+                const resp = await api.devices();
+                if (!stopped && resp?.success && generation === projectionGeneration) {
+                    projectionGeneration++;
+                    setDevices(resp.data || {});
+                }
+            } catch (err) {
+                if (!stopped) console.error('Failed to refresh devices:', err);
+            } finally {
+                refreshInFlight = false;
+            }
+        }
+
+        function scheduleReconnect() {
+            if (stopped || reconnectTimer !== null) return;
+
+            const delay = reconnectDelay;
+            reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connectWebSocket();
+            }, delay);
+        }
+
+        function connectWebSocket() {
+            if (stopped || ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) return;
+
+            const socket = new WebSocket(websocketURL);
+            ws = socket;
+            socket.onopen = () => {
+                if (ws === socket) reconnectDelay = 1000;
+            };
+            socket.onmessage = event => {
+                if (ws === socket) handleMessage(event);
+            };
+            socket.onclose = () => {
+                if (ws !== socket) return;
+                ws = null;
+                scheduleReconnect();
+            };
+        }
+
+        function resumeLiveUpdates() {
+            if (document.visibilityState === 'hidden') return;
+
+            refreshVisibleDevices();
+            if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+                if (reconnectTimer !== null) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+                connectWebSocket();
+            }
+        }
+
+        function handleVisibilityChange() {
+            if (!document.hidden) resumeLiveUpdates();
+        }
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('pageshow', resumeLiveUpdates);
+        window.addEventListener('online', resumeLiveUpdates);
+        connectWebSocket();
 
         return () => {
+            stopped = true;
             clearTimeout(reconnectTimer);
-            ws.close();
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            window.removeEventListener('pageshow', resumeLiveUpdates);
+            window.removeEventListener('online', resumeLiveUpdates);
+            if (ws) {
+                ws.onclose = null;
+                ws.close();
+            }
         };
     }, []);
 

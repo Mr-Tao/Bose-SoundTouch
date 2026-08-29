@@ -24,6 +24,7 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
 	"github.com/go-chi/chi/v5"
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -158,6 +159,155 @@ func TestPlayerBrowserContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPlayerBrowserResumesAfterSuspendedWebSocket(t *testing.T) {
+	app := newBrowserContractApp(t)
+	server, _ := newBrowserContractServer(t, app)
+
+	browserPath := browserExecutable(t)
+	allocatorOptions := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(browserPath),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-background-networking", true),
+		chromedp.Flag("no-proxy-server", true),
+		chromedp.Flag("no-sandbox", true),
+	)
+	allocatorContext, cancelAllocator := chromedp.NewExecAllocator(context.Background(), allocatorOptions...)
+	defer cancelAllocator()
+	browserContext, cancelBrowser := chromedp.NewContext(allocatorContext)
+	defer cancelBrowser()
+	runContext, cancelTimeout := context.WithTimeout(browserContext, 15*time.Second)
+	defer cancelTimeout()
+
+	if err := chromedp.Run(runContext,
+		chromedp.Navigate(server.URL+"/app"),
+		chromedp.WaitVisible(contractZoneCardSelector(contractHealthyControlID), chromedp.ByQuery),
+		chromedp.Evaluate(`(() => {
+			window.__aftertouchNoReload = 'preserved';
+			window.__resumeDeviceFetches = 0;
+			window.__resumeDeviceFetchCaptured = false;
+			window.__originalFetch = window.fetch.bind(window);
+			window.fetch = async (...args) => {
+				const url = new URL(args[0], window.location.href);
+				if (url.pathname !== '/api/control/devices') return window.__originalFetch(...args);
+
+				window.__resumeDeviceFetches++;
+				window.__resumeDeviceFetchCache = args[1]?.cache;
+				const response = await window.__originalFetch(...args);
+				const body = await response.text();
+				window.__resumeDeviceFetchCaptured = true;
+				await new Promise(resolve => { window.__releaseResumeDeviceFetch = resolve; });
+				return new Response(body, {
+					status: response.status,
+					statusText: response.statusText,
+					headers: response.headers,
+				});
+			};
+		})()`, nil),
+	); err != nil {
+		t.Fatalf("load player before suspend: %v", err)
+	}
+
+	clients := app.globalWebSocketClients()
+	if len(clients) != 1 {
+		t.Fatalf("browser WebSocket clients = %d, want 1", len(clients))
+	}
+	oldClient := clients[0]
+
+	if err := chromedp.Run(runContext,
+		chromedp.Evaluate(`(() => {
+			window.dispatchEvent(new Event('pageshow'));
+			document.dispatchEvent(new Event('visibilitychange'));
+			window.dispatchEvent(new Event('pageshow'));
+		})()`, nil),
+		chromedp.Poll(
+			`window.__resumeDeviceFetchCaptured === true && window.__resumeDeviceFetches === 1 && window.__resumeDeviceFetchCache === 'no-store'`,
+			nil,
+			chromedp.WithPollingTimeout(time.Second),
+		),
+	); err != nil {
+		t.Fatalf("visible-page API reconciliation was not coalesced: %v", err)
+	}
+
+	clearBrowserContractZone(t, app, contractHealthyControlID)
+	_ = oldClient.Close()
+	waitForReplacementBrowserWebSocket(t, app, oldClient, 4*time.Second)
+
+	var resumed bool
+	if err := chromedp.Run(runContext,
+		chromedp.Poll(fmt.Sprintf(
+			`!document.querySelector(%q) && window.__aftertouchNoReload === 'preserved'`,
+			contractZoneCardSelector(contractHealthyControlID),
+		), &resumed, chromedp.WithPollingTimeout(time.Second)),
+		chromedp.Evaluate(fmt.Sprintf(`(() => {
+			window.__resumeZoneReappeared = false;
+			window.__resumeZoneObserver = new MutationObserver(() => {
+				if (document.querySelector(%q)) window.__resumeZoneReappeared = true;
+			});
+			window.__resumeZoneObserver.observe(document.body, { childList: true, subtree: true });
+			window.__releaseResumeDeviceFetch();
+		})()`, contractZoneCardSelector(contractHealthyControlID)), nil),
+		chromedp.Sleep(300*time.Millisecond),
+	); err != nil {
+		t.Fatalf("replacement WebSocket did not reconcile stale topology: %v", err)
+	}
+	assertBrowserExpression(t, runContext, "stale resume response stayed rejected",
+		fmt.Sprintf(`!window.__resumeZoneReappeared && !document.querySelector(%q) && window.__resumeDeviceFetches === 1`,
+			contractZoneCardSelector(contractHealthyControlID)))
+
+	clearBrowserContractZone(t, app, contractUnavailableHost)
+	app.BroadcastDeviceList()
+
+	var reconnected bool
+	if err := chromedp.Run(runContext,
+		chromedp.Poll(fmt.Sprintf(
+			`!document.querySelector(%q) && window.__aftertouchNoReload === 'preserved'`,
+			contractZoneCardSelector(contractUnavailableHost),
+		), &reconnected, chromedp.WithPollingTimeout(time.Second)),
+	); err != nil {
+		t.Fatalf("replacement WebSocket did not deliver the authoritative topology: %v", err)
+	}
+
+	if err := chromedp.Run(runContext, chromedp.Evaluate(`(() => {
+		window.__resumeZoneObserver.disconnect();
+		window.fetch = window.__originalFetch;
+	})()`, nil)); err != nil {
+		t.Fatalf("clean up browser resume fixture: %v", err)
+	}
+}
+
+func clearBrowserContractZone(t *testing.T, app *WebApp, controlID string) {
+	t.Helper()
+
+	device, ok := app.GetDevice(controlID)
+	if !ok {
+		t.Fatalf("browser fixture lost zone master %q", controlID)
+	}
+	device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Zone = nil
+	})
+}
+
+func waitForReplacementBrowserWebSocket(
+	t *testing.T,
+	app *WebApp,
+	oldClient *websocket.Conn,
+	timeout time.Duration,
+) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, client := range app.globalWebSocketClients() {
+			if client != oldClient {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatal("player did not replace its suspended WebSocket connection")
 }
 
 func resetBrowserContractSoundSettings(t *testing.T, app *WebApp) {
