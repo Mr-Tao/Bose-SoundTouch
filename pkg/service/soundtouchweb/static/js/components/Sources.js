@@ -1,4 +1,5 @@
-import { h, htm } from '../dependencies.js';
+import { h } from 'preact';
+import htm from 'htm';
 import { api } from '../api.js';
 
 const html = htm.bind(h);

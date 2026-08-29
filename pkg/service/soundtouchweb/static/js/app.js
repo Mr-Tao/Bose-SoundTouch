@@ -1,4 +1,6 @@
-import { h, htm, render, useCallback, useEffect, useState } from './dependencies.js';
+import { h, render } from 'preact';
+import { useState, useEffect, useCallback } from 'preact/hooks';
+import htm from 'htm';
 import { DeviceList } from './components/DeviceList.js';
 import { NowPlaying } from './components/NowPlaying.js';
 import { Controls } from './components/Controls.js';
