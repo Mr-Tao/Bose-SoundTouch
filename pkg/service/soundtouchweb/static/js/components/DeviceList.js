@@ -1,74 +1,137 @@
 import { h } from 'preact';
 import { useState } from 'preact/hooks';
 import htm from 'htm';
+import {
+    connectivityLabel,
+    connectivityState,
+    deviceAddress,
+    sortDeviceEntries,
+} from '../devicePresentation.mjs';
+import { zoneCardPresentation } from '../zonePresentation.mjs';
 
 const html = htm.bind(h);
 
 const SORT_LS_KEY = 'aftertouch_device_sort';
 
-function sortEntries(entries, mode) {
-    const copy = [...entries];
-    if (mode === 'name') {
-        // Sort by the speaker's display name, falling back to the map key (its IP)
-        // when a device has no name yet.
-        copy.sort(([idA, a], [idB, b]) =>
-            (a?.info?.name || idA).localeCompare(b?.info?.name || idB, undefined, { sensitivity: 'base' }));
-    } else {
-        // Default: by IP (the map key), ordered numerically so .2 precedes .10.
-        copy.sort(([idA], [idB]) =>
-            idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' }));
-    }
-    return copy;
+function initialSortMode() {
+    const stored = localStorage.getItem(SORT_LS_KEY);
+    return stored === 'ip' || stored === 'name' ? stored : 'name';
 }
 
-function DeviceCard({ id, device, onSelect, onRemove }) {
+function formatIPAddress(address) {
+    const separator = address.lastIndexOf('.');
+    if (separator === -1) {
+        return html`<span class="device-ip-last">${address}</span>`;
+    }
+
+    return html`
+        <span class="device-ip-prefix">${address.slice(0, separator + 1)}</span>
+        <span class="device-ip-last">${address.slice(separator + 1)}</span>
+    `;
+}
+
+function cardDetails(id, device, showIP, onRemove, nameID, zoneCard = null) {
     const { info, status } = device;
     const stereoPair = device.stereoPair;
     const np = status?.nowPlaying;
     const isPlaying = np?.PlayStatus === 'PLAY_STATE';
     const isStandby = !np || np.Source === 'STANDBY';
+    const connectivity = connectivityState(device);
+    const statusLabel = connectivityLabel(device);
+    const address = deviceAddress(id, device);
+    const indicatorClass = zoneCard?.health || connectivity;
+    const indicatorLabel = zoneCard?.healthLabel || statusLabel;
+    const showTechnicalDetails = info?.type || (!zoneCard && stereoPair) || (showIP && address);
 
     return html`
-        <div class="device-card" onClick=${() => onSelect(id)}>
-            <div class="device-header">
-                <span class="device-name">${info?.name || id}</span>
-                <span class="device-header-right">
-                    <span class="device-indicator ${status?.isConnected ? 'online' : 'offline'}"></span>
-                    ${!stereoPair ? html`<button class="device-remove" title="Remove this device"
-                            aria-label="Remove this device"
-                            onClick=${(e) => { e.stopPropagation(); onRemove(id); }}>✕</button>` : null}
-                </span>
+        <div class="device-header">
+            <span class="device-name" id=${nameID}>${info?.name || id}</span>
+            <span class="device-header-right">
+                <span class="device-indicator ${indicatorClass}" role="status"
+                      title=${indicatorLabel} aria-label=${indicatorLabel}></span>
+                ${!stereoPair ? html`<button class="device-remove" title="Remove this device"
+                        aria-label="Remove this device"
+                        onClick=${(event) => { event.stopPropagation(); onRemove(id); }}>✕</button>` : null}
+            </span>
+        </div>
+        ${!isStandby ? html`
+            <div class="now-playing-mini">
+                <span class="play-status">${isPlaying ? '▶' : '⏸'}</span>
+                <span class="track-mini">${np.Track || np.StationName || np.Source}</span>
+                ${np.Artist ? html`<span class="artist-mini"> — ${np.Artist}</span>` : null}
             </div>
+        ` : null}
+        ${isStandby ? html`<div class="standby-label">Standby</div>` : null}
+        ${showTechnicalDetails ? html`
             <div class="device-type">
                 ${info?.type || ''}
-                ${info?.ip_address ? html`<span class="device-ip">(${info.ip_address})</span>` : null}
-                ${stereoPair ? html`
+                ${showIP && address ? html`
+                    <span class="device-ip" title=${address}>${formatIPAddress(address)}</span>
+                ` : null}
+                ${!zoneCard && stereoPair ? html`
                     <span class="stereo-pair-state ${stereoPair.degraded ? 'degraded' : ''}">
                         Stereo pair ${stereoPair.availableMemberCount}/${stereoPair.memberCount}
                     </span>
                 ` : null}
             </div>
-            ${!isStandby ? html`
-                <div class="now-playing-mini">
-                    <span class="play-status">${isPlaying ? '▶' : '⏸'}</span>
-                    <span class="track-mini">${np.Track || np.StationName || np.Source}</span>
-                    ${np.Artist ? html`<span class="artist-mini"> — ${np.Artist}</span>` : null}
+        ` : null}
+    `;
+}
+
+function ZoneDeviceCard({ id, device, onSelect, onRemove, showIP }) {
+    const zone = device.zone;
+    const controlID = zone.masterControlId || id;
+    const card = zoneCardPresentation(zone);
+    const nameID = `zone-name-${controlID.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+
+    function openFromKeyboard(event) {
+        if (event.target !== event.currentTarget) return;
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        onSelect(controlID);
+    }
+
+    return html`
+        <section class="device-card zone-card ${card.health}"
+                 aria-labelledby=${nameID}>
+            <div class="zone-card-open" role="button" tabindex="0"
+                 onClick=${() => onSelect(controlID)} onKeyDown=${openFromKeyboard}>
+                ${cardDetails(id, device, showIP, onRemove, nameID, card)}
+                <div class="zone-card-summary">
+                    <span class="zone-card-badge">${card.groupLabel}</span>
+                    ${card.availabilityLabel ? html`
+                        <span class="zone-card-availability" title=${card.availabilityTitle}>
+                            ${card.availabilityLabel}
+                        </span>
+                    ` : null}
                 </div>
-            ` : null}
-            ${isStandby ? html`<div class="standby-label">Standby</div>` : null}
+            </div>
+        </section>
+    `;
+}
+
+function DeviceCard({ id, device, onSelect, onRemove, showIP }) {
+    if (device.zone) {
+        return html`<${ZoneDeviceCard} id=${id} device=${device} onSelect=${onSelect}
+                    onRemove=${onRemove} showIP=${showIP} />`;
+    }
+
+    return html`
+        <div class="device-card" onClick=${() => onSelect(id)}>
+            ${cardDetails(id, device, showIP, onRemove)}
         </div>
     `;
 }
 
 export function DeviceList({ devices, isDiscovering, onSelect, onDiscover, onRemove }) {
-    const [sortMode, setSortMode] = useState(() => localStorage.getItem(SORT_LS_KEY) || 'ip');
+    const [sortMode, setSortMode] = useState(initialSortMode);
 
     function changeSort(mode) {
         setSortMode(mode);
         localStorage.setItem(SORT_LS_KEY, mode);
     }
 
-    const entries = sortEntries(Object.entries(devices), sortMode);
+    const entries = sortDeviceEntries(Object.entries(devices), sortMode);
 
     return html`
         <div class="device-list-container">
@@ -91,7 +154,8 @@ export function DeviceList({ devices, isDiscovering, onSelect, onDiscover, onRem
                 </div>
                 <div class="device-grid" key="grid">
                     ${entries.map(([id, device]) => html`
-                        <${DeviceCard} key=${id} id=${id} device=${device} onSelect=${onSelect} onRemove=${onRemove} />
+                        <${DeviceCard} key=${id} id=${id} device=${device} onSelect=${onSelect}
+                            onRemove=${onRemove} showIP=${sortMode === 'ip'} />
                     `)}
                 </div>
                 <p class="device-list-note" key="note">

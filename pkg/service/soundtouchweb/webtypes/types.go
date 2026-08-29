@@ -2,6 +2,8 @@
 package webtypes
 
 import (
+	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,6 +55,11 @@ type DeviceConnection struct {
 	groupMu         sync.Mutex
 	groupGeneration uint64
 
+	// zoneMu protects the last topology confirmed by a zone master. Member
+	// responses and failed refreshes must not dissolve a logical zone.
+	zoneMu         sync.Mutex
+	zoneGeneration uint64
+
 	// done is closed by Close when the device is removed from the
 	// registry, signalling its background goroutines (the status poller
 	// and the WebSocket reconnect loop) to exit. closeOnce keeps Close
@@ -69,6 +76,7 @@ type DeviceStatus struct {
 	Sources      *models.Sources    `json:"sources,omitempty"`
 	Bass         *models.Bass       `json:"bass,omitempty"`
 	Group        *models.Group      `json:"group,omitempty"`
+	Zone         *models.ZoneInfo   `json:"zone,omitempty"`
 	IsConnected  bool               `json:"isConnected"`
 	LastActivity time.Time          `json:"lastActivity"`
 }
@@ -134,7 +142,8 @@ func (c *DeviceConnection) SetStatus(s *DeviceStatus) {
 // writers cannot silently lose each other's changes.
 //
 // The copy mut receives is a shallow value copy of the previous status.
-// Nested pointer fields (NowPlaying, Volume, Presets, Sources, Bass, Group)
+// Nested pointer fields (NowPlaying, Volume, Presets, Sources, Bass, Group,
+// Zone)
 // share their backing struct with the previous version: callers MUST
 // REPLACE these pointers (s.Volume = &models.Volume{...}) rather than
 // mutate through them (s.Volume.ActualVolume++ would race with any
@@ -206,6 +215,80 @@ func normalizeGroup(group *models.Group) *models.Group {
 	}
 
 	return group
+}
+
+// BeginZoneRefresh starts a new generation for an asynchronous master
+// /getZone request. Starting a new refresh invalidates any older response.
+func (c *DeviceConnection) BeginZoneRefresh() uint64 {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	c.zoneGeneration++
+
+	return c.zoneGeneration
+}
+
+// ApplyPolledZone stores topology only when it was returned by the queried
+// master and no newer refresh superseded it. A standalone response from the
+// queried master authoritatively clears the cache; member responses and
+// malformed masterless responses are ignored.
+func (c *DeviceConnection) ApplyPolledZone(
+	generation uint64,
+	queriedDeviceID string,
+	zone *models.ZoneInfo,
+) bool {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	if generation != c.zoneGeneration || zone == nil {
+		return false
+	}
+
+	master := strings.TrimSpace(zone.Master)
+	queriedDeviceID = strings.TrimSpace(queriedDeviceID)
+	if queriedDeviceID == "" ||
+		(master == "" && len(zone.Members) != 0) ||
+		(master != "" && master != queriedDeviceID) {
+		return false
+	}
+
+	return c.replaceZone(normalizeZone(zone))
+}
+
+func (c *DeviceConnection) replaceZone(zone *models.ZoneInfo) bool {
+	changed := !reflect.DeepEqual(c.Status().Zone, zone)
+	if !changed {
+		return false
+	}
+
+	c.UpdateStatus(func(status *DeviceStatus) {
+		status.Zone = zone
+	})
+
+	return true
+}
+
+func normalizeZone(zone *models.ZoneInfo) *models.ZoneInfo {
+	if zone == nil {
+		return nil
+	}
+
+	deviceIDs := make(map[string]struct{}, len(zone.Members)+1)
+	if master := strings.TrimSpace(zone.Master); master != "" {
+		deviceIDs[master] = struct{}{}
+	}
+
+	for _, member := range zone.Members {
+		if deviceID := strings.TrimSpace(member.DeviceID); deviceID != "" {
+			deviceIDs[deviceID] = struct{}{}
+		}
+	}
+
+	if len(deviceIDs) < 2 {
+		return nil
+	}
+
+	return zone
 }
 
 // APIResponse is a standard JSON response wrapper
