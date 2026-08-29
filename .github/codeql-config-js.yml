@@ -12,8 +12,7 @@ queries:
 # Paths to exclude from analysis
 paths-ignore:
   - "**/node_modules/**"
-  # Vendored third-party libraries (preact, htm, es-module-shims), copied
-  # verbatim from npm by scripts/update-static-deps.sh. We don't modify or
-  # control their internals, so findings here aren't actionable from this
-  # repo -- report upstream instead.
-  - "pkg/service/soundtouchweb/static/lib/**"
+  # The minified es-module-shims distribution currently triggers findings in
+  # third-party code. Keep this exception file-specific so Preact, HTM, and
+  # future files under static/lib remain covered.
+  - "pkg/service/soundtouchweb/static/lib/es-module-shims.js"

@@ -5,18 +5,8 @@ set -e
 LIB_DIR="pkg/service/soundtouchweb/static/lib"
 mkdir -p "$LIB_DIR"
 
-echo "Updating static frontend dependencies from node_modules..."
-
-# Ensure dependencies are installed
-if [ ! -d "node_modules" ] || [ ! -d "node_modules/preact" ] || [ ! -d "node_modules/htm" ] || [ ! -d "node_modules/es-module-shims" ]; then
-    if [ "$CI" = "true" ]; then
-        echo "node_modules not found or incomplete. Running npm ci in CI environment..."
-        npm ci
-    else
-        echo "node_modules not found or incomplete. Running npm install..."
-        npm install
-    fi
-fi
+echo "Installing static frontend dependencies from package-lock.json..."
+npm ci --ignore-scripts
 
 # Copy files from node_modules
 echo "Copying Preact..."
@@ -33,5 +23,14 @@ cp node_modules/htm/dist/htm.module.js "$LIB_DIR/htm.module.js"
 # it detects native import map support and becomes a no-op there.
 echo "Copying ES Module Shims..."
 cp node_modules/es-module-shims/dist/es-module-shims.js "$LIB_DIR/es-module-shims.js"
+
+# Keep license and package provenance inside the embedded static tree so they
+# ship with release binaries, not only with source checkouts.
+LICENSE_DIR="$LIB_DIR/LICENSES"
+mkdir -p "$LICENSE_DIR"
+for dependency in preact htm es-module-shims; do
+    cp "node_modules/$dependency/LICENSE" "$LICENSE_DIR/$dependency-LICENSE"
+done
+cp package-lock.json "$LICENSE_DIR/package-lock.json"
 
 echo "All dependencies updated successfully from node_modules."
