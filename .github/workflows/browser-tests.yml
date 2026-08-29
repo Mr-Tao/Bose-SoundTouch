@@ -1,0 +1,49 @@
+name: Browser Compatibility Tests
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-browser:
+    name: Player browser tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+
+      - name: Cache Go modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.mod') }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify a Chrome/Chromium binary is available
+        # chromedp (used by the browsertest-tagged tests) discovers Chrome on
+        # PATH or in a standard install location; GitHub's ubuntu-latest
+        # runner image ships Google Chrome preinstalled. Fail fast with a
+        # clear message here instead of a cryptic chromedp allocator error
+        # if that image ever stops including it.
+        run: google-chrome --version
+
+      - name: Run browser-level player compatibility tests
+        run: make test-browser
