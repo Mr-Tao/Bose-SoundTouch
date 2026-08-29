@@ -13,6 +13,106 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const defaultWebSocketWriteTimeout = 2 * time.Second
+
+type webSocketWriter interface {
+	SetWriteDeadline(time.Time) error
+	WriteJSON(interface{}) error
+	WriteMessage(int, []byte) error
+}
+
+// webSocketWriteBatch gives every write a fresh deadline. A stalled client is
+// bounded without passing an already-expired deadline to later healthy clients.
+type webSocketWriteBatch struct {
+	timeout time.Duration
+}
+
+func (batch webSocketWriteBatch) writeJSON(conn webSocketWriter, value interface{}) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(batch.timeout)); err != nil {
+		return err
+	}
+
+	return conn.WriteJSON(value)
+}
+
+func (batch webSocketWriteBatch) writeMessage(conn webSocketWriter, messageType int, data []byte) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(batch.timeout)); err != nil {
+		return err
+	}
+
+	return conn.WriteMessage(messageType, data)
+}
+
+// withGlobalWebSocketWrite is the single write seam for application-wide
+// browser WebSockets. The client registry has a separate lock so registration
+// and cleanup never hold a mutex across network I/O.
+func (app *WebApp) withGlobalWebSocketWrite(write func(webSocketWriteBatch) error) error {
+	app.webSocketWriteMu.Lock()
+	defer app.webSocketWriteMu.Unlock()
+
+	timeout := app.webSocketWriteTimeout
+	if timeout <= 0 {
+		timeout = defaultWebSocketWriteTimeout
+	}
+
+	return write(webSocketWriteBatch{timeout: timeout})
+}
+
+// withDiscoveryStatusWrite keeps the authoritative discovery state ordered
+// with the frame that publishes it to browser clients.
+func (app *WebApp) withDiscoveryStatusWrite(
+	status *webtypes.DiscoveryStatus,
+	write func(webSocketWriteBatch, []*websocket.Conn) error,
+) error {
+	return app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		app.discoveryStatus.Store(status)
+
+		return write(batch, app.globalWebSocketClients())
+	})
+}
+
+func (app *WebApp) globalWebSocketClients() []*websocket.Conn {
+	app.WSMutex.RLock()
+	defer app.WSMutex.RUnlock()
+
+	clients := make([]*websocket.Conn, 0, len(app.WSClients))
+	for client := range app.WSClients {
+		clients = append(clients, client)
+	}
+
+	return clients
+}
+
+func (app *WebApp) removeGlobalWebSocketClient(client *websocket.Conn) {
+	app.WSMutex.Lock()
+	delete(app.WSClients, client)
+	app.WSMutex.Unlock()
+
+	_ = client.Close()
+}
+
+func (app *WebApp) registerGlobalWebSocket(conn *websocket.Conn) error {
+	return app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		app.WSMutex.Lock()
+		app.WSClients[conn] = true
+		app.WSMutex.Unlock()
+
+		if ds, ok := app.discoveryStatus.Load().(*webtypes.DiscoveryStatus); ok {
+			if err := batch.writeJSON(conn, webtypes.WebSocketMessage{
+				Type: "discovery_status",
+				Data: ds,
+			}); err != nil {
+				return err
+			}
+		}
+
+		return batch.writeJSON(conn, webtypes.WebSocketMessage{
+			Type: "devices",
+			Data: app.deviceViewSnapshot(),
+		})
+	})
+}
+
 // HandleWebSocket handles WebSocket connections for real-time updates
 func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := app.Upgrader.Upgrade(w, r, nil)
@@ -22,34 +122,13 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer func() {
-		// Unregister client
-		app.WSMutex.Lock()
-		delete(app.WSClients, conn)
-		app.WSMutex.Unlock()
-		conn.Close()
+		app.removeGlobalWebSocketClient(conn)
 	}()
 
-	// Register client
-	app.WSMutex.Lock()
-	app.WSClients[conn] = true
-	app.WSMutex.Unlock()
-
-	// Send current discovery status
-	if ds, ok := app.discoveryStatus.Load().(*webtypes.DiscoveryStatus); ok {
-		if err := conn.WriteJSON(webtypes.WebSocketMessage{
-			Type: "discovery_status",
-			Data: ds,
-		}); err != nil {
-			log.Printf("Failed to send initial discovery status: %v", err)
-			return
-		}
-	}
-
-	// Send initial device list
-	if err := conn.WriteJSON(webtypes.WebSocketMessage{
-		Type: "devices",
-		Data: app.deviceViewSnapshot(),
-	}); err != nil {
+	// Register and send initial frames under the same write lock used by
+	// broadcasts and periodic updates. No other goroutine can write this
+	// connection before its initial snapshot is complete.
+	if err := app.registerGlobalWebSocket(conn); err != nil {
 		log.Printf("Failed to send initial data: %v", err)
 		return
 	}
@@ -81,17 +160,23 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Main loop for sending periodic updates
 	for range ticker.C {
-		// Send ping to check if client is still connected
-		if err := conn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-			log.Printf("Failed to send ping: %v", err)
-			return
-		}
-
-		for _, message := range app.periodicPlayerMessages() {
-			if err := conn.WriteJSON(message); err != nil {
-				log.Printf("Failed to send device update: %v", err)
-				return
+		if err := app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+			if err := batch.writeMessage(conn, websocket.PingMessage, []byte{}); err != nil {
+				return err
 			}
+
+			// Capture after taking the writer lock so a newer broadcast cannot be
+			// followed by a periodic frame captured from older state.
+			for _, message := range app.periodicPlayerMessages() {
+				if err := batch.writeJSON(conn, message); err != nil {
+					return err
+				}
+			}
+
+			return nil
+		}); err != nil {
+			log.Printf("Failed to send periodic WebSocket update: %v", err)
+			return
 		}
 	}
 }

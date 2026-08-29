@@ -36,6 +36,12 @@ type WebApp struct {
 	Upgrader  websocket.Upgrader
 	WSClients map[*websocket.Conn]bool
 	WSMutex   sync.RWMutex
+	// webSocketWriteMu serializes browser WebSocket writes independently of the
+	// client registry. Gorilla permits only one concurrent writer per connection.
+	webSocketWriteMu sync.Mutex
+	// webSocketWriteTimeout bounds each browser WebSocket write so one stalled
+	// client cannot indefinitely block updates for healthy clients.
+	webSocketWriteTimeout time.Duration
 
 	Version    string
 	Commit     string
@@ -725,30 +731,22 @@ func (app *WebApp) HandleDevicePowerStatus(w http.ResponseWriter, r *http.Reques
 
 // BroadcastDeviceList sends updated device list to all connected WebSocket clients
 func (app *WebApp) BroadcastDeviceList() {
-	app.WSMutex.RLock()
-	defer app.WSMutex.RUnlock()
-
-	message := webtypes.WebSocketMessage{
-		Type: "devices",
-		Data: app.deviceViewSnapshot(),
-	}
-
-	// Send to all connected clients
-	var failedClients []*websocket.Conn
-
-	for client := range app.WSClients {
-		if err := client.WriteJSON(message); err != nil {
-			log.Printf("Failed to send device update to WebSocket client: %v", err)
-			// Mark for removal to avoid modifying map during iteration
-			failedClients = append(failedClients, client)
+	_ = app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		clients := app.globalWebSocketClients()
+		message := webtypes.WebSocketMessage{
+			Type: "devices",
+			Data: app.deviceViewSnapshot(),
 		}
-	}
 
-	// Remove failed clients
-	for _, client := range failedClients {
-		delete(app.WSClients, client)
-		client.Close()
-	}
+		for _, client := range clients {
+			if err := batch.writeJSON(client, message); err != nil {
+				log.Printf("Failed to send device update to WebSocket client: %v", err)
+				app.removeGlobalWebSocketClient(client)
+			}
+		}
+
+		return nil
+	})
 }
 
 // BroadcastDiscoveryStatus sends discovery progress updates to all connected WebSocket clients
@@ -765,32 +763,24 @@ func (app *WebApp) BroadcastDiscoveryStatus(status string, deviceCount int) {
 		discoveryStatus.IsDiscovering = false
 	}
 
-	app.discoveryStatus.Store(discoveryStatus)
-
-	app.WSMutex.RLock()
-	defer app.WSMutex.RUnlock()
-
-	message := webtypes.WebSocketMessage{
-		Type: "discovery_status",
-		Data: discoveryStatus,
-	}
-
-	// Send to all connected clients
-	var failedClients []*websocket.Conn
-
-	for client := range app.WSClients {
-		if err := client.WriteJSON(message); err != nil {
-			log.Printf("Failed to send discovery status to WebSocket client: %v", err)
-			// Mark for removal to avoid modifying map during iteration
-			failedClients = append(failedClients, client)
+	_ = app.withDiscoveryStatusWrite(discoveryStatus, func(
+		batch webSocketWriteBatch,
+		clients []*websocket.Conn,
+	) error {
+		message := webtypes.WebSocketMessage{
+			Type: "discovery_status",
+			Data: discoveryStatus,
 		}
-	}
 
-	// Remove failed clients
-	for _, client := range failedClients {
-		delete(app.WSClients, client)
-		client.Close()
-	}
+		for _, client := range clients {
+			if err := batch.writeJSON(client, message); err != nil {
+				log.Printf("Failed to send discovery status to WebSocket client: %v", err)
+				app.removeGlobalWebSocketClient(client)
+			}
+		}
+
+		return nil
+	})
 }
 
 // HandleTuneInSearch handles TuneIn search requests, proxying directly to the bmx package.
