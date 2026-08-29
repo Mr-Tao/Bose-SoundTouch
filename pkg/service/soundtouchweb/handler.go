@@ -56,6 +56,10 @@ type WebApp struct {
 	// client cannot indefinitely block updates for healthy clients.
 	webSocketWriteTimeout time.Duration
 
+	deviceBroadcastMu      sync.Mutex
+	deviceBroadcastPending bool
+	deviceBroadcastRunning bool
+
 	Version    string
 	Commit     string
 	Date       string
@@ -770,6 +774,43 @@ func (app *WebApp) BroadcastDeviceList() {
 
 			app.removeGlobalWebSocketClient(client)
 		}
+	}
+}
+
+// QueueDeviceListBroadcast schedules one device projection without blocking a
+// speaker's event read loop on browser I/O. At most one worker runs per app;
+// events during a slow write are coalesced into one follow-up snapshot rather
+// than expanding into an unbounded queue or set of goroutines.
+func (app *WebApp) QueueDeviceListBroadcast() {
+	app.deviceBroadcastMu.Lock()
+
+	app.deviceBroadcastPending = true
+	if app.deviceBroadcastRunning {
+		app.deviceBroadcastMu.Unlock()
+
+		return
+	}
+
+	app.deviceBroadcastRunning = true
+	app.deviceBroadcastMu.Unlock()
+
+	go app.runDeviceListBroadcasts()
+}
+
+func (app *WebApp) runDeviceListBroadcasts() {
+	for {
+		app.deviceBroadcastMu.Lock()
+		if !app.deviceBroadcastPending {
+			app.deviceBroadcastRunning = false
+			app.deviceBroadcastMu.Unlock()
+
+			return
+		}
+
+		app.deviceBroadcastPending = false
+		app.deviceBroadcastMu.Unlock()
+
+		app.BroadcastDeviceList()
 	}
 }
 
