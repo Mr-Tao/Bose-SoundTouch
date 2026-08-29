@@ -10,12 +10,26 @@
         <link rel="stylesheet" href="/app/static/css/app.css" />
         <!--
         Safari on iPadOS 15 supports native ES modules but not import maps
-        (added in Safari 16.4), which left the page blank there (#649). This
-        polyfills import map support for that browser; on every browser with
-        native support (Chrome, Firefox, modern Safari) it detects that and
-        does nothing, so it's safe to always load.
+        (added in Safari 16.4), which left the page blank there (#649).
+        es-module-shims polyfills import map support, but it's an ~80KB
+        uncompressed download; loading it unconditionally would charge every
+        browser that cost on every page view, including the vast majority
+        that already support import maps natively. Feature-detect instead,
+        so only a browser that actually lacks support ever fetches it.
+        Inserted via the DOM rather than document.write (deprecated, and
+        subject to browser interventions that can silently drop it), with
+        async explicitly set to false so it still executes before the
+        deferred `type="module"` script below runs, without blocking the
+        parser for the vast majority that never reach this branch.
         -->
-        <script async src="/app/static/lib/es-module-shims.js"></script>
+        <script>
+            if (!(window.HTMLScriptElement && HTMLScriptElement.supports && HTMLScriptElement.supports('importmap'))) {
+                var esModuleShimsScript = document.createElement('script');
+                esModuleShimsScript.src = '/app/static/lib/es-module-shims.js';
+                esModuleShimsScript.async = false;
+                document.head.appendChild(esModuleShimsScript);
+            }
+        </script>
         <script type="importmap">
         {
             "imports": {
