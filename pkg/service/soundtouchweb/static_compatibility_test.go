@@ -9,18 +9,32 @@ import (
 // TestIndexPolyfillsImportMapsForOlderBrowsers guards the Safari-on-iPadOS-15
 // fix (#649): that browser supports native ES modules but not import maps
 // (added in Safari 16.4), so the page loaded blank there. es-module-shims
-// polyfills import map resolution for such browsers and detects/no-ops on
-// every browser with native support, so it must be loaded -- with the
-// "async" attribute -- before the import map is parsed.
+// polyfills import map resolution for such browsers, but is an ~80KB
+// uncompressed download, so it must be feature-detected and only injected
+// for a browser that actually lacks HTMLScriptElement.supports('importmap'),
+// before the import map is parsed -- not loaded unconditionally for every
+// browser.
 func TestIndexPolyfillsImportMapsForOlderBrowsers(t *testing.T) {
 	index, err := fs.ReadFile(StaticFS, "static/index.html")
 	if err != nil {
 		t.Fatalf("read index: %v", err)
 	}
 
-	shimIdx := bytes.Index(index, []byte(`<script async src="/app/static/lib/es-module-shims.js"></script>`))
+	if !bytes.Contains(index, []byte(`HTMLScriptElement.supports('importmap')`)) {
+		t.Fatal("index.html does not feature-detect import map support before loading es-module-shims")
+	}
+
+	if bytes.Contains(index, []byte(`document.write(`)) {
+		t.Fatal("index.html must not call document.write() (deprecated, subject to browser interventions); use DOM insertion instead")
+	}
+
+	if !bytes.Contains(index, []byte(`.async = false`)) {
+		t.Fatal("the dynamically-inserted es-module-shims script must set async = false to preserve execution order")
+	}
+
+	shimIdx := bytes.Index(index, []byte(`esModuleShimsScript.src = '/app/static/lib/es-module-shims.js';`))
 	if shimIdx == -1 {
-		t.Fatal(`index.html does not load es-module-shims.js with the "async" attribute`)
+		t.Fatal("index.html does not conditionally inject es-module-shims.js")
 	}
 
 	importMapIdx := bytes.Index(index, []byte(`<script type="importmap">`))
@@ -29,7 +43,7 @@ func TestIndexPolyfillsImportMapsForOlderBrowsers(t *testing.T) {
 	}
 
 	if shimIdx > importMapIdx {
-		t.Fatal("es-module-shims must be loaded before the import map so it can polyfill browsers without native support")
+		t.Fatal("the es-module-shims feature-detect/injection must come before the import map so it can polyfill browsers without native support")
 	}
 
 	if _, err := fs.Stat(StaticFS, "static/lib/es-module-shims.js"); err != nil {
