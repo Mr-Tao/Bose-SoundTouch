@@ -2,8 +2,30 @@ import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
+import { resolvedZoneMember } from '../devicePresentation.mjs';
+import {
+    physicalMemberMetadata,
+    zoneMemberCountSummary,
+    zoneMemberMetadata,
+} from '../zonePresentation.mjs';
 
 const html = htm.bind(h);
+
+function deduplicateMembers(members) {
+    const seen = new Set();
+
+    return members.filter(({ controlId, member }) => {
+        const key = controlId || member?.deviceIds?.join('|');
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function inferredPhysicalCount(members) {
+    return members.reduce((total, { member }) =>
+        total + Math.max(1, member?.physicalMembers?.length || 0), 0);
+}
 
 export function Zone({ deviceId, devices }) {
     const [zone, setZone] = useState(null);
@@ -48,11 +70,89 @@ export function Zone({ deviceId, devices }) {
 
     if (!zone) return null;
 
-    // Devices not already in the zone are available to add
-    const zoneIps = new Set([zone.masterIp, ...(zone.members || []).map(m => m.ip)].filter(Boolean));
-    const available = Object.entries(devices || {}).filter(([ip]) => !zoneIps.has(ip));
+    const projection = devices?.[zone.masterIp || deviceId]?.zone || devices?.[deviceId]?.zone;
+    const projectedMaster = (projection?.members || []).find(member =>
+        member.controlId === projection?.masterControlId ||
+        member.deviceIds?.includes(projection?.masterDeviceId));
+    const master = zone.master || projectedMaster || {
+        controlId: zone.masterIp || deviceId,
+        ip: zone.masterIp || deviceId,
+        name: zone.masterName,
+        deviceIds: zone.masterHwId ? [zone.masterHwId] : [],
+    };
+    const resolvedMaster = resolvedZoneMember(projection, master);
+    const resolvedMembers = (zone.members || []).map(member => resolvedZoneMember(projection, member));
+    const logicalMembers = deduplicateMembers([
+        ...(resolvedMaster.controlId ? [resolvedMaster] : []),
+        ...resolvedMembers,
+    ]);
+    const physicalCount = Number.isInteger(zone.physicalMemberCount)
+        ? zone.physicalMemberCount
+        : (Number.isInteger(projection?.physicalMemberCount)
+            ? projection.physicalMemberCount
+            : inferredPhysicalCount(logicalMembers));
+
+    // Preserve the current picker contract while recognizing projected logical IDs.
+    const zoneIds = new Set([
+        zone.masterIp,
+        ...logicalMembers.map(member => member.controlId),
+        ...(zone.members || []).flatMap(member => [member.ip, member.controlId]),
+    ].filter(Boolean));
+    const available = Object.entries(devices || {}).filter(([id]) => !zoneIds.has(id));
 
     const deviceName = (ip) => devices[ip]?.info?.name || ip;
+
+    function logicalMemberRow(resolved, isMaster) {
+        const member = resolved.member;
+        const metadata = zoneMemberMetadata(member);
+        const isStereoPair = member?.kind === 'stereoPair';
+
+        return html`
+            <div class="zone-logical-member" key=${resolved.controlId}>
+                <div class="zone-logical-header">
+                    <span class="device-indicator ${metadata.connectivity}" role="status"
+                          title=${metadata.connectivityLabel}
+                          aria-label=${metadata.statusAriaLabel}></span>
+                    <div class="zone-logical-identity">
+                        <div class="zone-logical-name">
+                            ${metadata.name}
+                            ${isMaster ? html`<span class="zone-badge master">Master</span>` : null}
+                        </div>
+                        <div class="zone-logical-metadata">
+                            <span>${metadata.modelType}</span>
+                            ${metadata.ip ? html`<span class="zone-logical-ip">${metadata.ip}</span>` : null}
+                            <span>${metadata.kind}</span>
+                        </div>
+                    </div>
+                </div>
+
+                ${isStereoPair ? html`
+                    <div class="zone-physical-members">
+                        ${(member.physicalMembers || []).map(physical => {
+                            const diagnostic = physicalMemberMetadata(physical);
+                            return html`
+                                <div class="zone-physical-member" key=${physical.deviceId || diagnostic.role}>
+                                    <span class="zone-physical-role">${diagnostic.role}</span>
+                                    <span class="device-indicator ${diagnostic.connectivity}" role="status"
+                                          title=${diagnostic.connectivityLabel}
+                                          aria-label=${diagnostic.statusAriaLabel}></span>
+                                    <div class="zone-physical-identity">
+                                        <span class="zone-physical-name">${diagnostic.name}</span>
+                                        <span class="zone-physical-metadata">
+                                            <span>${diagnostic.modelType}</span>
+                                            ${diagnostic.ip ? html`
+                                                <span class="zone-logical-ip">${diagnostic.ip}</span>
+                                            ` : null}
+                                        </span>
+                                    </div>
+                                </div>
+                            `;
+                        })}
+                    </div>
+                ` : null}
+            </div>
+        `;
+    }
 
     return html`
         <div class="zone-section">
@@ -67,20 +167,37 @@ export function Zone({ deviceId, devices }) {
                 </div>
             `}
 
-            ${zone.isMaster && html`
-                <div class="zone-members">
-                    <div class="zone-member zone-master-row">
-                        <span class="zone-badge master">Master</span>
-                        <span class="zone-member-name">${deviceName(deviceId)}</span>
+            ${!zone.isStandalone && logicalMembers.length > 0 ? html`
+                <details class="zone-member-details">
+                    <summary>${zoneMemberCountSummary(logicalMembers.length, physicalCount)}</summary>
+                    <div class="zone-logical-members">
+                        ${logicalMembers.map(member => logicalMemberRow(
+                            member,
+                            member.controlId === resolvedMaster.controlId,
+                        ))}
                     </div>
-                    ${(zone.members || []).map(m => html`
-                        <div class="zone-member" key=${m.ip}>
-                            <span class="zone-badge slave">Member</span>
-                            <span class="zone-member-name">${m.name || deviceName(m.ip)}</span>
-                            <button class="btn-icon zone-remove" title="Remove from zone"
-                                onClick=${() => removeDevice(m.ip)}>✕</button>
+                </details>
+            ` : null}
+
+            ${zone.isMaster && html`
+                <div class="zone-management">
+                    <div class="zone-management-title">Zone management</div>
+                    ${resolvedMembers.length > 0 ? html`
+                        <div class="zone-management-members">
+                            ${resolvedMembers.map(resolved => {
+                                const memberID = resolved.member?.ip || resolved.controlId;
+                                const name = resolved.name || deviceName(memberID);
+                                return html`
+                                    <div class="zone-management-member" key=${resolved.controlId}>
+                                        <span>${name}</span>
+                                        <button class="btn-icon zone-remove" title="Remove from zone"
+                                            aria-label=${`Remove ${name} from zone`}
+                                            onClick=${() => removeDevice(memberID)}>✕</button>
+                                    </div>
+                                `;
+                            })}
                         </div>
-                    `)}
+                    ` : null}
                     <div class="zone-actions">
                         ${available.length > 0 && html`
                             <button class="btn-secondary zone-btn" onClick=${() => setShowPicker(true)}>+ Add speaker</button>
@@ -91,10 +208,12 @@ export function Zone({ deviceId, devices }) {
             `}
 
             ${zone.isSlave && html`
-                <div class="zone-row">
-                    <span class="zone-badge slave">Member</span>
-                    <span class="zone-member-name">Zone: ${zone.masterName || deviceName(zone.masterIp)}</span>
-                    <button class="btn-secondary zone-btn" onClick=${leave}>Leave zone</button>
+                <div class="zone-management">
+                    <div class="zone-management-title">Zone management</div>
+                    <div class="zone-row">
+                        <span class="zone-status-label">Zone: ${zone.masterName || deviceName(zone.masterIp)}</span>
+                        <button class="btn-secondary zone-btn" onClick=${leave}>Leave zone</button>
+                    </div>
                 </div>
             `}
 
