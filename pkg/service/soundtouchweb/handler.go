@@ -62,7 +62,12 @@ type WebApp struct {
 	// soundtouch-service points it at the service datastore's known devices so
 	// the UI shows manually-added speakers even when network discovery is
 	// disabled. Standalone soundtouch-player leaves it nil.
-	ExtraDeviceHosts func() []string
+	//
+	// A non-nil error means the underlying read failed (e.g. a datastore
+	// glitch), which callers must NOT treat the same as "zero hosts
+	// persisted" -- doing so would make a transient read failure look like
+	// every persisted device is already registered.
+	ExtraDeviceHosts func() ([]string, error)
 
 	// TriggerDiscovery, when set, runs an external discovery sweep instead of
 	// this app's own mDNS/UPnP. The embedded build wires it to the host
@@ -77,6 +82,11 @@ type WebApp struct {
 	// persisted device; standalone soundtouch-player leaves it nil (no store, so
 	// removal only prunes the in-memory registry).
 	RemoveDeviceHook func(deviceID string) error
+
+	// seedMu serializes seedExtraDevices runs so the bounded startup retry
+	// loop (SeedExtraDevicesUntilReady) and a devices-changed-hook-triggered
+	// SeedExtraDevices never probe the same still-offline host concurrently.
+	seedMu sync.Mutex
 
 	discoveryStatus atomic.Value // stores *webtypes.DiscoveryStatus
 }

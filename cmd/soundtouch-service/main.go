@@ -46,11 +46,6 @@ var (
 	repoURL = "https://github.com/gesellix/bose-soundtouch"
 )
 
-const (
-	embeddedDeviceSeedRetryInterval = 30 * time.Second
-	embeddedDeviceSeedRetryWindow   = 10 * time.Minute
-)
-
 func updateBuildInfo() {
 	if info, ok := debug.ReadBuildInfo(); ok {
 		if info.Main.Path != "" {
@@ -304,6 +299,18 @@ var serviceFlags = []cli.Flag{
 		Usage:   "Device discovery interval",
 		Value:   "5m",
 		EnvVars: []string{"DISCOVERY_INTERVAL"},
+	},
+	&cli.StringFlag{
+		Name:    "device-seed-retry-interval",
+		Usage:   "Interval between embedded-player startup retries for unreachable persisted devices",
+		Value:   "30s",
+		EnvVars: []string{"DEVICE_SEED_RETRY_INTERVAL"},
+	},
+	&cli.StringFlag{
+		Name:    "device-seed-retry-window",
+		Usage:   "Bounded window during which the embedded player retries unreachable persisted devices at startup",
+		Value:   "10m",
+		EnvVars: []string{"DEVICE_SEED_RETRY_WINDOW"},
 	},
 	&cli.BoolFlag{
 		Name:    "update-check-enabled",
@@ -661,7 +668,7 @@ func main() {
 			}
 
 			internalURL := "http://" + net.JoinHostPort(loopbackHost, config.port)
-			webApp := newEmbeddedWebApp(server, config.serverURL, internalURL, ds)
+			webApp := newEmbeddedWebApp(server, config.serverURL, internalURL, ds, config.deviceSeedRetryInterval, config.deviceSeedRetryWindow)
 
 			r := setupRouter(server, stockholmHandler, webApp)
 
@@ -720,55 +727,57 @@ func showVersionInfo(_ *cli.Context) error {
 }
 
 type serviceConfig struct {
-	port                string
-	bindAddr            string
-	addr                string
-	dataDir             string
-	hostname            string
-	serverURL           string
-	httpsServerURL      string // effective (derived or overridden)
-	httpsOverride       string // explicit override; "" = derive from serverURL
-	httpsPort           string
-	httpsDefaultURL     string // hostname-based fallback
-	httpsAddr           string
-	redact              bool
-	logBody             bool
-	record              bool
-	dnsEnabled          bool
-	dnsUpstream         string
-	dnsBind             string
-	internalPaths       []string
-	tlsExtraHosts       []string
-	discoveryEnabled    bool
-	discoveryInterval   time.Duration
-	updateCheckEnabled  bool
-	updateCheckInterval time.Duration
-	domains             []string
-	spotifyClientID     string
-	spotifyClientSecret string
-	spotifyRedirectURI  string
-	spotifyTokenURL     string
-	spotifyAPIBase      string
-	amazonClientID      string
-	amazonClientSecret  string
-	amazonRedirectURI   string
-	amazonTokenURL      string
-	amazonProfileURL    string
-	tuneInOpmlURL       string
-	tuneInAPIURL        string
-	mgmtUsername        string
-	mgmtPassword        string
-	ttsProvider         string
-	ttsGoogleAPIKey     string
-	ttsGoogleEndpoint   string
-	ttsLanguage         string
-	ttsVoice            string
-	ttsAppKey           string
-	ttsVolume           int
-	migrationEnabled    bool
-	migrationDryRun     bool
-	stockholmDir        string
-	stockholmBasePath   string
+	port                    string
+	bindAddr                string
+	addr                    string
+	dataDir                 string
+	hostname                string
+	serverURL               string
+	httpsServerURL          string // effective (derived or overridden)
+	httpsOverride           string // explicit override; "" = derive from serverURL
+	httpsPort               string
+	httpsDefaultURL         string // hostname-based fallback
+	httpsAddr               string
+	redact                  bool
+	logBody                 bool
+	record                  bool
+	dnsEnabled              bool
+	dnsUpstream             string
+	dnsBind                 string
+	internalPaths           []string
+	tlsExtraHosts           []string
+	discoveryEnabled        bool
+	discoveryInterval       time.Duration
+	deviceSeedRetryInterval time.Duration
+	deviceSeedRetryWindow   time.Duration
+	updateCheckEnabled      bool
+	updateCheckInterval     time.Duration
+	domains                 []string
+	spotifyClientID         string
+	spotifyClientSecret     string
+	spotifyRedirectURI      string
+	spotifyTokenURL         string
+	spotifyAPIBase          string
+	amazonClientID          string
+	amazonClientSecret      string
+	amazonRedirectURI       string
+	amazonTokenURL          string
+	amazonProfileURL        string
+	tuneInOpmlURL           string
+	tuneInAPIURL            string
+	mgmtUsername            string
+	mgmtPassword            string
+	ttsProvider             string
+	ttsGoogleAPIKey         string
+	ttsGoogleEndpoint       string
+	ttsLanguage             string
+	ttsVoice                string
+	ttsAppKey               string
+	ttsVolume               int
+	migrationEnabled        bool
+	migrationDryRun         bool
+	stockholmDir            string
+	stockholmBasePath       string
 }
 
 // resolveFallbackHost picks the host used to guess a server URL when
@@ -865,6 +874,24 @@ func loadConfig(c *cli.Context) (serviceConfig, error) {
 		discoveryInterval = 5 * time.Minute
 	}
 
+	deviceSeedRetryIntervalStr := c.String("device-seed-retry-interval")
+
+	deviceSeedRetryInterval, err := time.ParseDuration(deviceSeedRetryIntervalStr)
+	if err != nil {
+		log.Printf("Warning: Failed to parse device seed retry interval %s, using default 30s: %v", sanitizeLog(deviceSeedRetryIntervalStr), err)
+
+		deviceSeedRetryInterval = 30 * time.Second
+	}
+
+	deviceSeedRetryWindowStr := c.String("device-seed-retry-window")
+
+	deviceSeedRetryWindow, err := time.ParseDuration(deviceSeedRetryWindowStr)
+	if err != nil {
+		log.Printf("Warning: Failed to parse device seed retry window %s, using default 10m: %v", sanitizeLog(deviceSeedRetryWindowStr), err)
+
+		deviceSeedRetryWindow = 10 * time.Minute
+	}
+
 	updateCheckEnabled := c.Bool("update-check-enabled")
 	updateCheckIntervalStr := c.String("update-check-interval")
 
@@ -903,55 +930,57 @@ func loadConfig(c *cli.Context) (serviceConfig, error) {
 	stockholmBasePath := c.String("stockholm-base-path")
 
 	return serviceConfig{
-		port:                port,
-		bindAddr:            bindAddr,
-		addr:                addr,
-		dataDir:             dataDir,
-		hostname:            fallbackHost,
-		serverURL:           serverURL,
-		httpsServerURL:      httpsServerURL,
-		httpsOverride:       httpsOverride,
-		httpsPort:           httpsPort,
-		httpsDefaultURL:     httpsDefaultURL,
-		httpsAddr:           httpsAddr,
-		redact:              redact,
-		logBody:             logBody,
-		record:              record,
-		dnsEnabled:          dnsEnabled,
-		dnsUpstream:         dnsUpstream,
-		dnsBind:             dnsBind,
-		internalPaths:       internalPaths,
-		tlsExtraHosts:       tlsExtraHosts,
-		discoveryEnabled:    discoveryEnabled,
-		discoveryInterval:   discoveryInterval,
-		updateCheckEnabled:  updateCheckEnabled,
-		updateCheckInterval: updateCheckInterval,
-		domains:             domains,
-		spotifyClientID:     spotifyClientID,
-		spotifyClientSecret: spotifyClientSecret,
-		spotifyRedirectURI:  spotifyRedirectURI,
-		spotifyTokenURL:     spotifyTokenURL,
-		spotifyAPIBase:      spotifyAPIBase,
-		amazonClientID:      amazonClientID,
-		amazonClientSecret:  amazonClientSecret,
-		amazonRedirectURI:   amazonRedirectURI,
-		amazonTokenURL:      amazonTokenURL,
-		amazonProfileURL:    amazonProfileURL,
-		tuneInOpmlURL:       tuneInOpmlURL,
-		tuneInAPIURL:        tuneInAPIURL,
-		mgmtUsername:        mgmtUsername,
-		mgmtPassword:        mgmtPassword,
-		ttsProvider:         ttsProvider,
-		ttsGoogleAPIKey:     ttsGoogleAPIKey,
-		ttsGoogleEndpoint:   ttsGoogleEndpoint,
-		ttsLanguage:         ttsLanguage,
-		ttsVoice:            ttsVoice,
-		ttsAppKey:           ttsAppKey,
-		ttsVolume:           ttsVolume,
-		migrationEnabled:    migrationEnabled,
-		migrationDryRun:     migrationDryRun,
-		stockholmDir:        stockholmDir,
-		stockholmBasePath:   stockholmBasePath,
+		port:                    port,
+		bindAddr:                bindAddr,
+		addr:                    addr,
+		dataDir:                 dataDir,
+		hostname:                fallbackHost,
+		serverURL:               serverURL,
+		httpsServerURL:          httpsServerURL,
+		httpsOverride:           httpsOverride,
+		httpsPort:               httpsPort,
+		httpsDefaultURL:         httpsDefaultURL,
+		httpsAddr:               httpsAddr,
+		redact:                  redact,
+		logBody:                 logBody,
+		record:                  record,
+		dnsEnabled:              dnsEnabled,
+		dnsUpstream:             dnsUpstream,
+		dnsBind:                 dnsBind,
+		internalPaths:           internalPaths,
+		tlsExtraHosts:           tlsExtraHosts,
+		discoveryEnabled:        discoveryEnabled,
+		discoveryInterval:       discoveryInterval,
+		deviceSeedRetryInterval: deviceSeedRetryInterval,
+		deviceSeedRetryWindow:   deviceSeedRetryWindow,
+		updateCheckEnabled:      updateCheckEnabled,
+		updateCheckInterval:     updateCheckInterval,
+		domains:                 domains,
+		spotifyClientID:         spotifyClientID,
+		spotifyClientSecret:     spotifyClientSecret,
+		spotifyRedirectURI:      spotifyRedirectURI,
+		spotifyTokenURL:         spotifyTokenURL,
+		spotifyAPIBase:          spotifyAPIBase,
+		amazonClientID:          amazonClientID,
+		amazonClientSecret:      amazonClientSecret,
+		amazonRedirectURI:       amazonRedirectURI,
+		amazonTokenURL:          amazonTokenURL,
+		amazonProfileURL:        amazonProfileURL,
+		tuneInOpmlURL:           tuneInOpmlURL,
+		tuneInAPIURL:            tuneInAPIURL,
+		mgmtUsername:            mgmtUsername,
+		mgmtPassword:            mgmtPassword,
+		ttsProvider:             ttsProvider,
+		ttsGoogleAPIKey:         ttsGoogleAPIKey,
+		ttsGoogleEndpoint:       ttsGoogleEndpoint,
+		ttsLanguage:             ttsLanguage,
+		ttsVoice:                ttsVoice,
+		ttsAppKey:               ttsAppKey,
+		ttsVolume:               ttsVolume,
+		migrationEnabled:        migrationEnabled,
+		migrationDryRun:         migrationDryRun,
+		stockholmDir:            stockholmDir,
+		stockholmBasePath:       stockholmBasePath,
 	}, nil
 }
 
@@ -1432,7 +1461,7 @@ func runUpdateCheckTick(checker *updatecheck.Checker, lastLoggedVersion string) 
 // TriggerDiscovery runs the service sweep on a UI-initiated "discover", and the
 // devices-changed hook re-syncs the UI registry whenever the service's
 // discovery or a manual add changes the set.
-func newEmbeddedWebApp(server *handlers.Server, serverURL, internalURL string, ds *datastore.DataStore) *soundtouchweb.WebApp {
+func newEmbeddedWebApp(server *handlers.Server, serverURL, internalURL string, ds *datastore.DataStore, deviceSeedRetryInterval, deviceSeedRetryWindow time.Duration) *soundtouchweb.WebApp {
 	webApp := soundtouchweb.NewWebApp()
 	webApp.Version = version
 	webApp.Commit = commit
@@ -1449,11 +1478,10 @@ func newEmbeddedWebApp(server *handlers.Server, serverURL, internalURL string, d
 	// stream URLs the speaker fetches and the UI displays it.
 	webApp.InternalServiceURL = internalURL
 
-	webApp.ExtraDeviceHosts = func() []string {
+	webApp.ExtraDeviceHosts = func() ([]string, error) {
 		devices, listErr := ds.ListAllDevices()
 		if listErr != nil {
-			log.Printf("web UI: failed to list devices from datastore: %v", listErr)
-			return nil
+			return nil, fmt.Errorf("web UI: failed to list devices from datastore: %w", listErr)
 		}
 
 		hosts := make([]string, 0, len(devices))
@@ -1463,7 +1491,7 @@ func newEmbeddedWebApp(server *handlers.Server, serverURL, internalURL string, d
 			}
 		}
 
-		return hosts
+		return hosts, nil
 	}
 
 	// UI "discover" runs the service's sweep, not a second mDNS stack.
@@ -1487,10 +1515,17 @@ func newEmbeddedWebApp(server *handlers.Server, serverURL, internalURL string, d
 		// service can start before persisted speaker addresses are routable, so
 		// retry only those known addresses for a bounded startup window. The
 		// devices-changed hook and explicit discovery keep it current afterwards.
-		ctx, cancel := context.WithTimeout(context.Background(), embeddedDeviceSeedRetryWindow)
+		ctx, cancel := context.WithTimeout(context.Background(), deviceSeedRetryWindow)
 		defer cancel()
 
-		webApp.SeedExtraDevicesUntilReady(ctx, embeddedDeviceSeedRetryInterval)
+		webApp.SeedExtraDevicesUntilReady(ctx, deviceSeedRetryInterval)
+
+		// Unconditional: a WebSocket client connected during a window where
+		// every attempt inserted or removed nothing (e.g. no persisted devices
+		// at all, or every persisted host stayed unreachable for the whole
+		// window) must still see the current, converged device list once this
+		// goroutine's work is done.
+		webApp.BroadcastDeviceList()
 	}()
 
 	return webApp
