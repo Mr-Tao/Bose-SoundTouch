@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/service/datastore"
 	"github.com/urfave/cli/v2"
@@ -67,6 +68,57 @@ func TestResolveFallbackHost(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadConfig_DeviceSeedRetryTuning(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		config, err := loadConfig(newTestServiceContext(t))
+		if err != nil {
+			t.Fatalf("loadConfig() error = %v", err)
+		}
+
+		if config.deviceSeedRetryInterval != 30*time.Second {
+			t.Errorf("deviceSeedRetryInterval = %s, want 30s", config.deviceSeedRetryInterval)
+		}
+
+		if config.deviceSeedRetryWindow != 10*time.Minute {
+			t.Errorf("deviceSeedRetryWindow = %s, want 10m", config.deviceSeedRetryWindow)
+		}
+	})
+
+	t.Run("flags override the defaults", func(t *testing.T) {
+		config, err := loadConfig(newTestServiceContext(t,
+			"--device-seed-retry-interval=5s",
+			"--device-seed-retry-window=1m"))
+		if err != nil {
+			t.Fatalf("loadConfig() error = %v", err)
+		}
+
+		if config.deviceSeedRetryInterval != 5*time.Second {
+			t.Errorf("deviceSeedRetryInterval = %s, want 5s", config.deviceSeedRetryInterval)
+		}
+
+		if config.deviceSeedRetryWindow != time.Minute {
+			t.Errorf("deviceSeedRetryWindow = %s, want 1m", config.deviceSeedRetryWindow)
+		}
+	})
+
+	t.Run("unparseable values fall back to the defaults", func(t *testing.T) {
+		config, err := loadConfig(newTestServiceContext(t,
+			"--device-seed-retry-interval=not-a-duration",
+			"--device-seed-retry-window=also-not-a-duration"))
+		if err != nil {
+			t.Fatalf("loadConfig() error = %v", err)
+		}
+
+		if config.deviceSeedRetryInterval != 30*time.Second {
+			t.Errorf("deviceSeedRetryInterval = %s, want fallback 30s", config.deviceSeedRetryInterval)
+		}
+
+		if config.deviceSeedRetryWindow != 10*time.Minute {
+			t.Errorf("deviceSeedRetryWindow = %s, want fallback 10m", config.deviceSeedRetryWindow)
+		}
+	})
 }
 
 func TestLoadConfig_DeploymentMode(t *testing.T) {

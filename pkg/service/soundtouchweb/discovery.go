@@ -123,7 +123,8 @@ func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtyp
 }
 
 // SeedExtraDevices registers any devices reported by the ExtraDeviceHosts hook
-// (if set) via AddDeviceByHost. Idempotent: already-known hosts are skipped.
+// (if set) via AddDeviceByHost, and prunes any previously-seeded host that no
+// longer appears in that set. Idempotent: already-known hosts are skipped.
 // Used by the embedded build to surface the service datastore's devices even
 // when network discovery is disabled; a no-op for standalone soundtouch-player.
 //
@@ -132,8 +133,14 @@ func (app *WebApp) addDeviceByHost(host string, port int, source string) *webtyp
 // datastore would otherwise stall the whole seed for 10 s, serially. Fanning
 // out bounds the cost to roughly a single timeout regardless of how many
 // devices are offline. AddDeviceByHost is registry-safe under concurrency.
+//
+// A hook read failure is logged and otherwise swallowed here; callers that
+// need to distinguish "read failed" from "converged" (the bounded startup
+// retry) should call seedExtraDevices directly instead.
 func (app *WebApp) SeedExtraDevices() {
-	app.seedExtraDevices()
+	if _, _, _, err := app.seedExtraDevices(); err != nil {
+		log.Printf("SeedExtraDevices: failed to read extra device hosts: %v", err)
+	}
 }
 
 type seededExtraDevice struct {
@@ -141,17 +148,40 @@ type seededExtraDevice struct {
 	conn *webtypes.DeviceConnection
 }
 
-func (app *WebApp) seedExtraDevices() []seededExtraDevice {
+// seedExtraDevices probes any ExtraDeviceHosts hosts that aren't already
+// registered, and prunes any registered host that's no longer in the current
+// desired set. Pruning is safe to apply to the whole registry (not just hosts
+// this call inserted) because ExtraDeviceHosts is the only inserter into this
+// registry for the embedded build: discoveryService is nil there, so the
+// mDNS/UPnP insertion path in DiscoverDevices is never reached.
+//
+// Runs are serialized via seedMu so the bounded startup retry loop
+// (SeedExtraDevicesUntilReady) and a devices-changed-hook-triggered
+// SeedExtraDevices call never issue concurrent probes to the same offline
+// host.
+//
+// A non-nil error means the hook itself failed (e.g. a datastore glitch);
+// callers must treat that as "unknown state, don't prune, don't declare
+// ready" rather than as an empty desired set.
+func (app *WebApp) seedExtraDevices() (inserted []seededExtraDevice, removed int, desired map[string]struct{}, err error) {
 	if app.ExtraDeviceHosts == nil {
-		return nil
+		return nil, 0, nil, nil
 	}
 
-	hosts := app.extraDeviceHosts()
-	inserted := make(chan seededExtraDevice, len(hosts))
+	app.seedMu.Lock()
+	defer app.seedMu.Unlock()
 
-	var wg sync.WaitGroup
+	desired, err = app.extraDeviceHostSet()
+	if err != nil {
+		return nil, 0, nil, err
+	}
 
-	for _, host := range hosts {
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+
+	for host := range desired {
 		if _, ok := app.GetDevice(host); ok {
 			continue
 		}
@@ -161,21 +191,32 @@ func (app *WebApp) seedExtraDevices() []seededExtraDevice {
 		go func(h string) {
 			defer wg.Done()
 
-			if conn := app.addDeviceByHost(h, 8090, "service-store"); conn != nil {
-				inserted <- seededExtraDevice{host: h, conn: conn}
+			conn := app.addDeviceByHost(h, 8090, "service-store")
+			if conn == nil {
+				return
 			}
+
+			mu.Lock()
+
+			inserted = append(inserted, seededExtraDevice{host: h, conn: conn})
+
+			mu.Unlock()
 		}(host)
 	}
 
 	wg.Wait()
-	close(inserted)
 
-	added := make([]seededExtraDevice, 0, len(inserted))
-	for device := range inserted {
-		added = append(added, device)
+	for _, entry := range app.DeviceSnapshot() {
+		if _, ok := desired[entry.ID]; ok {
+			continue
+		}
+
+		if app.removeDeviceIfMatch(entry.ID, entry.Device) {
+			removed++
+		}
 	}
 
-	return added
+	return inserted, removed, desired, nil
 }
 
 // SeedExtraDevicesUntilReady retries only the hosts returned by
@@ -185,32 +226,34 @@ func (app *WebApp) seedExtraDevices() []seededExtraDevice {
 // while the service is starting.
 func (app *WebApp) SeedExtraDevicesUntilReady(ctx context.Context, retryInterval time.Duration) {
 	retryUntilReady(ctx, retryInterval, func() bool {
-		inserted := app.seedExtraDevices()
-		desired := app.extraDeviceHostSet()
-
-		for _, device := range inserted {
-			if _, ok := desired[device.host]; !ok {
-				app.removeDeviceIfMatch(device.host, device.conn)
-			}
+		inserted, removed, desired, err := app.seedExtraDevices()
+		if err != nil {
+			log.Printf("SeedExtraDevicesUntilReady: failed to read extra device hosts, will retry: %v", err)
+			return false
 		}
 
-		if len(inserted) > 0 {
+		if len(inserted) > 0 || removed > 0 {
 			app.BroadcastDeviceList()
 		}
 
-		return app.extraDeviceHostsPresent(app.extraDeviceHostSet())
+		return app.extraDeviceHostsPresent(desired)
 	})
 }
 
-func (app *WebApp) extraDeviceHosts() []string {
+func (app *WebApp) extraDeviceHosts() ([]string, error) {
 	if app.ExtraDeviceHosts == nil {
-		return nil
+		return nil, nil
 	}
 
-	hosts := make([]string, 0)
-	seen := make(map[string]struct{})
+	rawHosts, err := app.ExtraDeviceHosts()
+	if err != nil {
+		return nil, err
+	}
 
-	for _, host := range app.ExtraDeviceHosts() {
+	hosts := make([]string, 0, len(rawHosts))
+	seen := make(map[string]struct{}, len(rawHosts))
+
+	for _, host := range rawHosts {
 		if host == "" {
 			continue
 		}
@@ -223,18 +266,22 @@ func (app *WebApp) extraDeviceHosts() []string {
 		hosts = append(hosts, host)
 	}
 
-	return hosts
+	return hosts, nil
 }
 
-func (app *WebApp) extraDeviceHostSet() map[string]struct{} {
-	hosts := app.extraDeviceHosts()
+func (app *WebApp) extraDeviceHostSet() (map[string]struct{}, error) {
+	hosts, err := app.extraDeviceHosts()
+	if err != nil {
+		return nil, err
+	}
+
 	desired := make(map[string]struct{}, len(hosts))
 
 	for _, host := range hosts {
 		desired[host] = struct{}{}
 	}
 
-	return desired
+	return desired, nil
 }
 
 func (app *WebApp) extraDeviceHostsPresent(desired map[string]struct{}) bool {
