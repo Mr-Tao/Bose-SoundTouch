@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ func projectionDevice(host, deviceID, name string, connected bool, group *models
 	})
 	conn.SetStatus(&webtypes.DeviceStatus{IsConnected: connected, Group: group})
 
-	return DeviceEntry{ID: host, Device: conn}
+	return DeviceEntry{ID: host, Device: conn, LastSeen: conn.LastSeen}
 }
 
 func testStereoGroup() *models.Group {
@@ -171,6 +172,50 @@ func TestProjectCapturedDeviceEntriesUsesOneCoherentStatusPerDevice(t *testing.T
 	if fresh := projectDeviceEntries(entries); len(fresh) != 2 {
 		t.Fatalf("fresh projection did not observe the cleared group: %+v", fresh)
 	}
+}
+
+func TestDeviceViewSnapshotConcurrentTouchUsesCapturedLastSeen(t *testing.T) {
+	app := NewWebApp()
+	conn := newRegistryDevice("Living Room")
+	if !app.AddDevice("192.0.2.10", conn) {
+		t.Fatal("AddDevice returned false on first insert")
+	}
+
+	stale := app.DeviceSnapshot()
+	if len(stale) != 1 {
+		t.Fatalf("DeviceSnapshot len = %d, want 1", len(stale))
+	}
+
+	if !app.TouchDevice("192.0.2.10") {
+		t.Fatal("TouchDevice returned false for registered device")
+	}
+	if got := projectDeviceEntries(stale)["192.0.2.10"].LastSeen; got != stale[0].LastSeen {
+		t.Fatalf("projection LastSeen = %s, want captured value %s", got, stale[0].LastSeen)
+	}
+
+	const iterations = 1000
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			app.TouchDevice("192.0.2.10")
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			_ = app.deviceViewSnapshot()
+		}
+	}()
+
+	close(start)
+	wg.Wait()
 }
 
 func TestHandleAPIDevicesUsesLogicalStereoProjection(t *testing.T) {

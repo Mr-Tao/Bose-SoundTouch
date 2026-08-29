@@ -83,7 +83,7 @@ func captureDeviceProjectionEntries(snapshot []DeviceEntry) []deviceProjectionEn
 			ID:       entry.ID,
 			Info:     entry.Device.DeviceInfo,
 			Status:   entry.Device.Status(),
-			LastSeen: entry.Device.LastSeen,
+			LastSeen: entry.LastSeen,
 		})
 	}
 
