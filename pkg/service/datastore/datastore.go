@@ -3529,8 +3529,8 @@ func sameStereoPair(a, b *models.Group) bool {
 	return aOK && bOK && aLeft == bLeft && aRight == bRight
 }
 
-func sameGroupGeneration(a, b *models.Group) bool {
-	if a == nil || b == nil || a.ID != b.ID || a.Name != b.Name ||
+func sameGroupGenerationTopology(a, b *models.Group) bool {
+	if a == nil || b == nil || a.ID != b.ID ||
 		a.MasterDeviceID != b.MasterDeviceID || len(a.Roles.Roles) != len(b.Roles.Roles) {
 		return false
 	}
@@ -3823,7 +3823,7 @@ func (ds *DataStore) DeleteGroupGenerationForDevice(
 				ErrGroupDeleteAmbiguous, groupID, deviceID)
 		}
 
-		if !sameGroupGeneration(&matches[0].group, expected) {
+		if !sameGroupGenerationTopology(&matches[0].group, expected) {
 			return fmt.Errorf("%w: generation %s topology does not match",
 				ErrGroupDeleteAmbiguous, groupID)
 		}
@@ -3895,10 +3895,7 @@ func (ds *DataStore) RenameGroupGenerationForDevice(
 			ErrGroupDeleteAmbiguous, groupID, deviceID)
 	}
 
-	expectedWithCurrentName := *expected
-
-	expectedWithCurrentName.Name = match.group.Name
-	if !sameGroupGeneration(&match.group, &expectedWithCurrentName) {
+	if !sameGroupGenerationTopology(&match.group, expected) {
 		return nil, fmt.Errorf("%w: generation %s topology does not match",
 			ErrGroupDeleteAmbiguous, groupID)
 	}

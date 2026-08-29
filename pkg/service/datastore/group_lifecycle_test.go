@@ -307,6 +307,25 @@ func TestDeleteGroupGenerationForDevice(t *testing.T) {
 			t.Fatal("topology mismatch retired the active group")
 		}
 	})
+
+	t.Run("stored name drift does not prevent exact topology deletion", func(t *testing.T) {
+		ds := NewDataStore(t.TempDir())
+		stored := lifecycleTestGroup("MASTER", "MASTER", "SLAVE", "Renamed pair")
+		stored.Roles.Roles[0].IPAddress = "192.0.2.10"
+		stored.Roles.Roles[1].IPAddress = "192.0.2.11"
+		if _, err := ds.AddGroup("ACCOUNT1", &stored); err != nil {
+			t.Fatalf("add group: %v", err)
+		}
+
+		expected := stored
+		expected.Name = "Original snapshot"
+		if err := ds.DeleteGroupGenerationForDevice("MASTER", stored.ID, &expected); err != nil {
+			t.Fatalf("delete generation after name drift: %v", err)
+		}
+		if ds.rootExists(ds.groupFilePath("ACCOUNT1", stored.ID)) {
+			t.Fatal("name drift prevented retirement of the exact topology")
+		}
+	})
 }
 
 func TestRenameGroupGenerationForDevice(t *testing.T) {

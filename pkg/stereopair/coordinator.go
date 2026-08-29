@@ -870,7 +870,7 @@ func applyRename(states []memberState, current *models.Group, name string) {
 				return
 			}
 
-			if !sameGroupConfiguration(latest, current) {
+			if !sameGroupTopology(latest, current) {
 				states[index].result.MutationError = fmt.Errorf("%w: group changed before rename", ErrConflict)
 
 				return
@@ -972,7 +972,7 @@ func applyDissolve(states []memberState, current *models.Group) {
 				return
 			}
 
-			if !sameGroupConfiguration(latest, current) {
+			if !sameGroupTopology(latest, current) {
 				states[index].result.MutationError = fmt.Errorf("%w: group changed before dissolve", ErrConflict)
 
 				return
@@ -1439,7 +1439,7 @@ func (c *Coordinator) preflightExistingMember(
 		state.result.PreflightError = wrapUnavailable("get current group", errors.New("nil response"))
 	case state.group.IsEmpty() && !allowEmpty:
 		state.result.PreflightError = fmt.Errorf("%w: member is no longer in the expected group", ErrConflict)
-	case !state.group.IsEmpty() && !sameGroupConfiguration(state.group, current):
+	case !state.group.IsEmpty() && !sameGroupTopology(state.group, current):
 		state.result.PreflightError = fmt.Errorf("%w: members do not agree on the current group", ErrConflict)
 	}
 
