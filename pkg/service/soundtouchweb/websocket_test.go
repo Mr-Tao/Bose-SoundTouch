@@ -1,8 +1,11 @@
 package soundtouchweb
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,6 +13,7 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
+	"github.com/gorilla/websocket"
 )
 
 func TestUpdateDeviceStatusRefreshesGroup(t *testing.T) {
@@ -247,4 +251,296 @@ func newStatusTestServer(t *testing.T, groupStatus int, groupBody string) *httpt
 
 		_, _ = w.Write([]byte(body))
 	}))
+}
+
+type recordingWebSocketWriter struct {
+	mu        sync.Mutex
+	deadlines []time.Time
+	messages  []interface{}
+}
+
+func (writer *recordingWebSocketWriter) SetWriteDeadline(deadline time.Time) error {
+	writer.mu.Lock()
+	writer.deadlines = append(writer.deadlines, deadline)
+	writer.mu.Unlock()
+
+	return nil
+}
+
+func (writer *recordingWebSocketWriter) WriteJSON(value interface{}) error {
+	writer.mu.Lock()
+	writer.messages = append(writer.messages, value)
+	writer.mu.Unlock()
+
+	return nil
+}
+
+func (*recordingWebSocketWriter) WriteMessage(int, []byte) error { return nil }
+
+func (writer *recordingWebSocketWriter) lastDeadline() (time.Time, bool) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if len(writer.deadlines) == 0 {
+		return time.Time{}, false
+	}
+
+	return writer.deadlines[len(writer.deadlines)-1], true
+}
+
+func (writer *recordingWebSocketWriter) messageSnapshot() []interface{} {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+
+	return append([]interface{}(nil), writer.messages...)
+}
+
+type deadlineBlockingWebSocketWriter struct {
+	mu       sync.Mutex
+	deadline time.Time
+	started  chan struct{}
+	once     sync.Once
+}
+
+func (writer *deadlineBlockingWebSocketWriter) SetWriteDeadline(deadline time.Time) error {
+	writer.mu.Lock()
+	writer.deadline = deadline
+	writer.mu.Unlock()
+
+	return nil
+}
+
+func (writer *deadlineBlockingWebSocketWriter) WriteJSON(interface{}) error {
+	writer.once.Do(func() { close(writer.started) })
+	writer.mu.Lock()
+	deadline := writer.deadline
+	writer.mu.Unlock()
+
+	if delay := time.Until(deadline); delay > 0 {
+		time.Sleep(delay)
+	}
+
+	return errors.New("write deadline exceeded")
+}
+
+func (writer *deadlineBlockingWebSocketWriter) WriteMessage(int, []byte) error {
+	return writer.WriteJSON(nil)
+}
+
+func TestGlobalWebSocketWriteSeamSerializesWriters(t *testing.T) {
+	app := NewWebApp()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+
+	go func() {
+		_ = app.withGlobalWebSocketWrite(func(webSocketWriteBatch) error {
+			close(entered)
+			<-release
+
+			return nil
+		})
+		close(done)
+	}()
+
+	<-entered
+	if app.webSocketWriteMu.TryLock() {
+		app.webSocketWriteMu.Unlock()
+		t.Fatal("global WebSocket writer lock was not held across the write seam")
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("global WebSocket writer lock was not released")
+	}
+}
+
+func TestDiscoveryStatusStateAndFramesShareWriteOrder(t *testing.T) {
+	app := NewWebApp()
+	writer := &recordingWebSocketWriter{}
+	starting := &webtypes.DiscoveryStatus{Status: "starting", IsDiscovering: true}
+	completed := &webtypes.DiscoveryStatus{Status: "completed", DeviceCount: 3}
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+
+	go func() {
+		firstDone <- app.withDiscoveryStatusWrite(starting, func(
+			batch webSocketWriteBatch,
+			_ []*websocket.Conn,
+		) error {
+			close(firstEntered)
+			<-releaseFirst
+
+			return batch.writeJSON(writer, webtypes.WebSocketMessage{
+				Type: "discovery_status",
+				Data: starting,
+			})
+		})
+	}()
+
+	<-firstEntered
+	secondStarted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		secondDone <- app.withDiscoveryStatusWrite(completed, func(
+			batch webSocketWriteBatch,
+			_ []*websocket.Conn,
+		) error {
+			return batch.writeJSON(writer, webtypes.WebSocketMessage{
+				Type: "discovery_status",
+				Data: completed,
+			})
+		})
+	}()
+	<-secondStarted
+
+	if stored := app.discoveryStatus.Load(); stored != starting {
+		t.Fatalf("discovery state changed ahead of its serialized frame: %#v", stored)
+	}
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second discovery publication bypassed the writer lock: %v", err)
+	default:
+	}
+
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("publish starting discovery status: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("publish completed discovery status: %v", err)
+	}
+
+	if stored := app.discoveryStatus.Load(); stored != completed {
+		t.Fatalf("final discovery state = %#v, want completed", stored)
+	}
+	messages := writer.messageSnapshot()
+	if len(messages) != 2 {
+		t.Fatalf("discovery frames = %d, want 2", len(messages))
+	}
+	last, ok := messages[1].(webtypes.WebSocketMessage)
+	if !ok || last.Data != completed {
+		t.Fatalf("last discovery frame = %#v, want completed", messages[1])
+	}
+}
+
+func TestDiscoveryPublicationBeforeRegistrationUsesNewInitialState(t *testing.T) {
+	app := NewWebApp()
+	oldStatus := &webtypes.DiscoveryStatus{Status: "starting", IsDiscovering: true}
+	newStatus := &webtypes.DiscoveryStatus{Status: "completed", DeviceCount: 3}
+	app.discoveryStatus.Store(oldStatus)
+
+	serverConnection := make(chan *websocket.Conn, 1)
+	releaseServer := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := app.Upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade test WebSocket: %v", err)
+
+			return
+		}
+		serverConnection <- conn
+		<-releaseServer
+		_ = conn.Close()
+	}))
+
+	client, response, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(server.URL, "http"), nil,
+	)
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if err != nil {
+		close(releaseServer)
+		server.Close()
+		t.Fatalf("dial test WebSocket: %v", err)
+	}
+	remote := <-serverConnection
+	t.Cleanup(func() {
+		app.removeGlobalWebSocketClient(remote)
+		_ = client.Close()
+		close(releaseServer)
+		server.Close()
+	})
+
+	clientsSelected := make(chan struct{})
+	releasePublication := make(chan struct{})
+	published := make(chan error, 1)
+	go func() {
+		published <- app.withDiscoveryStatusWrite(newStatus, func(
+			_ webSocketWriteBatch,
+			clients []*websocket.Conn,
+		) error {
+			if len(clients) != 0 {
+				return errors.New("new client was registered before forced publication snapshot")
+			}
+			close(clientsSelected)
+			<-releasePublication
+
+			return nil
+		})
+	}()
+
+	select {
+	case <-clientsSelected:
+	case <-time.After(time.Second):
+		t.Fatal("discovery publication did not select clients")
+	}
+
+	registered := make(chan error, 1)
+	go func() {
+		registered <- app.registerGlobalWebSocket(remote)
+	}()
+
+	select {
+	case err := <-registered:
+		t.Fatalf("registration bypassed in-flight discovery publication: %v", err)
+	default:
+	}
+	close(releasePublication)
+	if err := <-published; err != nil {
+		t.Fatalf("publish discovery status: %v", err)
+	}
+
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set test WebSocket deadline: %v", err)
+	}
+	var discoveryMessage webtypes.WebSocketMessage
+	if err := client.ReadJSON(&discoveryMessage); err != nil {
+		t.Fatalf("read initial discovery frame: %v", err)
+	}
+	if err := <-registered; err != nil {
+		t.Fatalf("register global WebSocket: %v", err)
+	}
+	if discoveryMessage.Type != "discovery_status" {
+		t.Fatalf("initial frame type = %q, want discovery_status", discoveryMessage.Type)
+	}
+	data, ok := discoveryMessage.Data.(map[string]interface{})
+	if !ok || data["status"] != "completed" || data["deviceCount"] != float64(3) {
+		t.Fatalf("initial discovery frame = %#v, want new completed state", discoveryMessage.Data)
+	}
+}
+
+func TestWebSocketWriteBatchRefreshesDeadlineForHealthyWriter(t *testing.T) {
+	timeout := 30 * time.Millisecond
+	batch := webSocketWriteBatch{timeout: timeout}
+	blocked := &deadlineBlockingWebSocketWriter{started: make(chan struct{})}
+
+	if err := batch.writeJSON(blocked, struct{}{}); err == nil {
+		t.Fatal("blocked writer unexpectedly succeeded")
+	}
+
+	healthy := &recordingWebSocketWriter{}
+	started := time.Now()
+	if err := batch.writeJSON(healthy, webtypes.WebSocketMessage{Type: "devices"}); err != nil {
+		t.Fatalf("healthy writer inherited the failed client's deadline: %v", err)
+	}
+
+	deadline, ok := healthy.lastDeadline()
+	if !ok || deadline.Before(started.Add(timeout/2)) {
+		t.Fatalf("healthy writer deadline = %v, want a fresh deadline after %v", deadline, started)
+	}
 }
