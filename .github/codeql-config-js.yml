@@ -1,0 +1,19 @@
+# CodeQL configuration
+# https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning
+
+name: "JavaScript/TypeScript Security Analysis"
+
+disable-default-queries: false
+
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+
+# Paths to exclude from analysis
+paths-ignore:
+  - "**/node_modules/**"
+  # Vendored third-party libraries (preact, htm, es-module-shims), copied
+  # verbatim from npm by scripts/update-static-deps.sh. We don't modify or
+  # control their internals, so findings here aren't actionable from this
+  # repo -- report upstream instead.
+  - "pkg/service/soundtouchweb/static/lib/**"
