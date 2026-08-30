@@ -465,6 +465,7 @@ func (app *WebApp) HandleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
 	app.BroadcastDeviceList()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1057,6 +1058,7 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 	masterIP := app.findIPByHwID(zone.Master)
 
 	masterName := ""
+
 	if conn, ok := app.GetDevice(masterIP); ok {
 		if info := conn.Info(); info != nil {
 			masterName = info.Name
@@ -1073,6 +1075,7 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 
 	for _, m := range zone.Members {
 		name := ""
+
 		if conn, ok := app.GetDevice(m.IP); ok {
 			if info := conn.Info(); info != nil {
 				name = info.Name

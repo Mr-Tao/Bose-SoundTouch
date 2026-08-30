@@ -236,10 +236,12 @@ func (ws *WebSocketClient) connectWithConfig(config *WebSocketConfig) error {
 	defer ws.connectMu.Unlock()
 
 	ws.mu.RLock()
+
 	if ws.connected {
 		ws.mu.RUnlock()
 		return fmt.Errorf("already connected")
 	}
+
 	ctx := ws.ctx
 	dialContext := ws.dialContext
 	ws.mu.RUnlock()
@@ -288,20 +290,25 @@ func (ws *WebSocketClient) connectWithConfig(config *WebSocketConfig) error {
 	ws.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		ws.mu.Unlock()
+
 		_ = conn.Close()
 
 		return fmt.Errorf("WebSocket client closed during connect: %w", err)
 	}
+
 	if ws.connected {
 		ws.mu.Unlock()
+
 		_ = conn.Close()
 
 		return fmt.Errorf("already connected")
 	}
+
 	connection, transportHandler, transportGeneration := ws.activateConnectionLocked(conn)
 	ws.mu.Unlock()
 
 	notifyTransportState(transportHandler, true, transportGeneration)
+
 	go ws.readLoop(config, connection)
 	go ws.pingLoop(config, connection)
 
@@ -349,14 +356,17 @@ func (ws *WebSocketClient) Disconnect() error {
 
 	ws.mu.Lock()
 	wasConnected := ws.connected
+
 	ws.reconnect = false
 	if ws.connection != nil {
 		ws.connection.cancel()
 		ws.connection = nil
 	}
+
 	conn := ws.conn
 	ws.conn = nil
 	ws.connected = false
+
 	var (
 		transportHandler    func(bool, uint64)
 		transportGeneration uint64
@@ -370,13 +380,16 @@ func (ws *WebSocketClient) Disconnect() error {
 
 	if conn != nil {
 		err := conn.Close()
+
 		ws.logger.Printf("Disconnected")
 
 		notifyTransportState(transportHandler, false, transportGeneration)
 
 		return err
 	}
+
 	notifyTransportState(transportHandler, false, transportGeneration)
+
 	if !wasConnected {
 		return fmt.Errorf("not connected")
 	}
@@ -391,14 +404,17 @@ func (ws *WebSocketClient) Close() error {
 
 	ws.mu.Lock()
 	wasConnected := ws.connected
+
 	ws.reconnect = false
 	if ws.connection != nil {
 		ws.connection.cancel()
 		ws.connection = nil
 	}
+
 	conn := ws.conn
 	ws.conn = nil
 	ws.connected = false
+
 	var (
 		transportHandler    func(bool, uint64)
 		transportGeneration uint64
@@ -417,6 +433,7 @@ func (ws *WebSocketClient) Close() error {
 	}
 
 	err := conn.Close()
+
 	ws.logger.Printf("Disconnected")
 	notifyTransportState(transportHandler, false, transportGeneration)
 
@@ -465,7 +482,9 @@ func (ws *WebSocketClient) readLoop(config *WebSocketConfig, connection *webSock
 		transportGeneration := ws.transportGeneration
 		reconnect := ws.reconnect
 		ws.mu.Unlock()
+
 		_ = connection.conn.Close()
+
 		notifyTransportState(transportHandler, false, transportGeneration)
 
 		// Attempt reconnection if enabled

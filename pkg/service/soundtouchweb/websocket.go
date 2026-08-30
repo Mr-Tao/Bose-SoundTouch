@@ -492,6 +492,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 	if conn.Client == nil {
 		return
 	}
+
 	if !conn.TryStartWebSocketLoop() {
 		return
 	}
@@ -605,6 +606,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		if !published {
 			return
 		}
+
 		if err != nil {
 			log.Printf("Failed to connect WebSocket for device %s: %v (retrying in %s)", sanitizeLog(deviceID), err, backoff)
 
@@ -626,10 +628,6 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		// new WebSocket connections, so anything that changed while we were
 		// disconnected would otherwise stay stale until the next WS event.
 		go app.UpdateDeviceStatus(deviceID, conn)
-
-		// Reset backoff after a successful connect so the next failure
-		// starts at the lowest cadence again.
-		backoff = initialBackoff
 
 		<-conn.Done()
 
@@ -737,6 +735,7 @@ func (app *WebApp) updateDeviceStatus(_ string, conn *webtypes.DeviceConnection,
 	if stereoCapable && groupBaseline == nil {
 		groupGeneration = conn.BeginGroupRefresh()
 	}
+
 	nameGeneration := conn.BeginNameRefresh()
 
 	// Phase 1: slow network fetches. Local vars only, no shared state

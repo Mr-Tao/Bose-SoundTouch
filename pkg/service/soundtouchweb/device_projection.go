@@ -263,14 +263,16 @@ func newStereoPairView(group *models.Group, byDeviceID map[string][]deviceProjec
 
 func projectedDeviceInfo(controlID string, info *models.DeviceInfo, pair *stereoPairView) *models.DeviceInfo {
 	if info == nil {
-		return info
+		return nil
 	}
 
 	address := projectedIPAddress(controlID, info, "")
+
 	name := info.Name
 	if pair != nil && pair.Name != "" {
 		name = pair.Name
 	}
+
 	if address == info.IPAddress && name == info.Name {
 		return info
 	}
@@ -301,9 +303,11 @@ func projectedConnectivity(status *webtypes.DeviceStatus) webtypes.Connectivity 
 	if status == nil {
 		return webtypes.ConnectivityOffline
 	}
+
 	if status.Connectivity != "" {
 		return status.Connectivity
 	}
+
 	if status.IsConnected {
 		return webtypes.ConnectivityOnline
 	}
