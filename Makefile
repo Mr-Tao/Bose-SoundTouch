@@ -11,6 +11,7 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 GOFMT=gofmt
+NODE?=node
 
 # Build parameters
 BINARY_NAME=soundtouch-cli
@@ -155,6 +156,7 @@ test-coverage:
 test-browser:
 	@echo "Running browser-level compatibility tests..."
 	$(GOTEST) -tags browsertest -v ./pkg/service/soundtouchweb/...
+	$(NODE) --test pkg/service/soundtouchweb/static/js/api.test.mjs
 
 check: fmt vet test test-http-client
 

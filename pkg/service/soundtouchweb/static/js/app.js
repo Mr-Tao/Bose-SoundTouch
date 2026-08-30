@@ -18,7 +18,68 @@ import { api } from './api.js';
 
 const html = htm.bind(h);
 
-function DeviceDetail({ deviceId, devices, onBack }) {
+function statusRevision(status) {
+    const revision = status?.revision;
+    return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+
+function acceptsNewerStatus(current, incoming) {
+    const currentRevision = statusRevision(current);
+    const incomingRevision = statusRevision(incoming);
+    if (currentRevision === null) return true;
+    return incomingRevision !== null && incomingRevision > currentRevision;
+}
+
+function mergeDerivedStatus(current, incoming) {
+    const currentRevision = statusRevision(current);
+    const incomingRevision = statusRevision(incoming);
+    if (currentRevision === null || incomingRevision !== currentRevision ||
+        current?.sourcesStale === true || incoming?.sourcesStale !== true) {
+        return current;
+    }
+
+    return { ...current, sourcesStale: true };
+}
+
+export function mergeDevicesSnapshot(previous, snapshot) {
+    return Object.fromEntries(Object.entries(snapshot || {}).map(([deviceId, incoming]) => {
+        const current = Object.prototype.hasOwnProperty.call(previous, deviceId)
+            ? previous[deviceId] : null;
+        if (!current || acceptsNewerStatus(current.status, incoming?.status)) {
+            return [deviceId, incoming];
+        }
+        return [deviceId, {
+            ...incoming,
+            status: mergeDerivedStatus(current.status, incoming?.status),
+        }];
+    }));
+}
+
+function replaceDevice(previous, deviceId, device) {
+    return Object.fromEntries([
+        ...Object.entries(previous),
+        [deviceId, device],
+    ]);
+}
+
+export function mergeStatusUpdate(previous, deviceId, status) {
+    if (!Object.prototype.hasOwnProperty.call(previous, deviceId) ||
+        !acceptsNewerStatus(previous[deviceId]?.status, status)) {
+        const current = previous[deviceId]?.status;
+        const merged = mergeDerivedStatus(current, status);
+        if (merged === current) return previous;
+        return replaceDevice(previous, deviceId, {
+            ...previous[deviceId],
+            status: merged,
+        });
+    }
+    return replaceDevice(previous, deviceId, {
+        ...previous[deviceId],
+        status,
+    });
+}
+
+function DeviceDetail({ deviceId, devices, onBack, onStatusReadback }) {
     const device = devices[deviceId];
 
     if (!device) {
@@ -44,7 +105,11 @@ function DeviceDetail({ deviceId, devices, onBack }) {
             <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} />
             <${Controls} deviceId=${deviceId} status=${device.status} />
             <${Presets} deviceId=${deviceId} status=${device.status} />
-            <${Sources} deviceId=${deviceId} status=${device.status} />
+            <${Sources}
+                deviceId=${deviceId}
+                status=${device.status}
+                onStatusReadback=${status => onStatusReadback(deviceId, status)}
+            />
             <${Zone} deviceId=${deviceId} devices=${devices} />
             <${Recents} deviceId=${deviceId} />
         </div>
@@ -100,7 +165,7 @@ function App() {
         ws.onmessage = (event) => {
             const msg = JSON.parse(event.data);
             if (msg.type === 'devices') {
-                setDevices(msg.data || {});
+                setDevices(previous => mergeDevicesSnapshot(previous, msg.data));
             } else if (msg.type === 'discovery_status') {
                 if (msg.data?.isDiscovering !== undefined) {
                     setIsDiscovering(msg.data.isDiscovering);
@@ -114,17 +179,7 @@ function App() {
                     showToast(`Found ${msg.data.deviceCount} device(s)`);
                 }
             } else if (msg.type === 'status_update' && msg.deviceId) {
-                setDevices(prev => {
-                    // Object.prototype.hasOwnProperty, not a plain prev[msg.deviceId]
-                    // truthy check: a deviceId of "__proto__" or "constructor" would
-                    // otherwise resolve through the prototype chain to a truthy value
-                    // and pass the check despite not being a real, known device.
-                    if (!Object.prototype.hasOwnProperty.call(prev, msg.deviceId)) return prev;
-                    return {
-                        ...prev,
-                        [msg.deviceId]: { ...prev[msg.deviceId], status: msg.data },
-                    };
-                });
+                setDevices(previous => mergeStatusUpdate(previous, msg.deviceId, msg.data));
             }
         };
 
@@ -159,6 +214,10 @@ function App() {
     async function discover() {
         showToast('Discovering devices…');
         await api.discover();
+    }
+
+    function mergeDeviceReadback(deviceId, status) {
+        setDevices(previous => mergeStatusUpdate(previous, deviceId, status));
     }
 
     async function removeDevice(id) {
@@ -262,6 +321,7 @@ function App() {
                         deviceId=${selectedId}
                         devices=${devices}
                         onBack=${() => navigate('devices')}
+                        onStatusReadback=${mergeDeviceReadback}
                     />
                 ` : page === 'tunein' ? html`
                     <${TuneInBrowser} key="tunein-browser" devices=${devices} />
@@ -293,4 +353,5 @@ function App() {
     `;
 }
 
-render(html`<${App} />`, document.getElementById('app'));
+const appRoot = document.getElementById('app');
+if (appRoot) render(html`<${App} />`, appRoot);

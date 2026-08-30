@@ -182,6 +182,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		// (UpdateDeviceStatus) cannot lose each other's writes.
 		wsClient.OnNowPlaying(func(event *models.NowPlayingUpdatedEvent) {
 			np := &event.NowPlaying
+			revision := conn.NextFieldRevision()
 
 			// A /select returns 200 even when the source is rejected; the
 			// failure shows up here as a transition to an error source. Log it
@@ -193,28 +194,31 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			prevSource = np.Source
 
 			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.NowPlaying = np
+				s.MergeNowPlaying(np, revision)
 				s.LastActivity = time.Now()
 			})
 		})
 
 		wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
+			revision := conn.NextFieldRevision()
 			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.Volume = &event.Volume
+				s.MergeVolume(&event.Volume, revision)
 				s.LastActivity = time.Now()
 			})
 		})
 
 		wsClient.OnConnectionState(func(event *models.ConnectionStateUpdatedEvent) {
+			revision := conn.NextFieldRevision()
 			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.IsConnected = event.ConnectionState.IsConnected()
+				s.MergeIsConnected(event.ConnectionState.IsConnected(), revision)
 				s.LastActivity = time.Now()
 			})
 		})
 
 		wsClient.OnPresetUpdated(func(event *models.PresetUpdatedEvent) {
+			revision := conn.NextFieldRevision()
 			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.Presets = &event.Presets
+				s.MergePresets(&event.Presets, revision)
 				s.LastActivity = time.Now()
 			})
 		})
@@ -240,8 +244,9 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 		conn.WebSocket = wsClient
 
+		revision := conn.NextFieldRevision()
 		conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-			s.IsConnected = true
+			s.MergeIsConnected(true, revision)
 		})
 
 		log.Printf("WebSocket connected for device %s", sanitizeLog(deviceID))
@@ -258,8 +263,9 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		// Block until the device-side WebSocket disconnects.
 		wsClient.Wait()
 
+		revision = conn.NextFieldRevision()
 		conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-			s.IsConnected = false
+			s.MergeIsConnected(false, revision)
 		})
 
 		log.Printf("WebSocket disconnected for device %s — reconnecting in %s", sanitizeLog(deviceID), backoff)
@@ -292,16 +298,18 @@ func sleepOrDone(conn *webtypes.DeviceConnection, d time.Duration) bool {
 
 // UpdateDeviceStatus fetches current status from the device.
 //
-// Network calls run outside the atomic merge so the CAS loop in
-// UpdateStatus stays fast and doesn't retry slow IO. WebSocket event
-// handlers running concurrently are not lost: their UpdateStatus
-// runs against whichever snapshot they observe, and the merge below
-// sees their changes when it CAS-loops onto the latest status.
+// The poll reserves one field revision before any network IO. Network calls
+// then run outside the atomic merge so the CAS loop in UpdateStatus stays fast
+// and doesn't retry slow IO. A newer event or overlapping poll has a higher
+// revision, so the per-field merges below reject results from this poll if it
+// finishes late.
 func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection) {
 	// Skip status update if client is not available (e.g., in tests)
 	if conn.Client == nil {
 		return
 	}
+
+	pollRevision := conn.NextFieldRevision()
 
 	// /getGroup must be gated to ST10 models -- see Client.GetGroup's doc
 	// comment (verified against real hardware: a ST20 never replies at all,
@@ -320,6 +328,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	volume, volumeErr := conn.Client.GetVolume()
 	presets, presetsErr := conn.Client.GetPresets()
 	sources, sourcesErr := conn.Client.GetSources()
+	sourcesReadAt := time.Now()
 	bass, bassErr := conn.Client.GetBass()
 
 	var (
@@ -338,27 +347,32 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		statusUpdated := false
 
 		if nowPlayingErr == nil {
-			s.NowPlaying = nowPlaying
+			s.MergeNowPlaying(nowPlaying, pollRevision)
+
 			statusUpdated = true
 		}
 
 		if volumeErr == nil {
-			s.Volume = volume
+			s.MergeVolume(volume, pollRevision)
+
 			statusUpdated = true
 		}
 
 		if presetsErr == nil {
-			s.Presets = presets
+			s.MergePresets(presets, pollRevision)
+
 			statusUpdated = true
 		}
 
 		if sourcesErr == nil {
-			s.Sources = sources
 			statusUpdated = true
 		}
 
+		updateSourcesCache(s, sources, sourcesErr, sourcesReadAt, pollRevision)
+
 		if bassErr == nil {
-			s.Bass = bass
+			s.MergeBass(bass, pollRevision)
+
 			statusUpdated = true
 		}
 
@@ -369,7 +383,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		// struggling (an empty <group/> is a near-guaranteed reply), so
 		// counting it would let a device report connected while every
 		// substantive status fetch above actually failed this round.
-		s.IsConnected = statusUpdated
+		s.MergeIsConnected(statusUpdated, pollRevision)
 		s.LastActivity = time.Now()
 	})
 
@@ -380,6 +394,14 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 
 func applyGroupUpdatedEvent(conn *webtypes.DeviceConnection, event *models.GroupUpdatedEvent) {
 	conn.ApplyGroupEvent(&event.Group, time.Now())
+}
+
+func updateSourcesCache(status *webtypes.DeviceStatus, sources *models.Sources, err error, readAt time.Time, revision uint64) bool {
+	if err != nil {
+		return status.MergeSourcesFailure(revision)
+	}
+
+	return status.MergeSources(sources, readAt, revision)
 }
 
 // HandleDeviceWebSocket handles individual device WebSocket connections for real-time device-specific updates
