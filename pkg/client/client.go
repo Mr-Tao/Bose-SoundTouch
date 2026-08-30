@@ -1428,9 +1428,14 @@ func (c *Client) GetZoneMembers() ([]string, error) {
 // An empty <group/> response is reported as a zero-value Group; callers can
 // distinguish with (*Group).IsEmpty().
 //
-// ST-10 is the only product that supports stereo pairs; on other devices
-// the call is harmless but will always return an empty group. The endpoint
-// is named /getGroup on the device (mirroring /getZone), even though some
+// ST-10 is the only product that supports stereo pairs. Verified against
+// real hardware: a SoundTouch 20 does not reply to /getGroup at all -- the
+// request hangs until the client's own timeout (30s by default, see
+// DefaultConfig) rather than returning an empty group quickly. Callers on
+// a poll cycle must gate this call behind a stereo-pair-capable model check
+// (see stereoPairCapable in pkg/service/soundtouchweb) instead of relying on
+// a fast, harmless response on unsupported models. The endpoint is named
+// /getGroup on the device (mirroring /getZone), even though some
 // third-party wikis document it as plain /group.
 func (c *Client) GetGroup() (*models.Group, error) {
 	var g models.Group
