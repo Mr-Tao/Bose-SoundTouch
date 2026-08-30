@@ -11,8 +11,9 @@ import (
 // (added in Safari 16.4), so the page loaded blank there. es-module-shims
 // polyfills import map resolution for such browsers, but is an ~80KB
 // uncompressed download, so it must be feature-detected and only injected
-// for a browser that actually lacks HTMLScriptElement.supports('importmap') --
-// not loaded unconditionally for every browser.
+// for a browser that actually lacks HTMLScriptElement.supports('importmap'),
+// before the import map is parsed -- not loaded unconditionally for every
+// browser.
 func TestIndexPolyfillsImportMapsForOlderBrowsers(t *testing.T) {
 	index, err := fs.ReadFile(StaticFS, "static/index.html")
 	if err != nil {
@@ -25,6 +26,10 @@ func TestIndexPolyfillsImportMapsForOlderBrowsers(t *testing.T) {
 
 	if bytes.Contains(index, []byte(`document.write(`)) {
 		t.Fatal("index.html must not call document.write() (deprecated, subject to browser interventions); use DOM insertion instead")
+	}
+
+	if !bytes.Contains(index, []byte(`.async = false`)) {
+		t.Fatal("the dynamically-inserted es-module-shims script must set async = false to preserve execution order")
 	}
 
 	shimIdx := bytes.Index(index, []byte(`esModuleShimsScript.src = '/app/static/lib/es-module-shims.js';`))
