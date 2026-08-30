@@ -956,7 +956,11 @@ func (c *Coordinator) cleanupGeneration(result *Result, ref GenerationRef) error
 	}
 
 	if err := c.generationCleanup(ref); err != nil {
-		result.PersistenceError = wrapUnavailable("remove persisted group generation", err)
+		if errors.Is(err, ErrInvalidRequest) || errors.Is(err, ErrConflict) || errors.Is(err, ErrUnavailable) {
+			result.PersistenceError = fmt.Errorf("remove persisted group generation: %w", err)
+		} else {
+			result.PersistenceError = wrapUnavailable("remove persisted group generation", err)
+		}
 
 		return result.PersistenceError
 	}
