@@ -150,6 +150,43 @@ func TestHandleDeleteDevicePreservesConcurrentReplacement(t *testing.T) {
 	app.RemoveDevice(host)
 }
 
+func TestHandleDeleteDeviceAcceptsHookReseedRemoval(t *testing.T) {
+	app := NewWebApp()
+	host := "speaker.local"
+	original := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "ORIGINAL"})
+	app.AddDevice(host, original)
+	app.RemoveDeviceHook = func(deviceID string) error {
+		if deviceID != "ORIGINAL" {
+			t.Fatalf("RemoveDeviceHook deviceID = %q, want ORIGINAL", deviceID)
+		}
+		if !app.RemoveDevice(host) {
+			t.Fatal("synchronous reseed did not remove original connection")
+		}
+
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/control/devices/"+host, nil)
+	req = withChiParams(req, map[string]string{"id": host})
+	w := httptest.NewRecorder()
+
+	app.HandleDeleteDevice(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var response webtypes.APIResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.Success {
+		t.Fatalf("response = %+v, want success", response)
+	}
+	if _, ok := app.GetDevice(host); ok {
+		t.Fatal("removed device remained in registry")
+	}
+}
+
 func TestHandleAPIDevice(t *testing.T) {
 	app := createTestApp()
 
