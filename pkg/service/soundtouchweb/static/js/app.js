@@ -16,6 +16,7 @@ import { PlayURL } from './components/PlayURL.js';
 import { TTS } from './components/TTS.js';
 import { Announcements } from './components/Announcements.js';
 import { api } from './api.js';
+import { isSoundTouch10StereoPair } from './stereoPresentation.mjs';
 
 const html = htm.bind(h);
 
@@ -53,6 +54,12 @@ function DeviceDetail({ deviceId, devices, onBack, onDevicesChanged, notify }) {
                 onChanged=${onDevicesChanged}
                 notify=${notify}
             />
+            ${isSoundTouch10StereoPair(device) ? html`
+                <aside class="stereo-pair-note" role="note" aria-label="Stereo pair limitation">
+                    <strong>AirPlay unavailable while paired.</strong>
+                    <span>SoundTouch 10 speakers cannot use AirPlay while paired. Unpair them to use AirPlay.</span>
+                </aside>
+            ` : null}
             <${Zone} deviceId=${deviceId} devices=${devices} />
             <${Recents} deviceId=${deviceId} />
         </div>

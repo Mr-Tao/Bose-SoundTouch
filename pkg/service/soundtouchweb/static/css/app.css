@@ -693,6 +693,22 @@ img { display: block; max-width: 100%; }
 .source-icon { font-size: .9rem; line-height: 1; }
 .source-name { font-weight: 500; }
 
+.stereo-pair-note {
+    display: flex;
+    flex-direction: column;
+    gap: .2rem;
+    margin-top: 1rem;
+    padding: .65rem .75rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: .8rem;
+    line-height: 1.4;
+}
+.stereo-pair-note strong { color: var(--text); }
+
 /* ── Zone ────────────────────────────────────────────────────────────────── */
 .zone-section { margin-top: 1.25rem; }
 
