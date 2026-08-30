@@ -1099,6 +1099,54 @@ func (app *WebApp) HandleZoneLeave(w http.ResponseWriter, r *http.Request) {
 		"Left zone")
 }
 
+// HandleGetZoneCandidates returns every registered physical device, for the
+// "add to zone" picker. Unlike HandleAPIDevices, this deliberately bypasses
+// the stereo-pair projection (deviceViewSnapshot): Zone and Group are
+// separate, unrelated groupings, and a device that's currently hidden as a
+// stereo-pair member (see device_projection.go) must still be an
+// independently addressable zone target, exactly as the backend
+// HandleZoneAdd/HandleZoneRemove already treat it (both look devices up via
+// the raw registry, unaffected by projection).
+//
+// Deliberately does not exclude the {id} device itself: which candidates to
+// exclude (the page's own device, current zone members, ...) is a caller
+// concern, not an inherent property of "what devices exist" -- excluding it
+// here would make this endpoint silently unusable for any future caller
+// that isn't Zone.js's current "add to my own zone" flow.
+func (app *WebApp) HandleGetZoneCandidates(w http.ResponseWriter, r *http.Request) {
+	deviceID := chi.URLParam(r, "id")
+
+	if _, exists := app.GetDevice(deviceID); !exists {
+		app.sendError(w, "Device not found", http.StatusNotFound)
+		return
+	}
+
+	type zoneCandidate struct {
+		Info *models.DeviceInfo `json:"info,omitempty"`
+	}
+
+	candidates := make(map[string]zoneCandidate)
+
+	for _, entry := range app.DeviceSnapshot() {
+		if entry.Device == nil || entry.Device.DeviceInfo == nil {
+			continue
+		}
+
+		candidates[entry.ID] = zoneCandidate{Info: entry.Device.DeviceInfo}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	response := webtypes.APIResponse{
+		Success: true,
+		Data:    candidates,
+	}
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
 // HandleDeviceRecents returns recently played items for a device.
 func (app *WebApp) HandleDeviceRecents(w http.ResponseWriter, r *http.Request) {
 	deviceID := chi.URLParam(r, "id")

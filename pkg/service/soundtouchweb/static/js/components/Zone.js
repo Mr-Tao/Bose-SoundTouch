@@ -7,13 +7,17 @@ const html = htm.bind(h);
 
 export function Zone({ deviceId, devices }) {
     const [zone, setZone] = useState(null);
+    const [candidates, setCandidates] = useState({});
     const [loading, setLoading] = useState(true);
     const [showPicker, setShowPicker] = useState(false);
 
     function refresh() {
-        api.zone(deviceId).then(resp => {
-            if (resp.success) setZone(resp.data);
-        }).finally(() => setLoading(false));
+        Promise.all([api.zone(deviceId), api.zoneCandidates(deviceId)])
+            .then(([zoneResp, candidatesResp]) => {
+                if (zoneResp.success) setZone(zoneResp.data);
+                if (candidatesResp.success) setCandidates(candidatesResp.data || {});
+            })
+            .finally(() => setLoading(false));
     }
 
     useEffect(() => { refresh(); }, [deviceId]);
@@ -48,11 +52,15 @@ export function Zone({ deviceId, devices }) {
 
     if (!zone) return null;
 
-    // Devices not already in the zone are available to add
+    // Devices not already in the zone are available to add. Sourced from a
+    // dedicated candidates endpoint rather than the `devices` prop: Zone and
+    // Group are separate, unrelated groupings, so a stereo pair's hidden
+    // member -- absent from the collapsed device list -- is still a valid,
+    // independent zone-add target.
     const zoneIps = new Set([zone.masterIp, ...(zone.members || []).map(m => m.ip)].filter(Boolean));
-    const available = Object.entries(devices || {}).filter(([ip]) => !zoneIps.has(ip));
+    const available = Object.entries(candidates).filter(([ip]) => !zoneIps.has(ip));
 
-    const deviceName = (ip) => devices[ip]?.info?.name || ip;
+    const deviceName = (ip) => devices[ip]?.info?.name || candidates[ip]?.info?.name || ip;
 
     return html`
         <div class="zone-section">
