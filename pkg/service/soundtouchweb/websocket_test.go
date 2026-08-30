@@ -110,6 +110,33 @@ func TestUpdateDeviceStatusSkipsGroupForNonStereoModel(t *testing.T) {
 	}
 }
 
+// TestUpdateDeviceStatusNotConnectedWhenOnlyGroupSucceeds covers a stereo-
+// capable device where every substantive status fetch fails but /getGroup
+// alone succeeds (a near-guaranteed reply -- even an empty <group/> is a
+// success, see Client.GetGroup's doc comment). IsConnected must not be set
+// from GetGroup's success alone, or a device with genuinely stale
+// NowPlaying/Volume/Presets/Sources/Bass data would be reported connected.
+func TestUpdateDeviceStatusNotConnectedWhenOnlyGroupSucceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/getGroup" {
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<group/>`))
+
+			return
+		}
+
+		http.Error(w, "device struggling", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	conn := webtypes.NewDeviceConnection(client.NewClientFromHost(server.URL), &models.DeviceInfo{Type: "SoundTouch 10"})
+	NewWebApp().UpdateDeviceStatus("device-1", conn)
+
+	if conn.Status().IsConnected {
+		t.Fatal("IsConnected must stay false when every substantive status fetch failed, even though GetGroup alone succeeded")
+	}
+}
+
 func TestApplyGroupUpdatedEventReplacesGroup(t *testing.T) {
 	conn := webtypes.NewDeviceConnection(nil, nil)
 	previousActivity := time.Unix(1, 0)

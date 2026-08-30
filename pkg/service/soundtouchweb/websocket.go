@@ -362,10 +362,13 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 			statusUpdated = true
 		}
 
-		statusUpdated = statusUpdated || (stereoCapable && groupErr == nil)
-
-		// Mark as connected if we successfully got at least one
-		// status from this round. Mirrors prior behaviour.
+		// Mark as connected if we successfully got at least one status
+		// from this round. Mirrors prior behaviour: deliberately does NOT
+		// fold groupErr in here. GetGroup is gated to stereo-capable
+		// models and trivially succeeds even when a device is otherwise
+		// struggling (an empty <group/> is a near-guaranteed reply), so
+		// counting it would let a device report connected while every
+		// substantive status fetch above actually failed this round.
 		s.IsConnected = statusUpdated
 		s.LastActivity = time.Now()
 	})
