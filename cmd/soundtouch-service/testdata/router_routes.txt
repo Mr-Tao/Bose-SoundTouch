@@ -46,6 +46,7 @@ GET      /api/control/devices/{id}/power-status                       soundtouch
 GET      /api/control/devices/{id}/recents                            soundtouchweb.(*WebApp).HandleDeviceRecents-fm
 GET      /api/control/devices/{id}/ws                                 soundtouchweb.(*WebApp).HandleDeviceWebSocket-fm
 GET      /api/control/devices/{id}/zone/                              soundtouchweb.(*WebApp).HandleGetZone-fm
+GET      /api/control/devices/{id}/zone/candidates                    soundtouchweb.(*WebApp).HandleGetZoneCandidates-fm
 GET      /api/control/providers/library/servers                       soundtouchweb.(*WebApp).HandleDiscoverLibraryServers-fm
 GET      /api/control/providers/radiobrowser/search                   soundtouchweb.(*WebApp).HandleRadioBrowserSearch-fm
 GET      /api/control/providers/tunein/navigate                       soundtouchweb.(*WebApp).HandleTuneInNavigate-fm
