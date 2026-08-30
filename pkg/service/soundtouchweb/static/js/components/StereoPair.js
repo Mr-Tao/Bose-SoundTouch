@@ -193,11 +193,15 @@ export function StereoPair({ deviceId, device, devices, onChanged, notify }) {
         if (!expectedGroupId || !recoverySnapshot) return;
         const pairName = pair?.name || recoverySnapshot?.Name || recoverySnapshot?.name ||
             device?.info?.name || 'this stereo pair';
-        if (!confirm(`Dissolve "${pairName}"?\n\nBoth speakers will become standalone devices.`)) return;
+        const recovering = !pair && recoveryGroup;
+        const prompt = recovering
+            ? `Continue cleanup for "${pairName}"?\n\nThe service will recheck the saved generation and finish any remaining teardown or persistence cleanup.`
+            : `Dissolve "${pairName}"?\n\nBoth speakers will become standalone devices.`;
+        if (!confirm(prompt)) return;
         setSavedRecovery({ deviceId, group: recoverySnapshot });
         run(
             () => api.stereoPairDissolve(deviceId, expectedGroupId, recoverySnapshot),
-            'Stereo pair dissolved',
+            recovering ? 'Stereo pair cleanup completed' : 'Stereo pair dissolved',
             () => setSavedRecovery(null),
         );
     }
@@ -235,7 +239,7 @@ export function StereoPair({ deviceId, device, devices, onChanged, notify }) {
             ` : recoveryGroup ? html`
                 <div class="stereo-pair-members">
                     <div class="stereo-pair-member">
-                        <span class="stereo-role">Degraded</span>
+                        <span class="stereo-role">Recovery required</span>
                         <span class="stereo-member-name">${recoverySnapshot.Name || recoverySnapshot.name || 'Unnamed stereo pair'}</span>
                     </div>
                     <div class="stereo-pair-member">
@@ -251,7 +255,7 @@ export function StereoPair({ deviceId, device, devices, onChanged, notify }) {
                 </div>
                 <div class="stereo-pair-actions">
                     <button class="btn-secondary stereo-action danger" type="button"
-                        onClick=${dissolvePair} disabled=${busy || !expectedGroupId}>Dissolve</button>
+                        onClick=${dissolvePair} disabled=${busy || !expectedGroupId}>Continue cleanup</button>
                 </div>
             ` : html`
                 <div class="stereo-pair-standalone">

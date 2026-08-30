@@ -562,3 +562,32 @@ func TestHandleDissolveStereoPairReportsPersistenceFailure(t *testing.T) {
 		t.Fatalf("unexpected persistence response: status=%d payload=%+v", response.Code, payload)
 	}
 }
+
+func TestHandleDissolveStereoPairMapsPersistenceConflictToConflict(t *testing.T) {
+	persistenceErr := fmt.Errorf("generation remains active: %w", stereopair.ErrConflict)
+	fake := &fakeStereoPairLifecycle{dissolveResult: stereopair.Result{
+		Operation:            stereopair.OperationDissolve,
+		Status:               stereopair.StatusDegraded,
+		Group:                &models.Group{},
+		PersistenceAttempted: true,
+		PersistenceError:     persistenceErr,
+		Members: []stereopair.MemberResult{
+			{IPAddress: "192.0.2.10", Verified: true, Group: &models.Group{}},
+			{IPAddress: "192.0.2.11", Verified: true, Group: &models.Group{}},
+		},
+	}, dissolveErr: &stereopair.Error{Operation: stereopair.OperationDissolve, Status: stereopair.StatusDegraded}}
+	app := stereoPairTestApp(fake)
+
+	request := withChiParams(httptest.NewRequest(http.MethodDelete,
+		"/api/control/devices/192.0.2.10/stereo-pair",
+		strings.NewReader(`{"groupId":"PAIR-ID"}`)), map[string]string{"id": "192.0.2.10"})
+	response := httptest.NewRecorder()
+	app.HandleDissolveStereoPair(response, request)
+
+	payload := decodeStereoPairAPIResponse(t, response)
+	if response.Code != http.StatusConflict || payload.Success ||
+		payload.Data.Status != string(stereopair.StatusDegraded) || payload.Data.Paired ||
+		payload.Data.PersistenceError != persistenceErr.Error() {
+		t.Fatalf("unexpected conflict response: status=%d payload=%+v", response.Code, payload)
+	}
+}

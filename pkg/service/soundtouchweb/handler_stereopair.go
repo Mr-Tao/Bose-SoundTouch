@@ -371,12 +371,18 @@ func (app *WebApp) writeStereoPairResult(w http.ResponseWriter, info *models.Dev
 }
 
 func stereoPairHTTPStatus(result stereopair.Result) int {
-	if result.Status == stereopair.StatusDegraded || resultHasStereoPairError(result, stereopair.ErrUnavailable) {
+	if resultHasStereoPairError(result, stereopair.ErrUnavailable) {
 		return http.StatusBadGateway
 	}
 
 	if resultHasStereoPairError(result, stereopair.ErrInvalidRequest) {
 		return http.StatusBadRequest
+	}
+	if resultHasStereoPairError(result, stereopair.ErrConflict) {
+		return http.StatusConflict
+	}
+	if result.Status == stereopair.StatusDegraded {
+		return http.StatusBadGateway
 	}
 
 	return http.StatusConflict

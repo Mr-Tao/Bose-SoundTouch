@@ -1538,7 +1538,12 @@ func embeddedStereoPairGenerationPersistence(
 
 	cleanup := func(ref stereopair.GenerationRef) error {
 		if isLocal(ref.MargeURL, localMargeURLs()) {
-			return ds.DeleteGroupGenerationForDevice(ref.DeviceID, ref.GroupID, ref.ExpectedGroup)
+			err := ds.DeleteGroupGenerationForDevice(ref.DeviceID, ref.GroupID, ref.ExpectedGroup)
+			if errors.Is(err, datastore.ErrGroupDeleteAmbiguous) {
+				return fmt.Errorf("%w: %w", stereopair.ErrConflict, err)
+			}
+
+			return err
 		}
 
 		return stereopair.DeleteMargeGroupGeneration(httpClient, ref)
