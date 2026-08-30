@@ -126,6 +126,7 @@ type DeviceStatus struct {
 // evidence but cannot override a current direct-path success.
 type Connectivity string
 
+// Player connectivity states derived from direct and speaker-reported evidence.
 const (
 	ConnectivityOnline  Connectivity = "online"
 	ConnectivityStale   Connectivity = "stale"
@@ -179,6 +180,7 @@ func NewDeviceConnection(c *client.Client, info *models.DeviceInfo) *DeviceConne
 		IsConnected:  false,
 		LastActivity: time.Now(),
 	})
+
 	if info != nil {
 		conn.storeDeviceName(info.Name)
 	}
@@ -290,6 +292,7 @@ func (c *DeviceConnection) SetWebSocket(ws *client.WebSocketClient) bool {
 	select {
 	case <-c.done:
 		c.webSocketMu.Unlock()
+
 		if ws != nil {
 			_ = ws.Close()
 		}
@@ -415,6 +418,7 @@ func (c *DeviceConnection) BeginHTTPPoll() uint64 {
 	if c.pollEventGen == nil {
 		c.pollEventGen = make(map[uint64]uint64)
 	}
+
 	c.pollEventGen[c.nextPollGeneration] = c.speakerEventGen
 
 	return c.nextPollGeneration
@@ -431,6 +435,7 @@ func (c *DeviceConnection) ApplySpeakerEventAt(at time.Time, mut func(*DeviceSta
 		if mut != nil {
 			mut(status)
 		}
+
 		c.applyConnectivityLocked(status, at)
 	})
 }
@@ -481,10 +486,12 @@ func (c *DeviceConnection) ObserveEventStreamTransport(
 	}
 
 	c.lastTransportGeneration = generation
+
 	c.eventStreamConnected = connected
 	if connected {
 		c.recordDirectSuccessLocked(at)
 	}
+
 	c.UpdateStatus(func(status *DeviceStatus) {
 		c.applyConnectivityLocked(status, at)
 	})
@@ -502,6 +509,7 @@ func (c *DeviceConnection) ObserveEventStream(connected bool, at time.Time) {
 	if connected {
 		c.recordDirectSuccessLocked(at)
 	}
+
 	c.UpdateStatus(func(status *DeviceStatus) {
 		c.applyConnectivityLocked(status, at)
 	})
@@ -550,7 +558,9 @@ func (c *DeviceConnection) CompleteHTTPPoll(
 		if merge != nil && knownGeneration && pollEventGeneration == c.speakerEventGen {
 			merge(status)
 		}
+
 		c.applyConnectivityLocked(status, at)
+
 		if success {
 			status.LastActivity = at
 		}
@@ -601,6 +611,7 @@ func withinConnectivityGrace(at, success time.Time) bool {
 	if success.IsZero() {
 		return false
 	}
+
 	if at.Before(success) {
 		return true
 	}
