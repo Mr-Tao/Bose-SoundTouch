@@ -378,9 +378,11 @@ func stereoPairHTTPStatus(result stereopair.Result) int {
 	if resultHasStereoPairError(result, stereopair.ErrInvalidRequest) {
 		return http.StatusBadRequest
 	}
+
 	if resultHasStereoPairError(result, stereopair.ErrConflict) {
 		return http.StatusConflict
 	}
+
 	if result.Status == stereopair.StatusDegraded {
 		return http.StatusBadGateway
 	}
