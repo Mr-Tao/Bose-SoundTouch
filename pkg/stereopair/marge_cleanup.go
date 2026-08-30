@@ -33,8 +33,8 @@ func DeleteMargeGroupGeneration(httpClient *http.Client, ref GenerationRef) erro
 	if ref.ExpectedGroup == nil || !sameGroupTopology(current, ref.ExpectedGroup) ||
 		current.ID != ref.GroupID || current.MasterDeviceID != ref.DeviceID ||
 		!groupContainsDevice(current, ref.DeviceID) {
-		return fmt.Errorf("delete Marge group generation: device is associated with unrelated generation or topology %q",
-			current.ID)
+		return fmt.Errorf("%w: delete Marge group generation: device is associated with unrelated generation or topology %q",
+			ErrConflict, current.ID)
 	}
 
 	endpoint, err := MargeGroupGenerationURL(ref)
@@ -76,6 +76,10 @@ func DeleteMargeGroupGeneration(httpClient *http.Client, ref GenerationRef) erro
 	if response.StatusCode == http.StatusInternalServerError && margeWrappedGroupNotFound(body, ref) {
 		return verifyMargeGroupGenerationDeleted(httpClient, ref)
 	}
+	if response.StatusCode == http.StatusConflict {
+		return fmt.Errorf("%w: delete Marge group generation: HTTP %d: %s",
+			ErrConflict, response.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	return fmt.Errorf("delete Marge group generation: HTTP %d: %s",
 		response.StatusCode, strings.TrimSpace(string(body)))
@@ -110,7 +114,7 @@ func verifyMargeGroupGenerationDeleted(httpClient *http.Client, ref GenerationRe
 		return nil
 	}
 
-	return fmt.Errorf("delete Marge group generation: generation %s is still active", ref.GroupID)
+	return fmt.Errorf("%w: delete Marge group generation: generation %s is still active", ErrConflict, ref.GroupID)
 }
 
 func margeWrappedGroupNotFound(body []byte, ref GenerationRef) bool {

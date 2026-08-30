@@ -116,7 +116,7 @@ func TestDeleteMargeGroupGenerationDoesNotHideConflict(t *testing.T) {
 		MargeURL: server.URL, AccountID: "ACCOUNT1", GroupID: "PAIR1", DeviceID: "LEFT-ID",
 		ExpectedGroup: margeTestGroup("PAIR1"),
 	})
-	if err == nil || !strings.Contains(err.Error(), "HTTP 409") {
+	if err == nil || !strings.Contains(err.Error(), "HTTP 409") || !errors.Is(err, ErrConflict) {
 		t.Fatalf("error = %v, want propagated HTTP 409", err)
 	}
 	if deleteCalls != 1 {
@@ -143,7 +143,7 @@ func TestDeleteMargeGroupGenerationVerifiesExactGenerationIsGone(t *testing.T) {
 		MargeURL: server.URL, AccountID: "ACCOUNT1", GroupID: "PAIR1", DeviceID: "LEFT-ID",
 		ExpectedGroup: margeTestGroup("PAIR1"),
 	})
-	if err == nil || !strings.Contains(err.Error(), "still active") {
+	if err == nil || !strings.Contains(err.Error(), "still active") || !errors.Is(err, ErrConflict) {
 		t.Fatalf("error = %v, want failed postcondition", err)
 	}
 	if deleteCalls != 1 || getCalls != 2 {
@@ -324,7 +324,7 @@ func TestDeleteMargeGroupGenerationRejectsUnrelatedGenerationBeforeDelete(t *tes
 		MargeURL: server.URL, AccountID: "ACCOUNT1", GroupID: "PAIR1", DeviceID: "LEFT-ID",
 		ExpectedGroup: margeTestGroup("PAIR1"),
 	})
-	if err == nil || !strings.Contains(err.Error(), "unrelated generation") {
+	if err == nil || !strings.Contains(err.Error(), "unrelated generation") || !errors.Is(err, ErrConflict) {
 		t.Fatalf("error = %v, want unrelated-generation rejection", err)
 	}
 	if deleteCalls != 0 {
@@ -348,7 +348,7 @@ func TestDeleteMargeGroupGenerationRejectsSubstitutedMemberBeforeDelete(t *testi
 		MargeURL: server.URL, AccountID: "ACCOUNT1", GroupID: "PAIR1", DeviceID: "LEFT-ID",
 		ExpectedGroup: submitted,
 	})
-	if err == nil || !strings.Contains(err.Error(), "topology") {
+	if err == nil || !strings.Contains(err.Error(), "topology") || !errors.Is(err, ErrConflict) {
 		t.Fatalf("error = %v, want topology rejection", err)
 	}
 	if deleteCalls != 0 {
