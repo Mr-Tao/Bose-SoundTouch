@@ -102,6 +102,22 @@ func TestClassifySource(t *testing.T) {
 	}
 }
 
+func TestResolvedDeviceIPAddressSeparatesHostnameFromReportedAddress(t *testing.T) {
+	info := &models.DeviceInfo{NetworkInfo: []models.NetworkInfo{
+		{Type: "SCM", IPAddress: "192.0.2.42"},
+	}}
+
+	if got := resolvedDeviceIPAddress("kitchen.local", info); got != "192.0.2.42" {
+		t.Fatalf("resolved address = %q, want reported speaker address", got)
+	}
+}
+
+func TestResolvedDeviceIPAddressPreservesLiteralIP(t *testing.T) {
+	if got := resolvedDeviceIPAddress("192.0.2.20", &models.DeviceInfo{}); got != "192.0.2.20" {
+		t.Fatalf("resolved literal address = %q, want unchanged literal", got)
+	}
+}
+
 func TestRetryUntilReadyStopsAfterSuccess(t *testing.T) {
 	attempts := 0
 	retryUntilReady(context.Background(), time.Millisecond, func() bool {

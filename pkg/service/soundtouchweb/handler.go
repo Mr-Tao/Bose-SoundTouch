@@ -398,7 +398,7 @@ func (app *WebApp) HandleAPIDevice(w http.ResponseWriter, r *http.Request) {
 	app.UpdateDeviceStatus(deviceID, device)
 
 	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
+	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
@@ -448,8 +448,8 @@ func (app *WebApp) HandleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	// only prunes the in-memory registry below.
 	if app.RemoveDeviceHook != nil {
 		deviceID := ""
-		if conn.DeviceInfo != nil {
-			deviceID = conn.DeviceInfo.DeviceID
+		if info := conn.Info(); info != nil {
+			deviceID = info.DeviceID
 		}
 
 		if err := app.RemoveDeviceHook(deviceID); err != nil {
@@ -460,7 +460,11 @@ func (app *WebApp) HandleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	app.RemoveDevice(host)
+	if !app.removeDeviceIfMatch(host, conn) {
+		app.sendError(w, "Device changed during removal", http.StatusConflict)
+
+		return
+	}
 	app.BroadcastDeviceList()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -487,7 +491,7 @@ func (app *WebApp) HandleAPIControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
+	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
@@ -730,7 +734,7 @@ func (app *WebApp) HandleDeviceKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
+	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
@@ -762,7 +766,7 @@ func (app *WebApp) HandleDirectVolumeControl(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
+	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
@@ -788,7 +792,7 @@ func (app *WebApp) HandleDevicePower(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
+	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
@@ -1014,7 +1018,7 @@ func (app *WebApp) HandleTuneInNavigate(w http.ResponseWriter, r *http.Request) 
 // Returns "" when no match is found.
 func (app *WebApp) findIPByHwID(hwID string) string {
 	for _, entry := range app.DeviceSnapshot() {
-		if entry.Device.DeviceInfo != nil && entry.Device.DeviceInfo.DeviceID == hwID {
+		if info := entry.Device.Info(); info != nil && info.DeviceID == hwID {
 			return entry.ID
 		}
 	}
@@ -1053,8 +1057,10 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 	masterIP := app.findIPByHwID(zone.Master)
 
 	masterName := ""
-	if conn, ok := app.GetDevice(masterIP); ok && conn.DeviceInfo != nil {
-		masterName = conn.DeviceInfo.Name
+	if conn, ok := app.GetDevice(masterIP); ok {
+		if info := conn.Info(); info != nil {
+			masterName = info.Name
+		}
 	}
 
 	type memberInfo struct {
@@ -1067,8 +1073,10 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 
 	for _, m := range zone.Members {
 		name := ""
-		if conn, ok := app.GetDevice(m.IP); ok && conn.DeviceInfo != nil {
-			name = conn.DeviceInfo.Name
+		if conn, ok := app.GetDevice(m.IP); ok {
+			if info := conn.Info(); info != nil {
+				name = info.Name
+			}
 		}
 
 		members = append(members, memberInfo{IP: m.IP, HwID: m.DeviceID, Name: name})

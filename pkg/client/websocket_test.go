@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -269,6 +270,139 @@ func TestWebSocketClient_Disconnect(t *testing.T) {
 	}
 }
 
+func TestWebSocketClient_DisconnectWhileDisconnectedStopsReconnect(t *testing.T) {
+	client := NewClientFromHost("192.0.2.10")
+	wsClient := client.NewWebSocketClient(nil)
+
+	if err := wsClient.Disconnect(); err == nil {
+		t.Fatal("Disconnect() while disconnected should retain its compatibility error")
+	}
+
+	wsClient.mu.RLock()
+	reconnect := wsClient.reconnect
+	wsClient.mu.RUnlock()
+	if reconnect {
+		t.Fatal("Disconnect() left reconnect enabled")
+	}
+
+	select {
+	case <-wsClient.ctx.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Disconnect() did not cancel the WebSocket context")
+	}
+}
+
+func TestWebSocketClient_CloseCancelsInProgressDial(t *testing.T) {
+	client := NewClientFromHost("192.0.2.10")
+	wsClient := client.NewWebSocketClient(nil)
+	dialStarted := make(chan struct{})
+
+	wsClient.dialContext = func(ctx context.Context, _ string, _ http.Header) (*websocket.Conn, *http.Response, error) {
+		close(dialStarted)
+		<-ctx.Done()
+
+		return nil, nil, ctx.Err()
+	}
+
+	connectDone := make(chan error, 1)
+	go func() {
+		connectDone <- wsClient.Connect()
+	}()
+
+	select {
+	case <-dialStarted:
+	case <-time.After(time.Second):
+		t.Fatal("WebSocket dial did not start")
+	}
+
+	if err := wsClient.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+
+	select {
+	case err := <-connectDone:
+		if err == nil {
+			t.Fatal("Connect() succeeded after Close() canceled its dial")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled WebSocket dial did not return")
+	}
+
+	if err := wsClient.Close(); err != nil {
+		t.Fatalf("second Close() was not idempotent: %v", err)
+	}
+}
+
+func TestWebSocketClient_StaleGenerationCannotOwnPing(t *testing.T) {
+	client := NewClientFromHost("192.0.2.10")
+	wsClient := client.NewWebSocketClient(nil)
+	oldCtx, oldCancel := context.WithCancel(context.Background())
+	currentCtx, currentCancel := context.WithCancel(context.Background())
+	defer oldCancel()
+	defer currentCancel()
+
+	oldConnection := &webSocketConnection{ctx: oldCtx, cancel: oldCancel}
+	currentConnection := &webSocketConnection{ctx: currentCtx, cancel: currentCancel}
+	wsClient.mu.Lock()
+	wsClient.connection = currentConnection
+	wsClient.connected = true
+	wsClient.mu.Unlock()
+
+	active, err := wsClient.writePing(oldConnection)
+	if err != nil {
+		t.Fatalf("writePing() for stale generation returned error: %v", err)
+	}
+	if active {
+		t.Fatal("replaced connection generation retained ping ownership")
+	}
+}
+
+func TestWebSocketClient_TransportCallbacksCarryMonotonicGenerations(t *testing.T) {
+	server, messagesChan := setupMockWebSocketServer(t)
+	defer server.Close()
+	defer close(messagesChan)
+
+	client := NewClientFromHost("192.0.2.10")
+	wsClient := client.NewWebSocketClient(nil)
+	serverWebSocketURL := strings.Replace(server.URL, "http://", "ws://", 1)
+	wsClient.dialContext = func(ctx context.Context, _ string, header http.Header) (*websocket.Conn, *http.Response, error) {
+		return websocket.DefaultDialer.DialContext(ctx, serverWebSocketURL, header)
+	}
+
+	type transportState struct {
+		connected  bool
+		generation uint64
+	}
+	states := make(chan transportState, 2)
+	wsClient.OnTransportState(func(connected bool, generation uint64) {
+		states <- transportState{connected: connected, generation: generation}
+	})
+	nextState := func() transportState {
+		t.Helper()
+		select {
+		case state := <-states:
+			return state
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for transport callback")
+			return transportState{}
+		}
+	}
+
+	if err := wsClient.Connect(); err != nil {
+		t.Fatalf("Connect() failed: %v", err)
+	}
+	if state := nextState(); !state.connected || state.generation != 1 {
+		t.Fatalf("connected state = %+v, want connected generation 1", state)
+	}
+
+	if err := wsClient.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	if state := nextState(); state.connected || state.generation != 2 {
+		t.Fatalf("disconnected state = %+v, want disconnected generation 2", state)
+	}
+}
+
 func TestWebSocketClient_HandleMessage(t *testing.T) {
 	client := NewClientFromHost("192.0.2.10")
 	wsClient := client.NewWebSocketClient(&WebSocketConfig{
@@ -278,6 +412,7 @@ func TestWebSocketClient_HandleMessage(t *testing.T) {
 	var (
 		nowPlayingEvent *models.NowPlayingUpdatedEvent
 		volumeEvent     *models.VolumeUpdatedEvent
+		nameEvent       *models.NameUpdatedEvent
 	)
 
 	wsClient.OnNowPlaying(func(event *models.NowPlayingUpdatedEvent) {
@@ -286,6 +421,10 @@ func TestWebSocketClient_HandleMessage(t *testing.T) {
 
 	wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
 		volumeEvent = event
+	})
+
+	wsClient.OnNameUpdated(func(event *models.NameUpdatedEvent) {
+		nameEvent = event
 	})
 
 	t.Run("HandleNowPlayingEvent", func(t *testing.T) {
@@ -340,6 +479,20 @@ func TestWebSocketClient_HandleMessage(t *testing.T) {
 
 		if volumeEvent.Volume.TargetVolume != 25 {
 			t.Errorf("Expected TargetVolume 25, got %d", volumeEvent.Volume.TargetVolume)
+		}
+	})
+
+	t.Run("HandleNameEvent", func(t *testing.T) {
+		xmlData := []byte(`<updates deviceID="689E19B8BB8A"><nameUpdated deviceID="689E19B8BB8A"><name>Living Room Left</name></nameUpdated></updates>`)
+
+		wsClient.handleMessage(xmlData)
+
+		if nameEvent == nil {
+			t.Fatal("Name event handler was not called")
+		}
+
+		if nameEvent.DeviceID != "689E19B8BB8A" || nameEvent.Name.Value != "Living Room Left" {
+			t.Errorf("Unexpected name event: %+v", nameEvent)
 		}
 	})
 
