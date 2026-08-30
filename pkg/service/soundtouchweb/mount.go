@@ -86,6 +86,7 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 
 				r.Route("/zone", func(r chi.Router) {
 					r.Get("/", app.HandleGetZone)
+					r.Get("/candidates", app.HandleGetZoneCandidates)
 					r.Post("/add/{slaveId}", app.HandleZoneAdd)
 					r.Post("/remove/{slaveId}", app.HandleZoneRemove)
 					r.Post("/dissolve", app.HandleZoneDissolve)

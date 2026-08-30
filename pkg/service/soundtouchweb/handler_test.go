@@ -893,3 +893,78 @@ func TestHandleZoneLeave_UsesRemoveZoneSlave(t *testing.T) {
 		t.Errorf("removeZoneSlave body should name the master, got: %s", masterBody)
 	}
 }
+
+// TestHandleGetZoneCandidates_IncludesHiddenPairMemberAndSelf guards two
+// things the stereo-pair projection (device_projection.go) must not affect:
+// Zone and Group are separate, unrelated groupings, so (a) a stereo pair's
+// hidden non-master member -- absent from the collapsed "devices" list --
+// must still be a valid zone-add candidate, matching how HandleZoneAdd
+// already treats it (raw registry lookup, unaffected by projection); and
+// (b) the endpoint itself does not exclude the requesting {id} device,
+// since deciding what to exclude (this page's own device, current zone
+// members, ...) is the caller's concern -- Zone.js already does this via
+// the existing zoneIps set, which includes the master's own IP even for a
+// standalone zone (see models.ZoneInfo.IsStandalone).
+func TestHandleGetZoneCandidates_IncludesHiddenPairMemberAndSelf(t *testing.T) {
+	app := NewWebApp()
+
+	group := testStereoGroup()
+	master := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "left-id", Name: "Living Room", IPAddress: "192.0.2.10"})
+	master.SetStatus(&webtypes.DeviceStatus{IsConnected: true, Group: group})
+	app.AddDevice("192.0.2.10", master)
+
+	hiddenMember := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "right-id", Name: "Living Room", IPAddress: "192.0.2.11"})
+	hiddenMember.SetStatus(&webtypes.DeviceStatus{IsConnected: true, Group: group})
+	app.AddDevice("192.0.2.11", hiddenMember)
+
+	standalone := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "kitchen-id", Name: "Kitchen", IPAddress: "192.0.2.12"})
+	standalone.SetStatus(&webtypes.DeviceStatus{IsConnected: true})
+	app.AddDevice("192.0.2.12", standalone)
+
+	// Sanity check: the hidden member really is absent from the projected
+	// device list this test is guarding against leaking into.
+	projected := app.deviceViewSnapshot()
+	if _, visible := projected["192.0.2.11"]; visible {
+		t.Fatal("test setup: expected 192.0.2.11 to be hidden by the stereo-pair projection")
+	}
+
+	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.10/zone/candidates", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10"})
+	w := httptest.NewRecorder()
+
+	app.HandleGetZoneCandidates(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var response webtypes.APIResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	data, ok := response.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data to be a map, got %T", response.Data)
+	}
+
+	for _, ip := range []string{"192.0.2.10", "192.0.2.11", "192.0.2.12"} {
+		if _, ok := data[ip]; !ok {
+			t.Errorf("expected %s in zone candidates, got: %+v", ip, data)
+		}
+	}
+}
+
+func TestHandleGetZoneCandidates_UnknownDeviceNotFound(t *testing.T) {
+	app := NewWebApp()
+
+	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.99/zone/candidates", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.99"})
+	w := httptest.NewRecorder()
+
+	app.HandleGetZoneCandidates(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for an unknown device, got %d: %s", w.Code, w.Body.String())
+	}
+}
