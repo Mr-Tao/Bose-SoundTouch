@@ -70,6 +70,8 @@ func sensitiveRecordingTestPaths() []string {
 }
 
 func TestSensitiveRecordingPath(t *testing.T) {
+	t.Parallel()
+
 	for _, requestPath := range sensitiveRecordingTestPaths() {
 		requestPath := requestPath
 		t.Run(requestPath, func(t *testing.T) {

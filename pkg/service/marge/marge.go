@@ -2442,18 +2442,21 @@ func AddSource(ds *datastore.DataStore, account, username, providerID, secret, s
 
 	// List accounts directly from the account directory to be sure we find them.
 	devicesDir := ds.AccountDevicesDir(account)
+
 	entries, err := ds.ReadDirUnderBase(devicesDir)
 	if err != nil {
 		return "", fmt.Errorf("list account devices: %w", err)
 	}
 
 	deviceCount := 0
+
 	var writeErrors []error
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
+
 		deviceCount++
 
 		devID := entry.Name()
@@ -2521,9 +2524,11 @@ func AddSource(ds *datastore.DataStore, account, username, providerID, secret, s
 			writeErrors = append(writeErrors, fmt.Errorf("device %s: %w", devID, err))
 		}
 	}
+
 	if deviceCount == 0 {
 		return "", fmt.Errorf("account %s has no devices", account)
 	}
+
 	if len(writeErrors) != 0 {
 		return sourceID, errors.Join(writeErrors...)
 	}

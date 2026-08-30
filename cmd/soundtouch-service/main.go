@@ -138,6 +138,7 @@ func initMusicServices(config serviceConfig, server *handlers.Server) {
 		if redirectURI == "" {
 			redirectURI = server.EffectiveSpotifyRedirectURI()
 		}
+
 		if err := handlers.ValidateSpotifyAuthorizationConfig(config.spotifyClientID, config.spotifyClientSecret, redirectURI); err != nil {
 			log.Printf("[Spotify] Integration disabled: %s", sanitizeLog(err.Error()))
 		} else {

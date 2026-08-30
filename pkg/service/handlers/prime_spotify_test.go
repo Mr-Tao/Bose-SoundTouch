@@ -774,8 +774,8 @@ func TestConfiguredSourceHandlerCannotChangeOwnershipDuringCredentialWrite(t *te
 				close(handlerDone)
 			}()
 			awaitSpotifySourceLockEvent(t, lockEvents, 2, false)
-			if h.server.spotifySourceMu.Mutex.TryLock() {
-				h.server.spotifySourceMu.Mutex.Unlock()
+			if h.server.spotifySourceMu.TryLock() {
+				h.server.spotifySourceMu.Unlock()
 				t.Fatalf("configured-source %s did not contend on spotifySourceMu", tc.method)
 			}
 			sources, err = h.server.ds.GetConfiguredSources("prime-account", "PRIMEDEVICE")

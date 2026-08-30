@@ -185,10 +185,12 @@ func (s *Server) HandleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	spotifyClientID := s.spotifyClientID
 	spotifyClientSecret := s.spotifyClientSecret
 	spotifyRedirectURI := s.spotifyRedirectURI
+
 	spotifyEffectiveRedirectURI := spotifyRedirectURI
 	if spotifyEffectiveRedirectURI == "" {
 		spotifyEffectiveRedirectURI = serverURL + "/mgmt/spotify/callback"
 	}
+
 	amazonConfigured := s.amazonService != nil
 	amazonClientID := s.amazonClientID
 	amazonClientSecret := s.amazonClientSecret
@@ -221,8 +223,10 @@ func (s *Server) HandleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	if spotifyClientSecret != "" {
 		spotifyClientSecret = "***"
 	}
+
 	spotifyRedirectValid := true
 	spotifyRedirectError := ""
+
 	if err := ValidateSpotifyAuthorizationConfig(spotifyClientID, spotifyClientSecret, spotifyEffectiveRedirectURI); err != nil {
 		spotifyRedirectValid = false
 		spotifyRedirectError = err.Error()
@@ -310,10 +314,11 @@ func (s *Server) HandleGetSettings(w http.ResponseWriter, _ *http.Request) {
 // this path so they cannot disagree about whether linking is safe to start.
 func ValidateSpotifyAuthorizationConfig(clientID, clientSecret, rawURI string) error {
 	if strings.TrimSpace(clientID) == "" {
-		return fmt.Errorf("Spotify client ID is required")
+		return fmt.Errorf("spotify client ID is required")
 	}
+
 	if strings.TrimSpace(clientSecret) == "" {
-		return fmt.Errorf("Spotify client secret is required")
+		return fmt.Errorf("spotify client secret is required")
 	}
 
 	return validateSpotifyRedirectURI(rawURI)
@@ -324,21 +329,27 @@ func validateSpotifyRedirectURI(rawURI string) error {
 	if err != nil || !parsed.IsAbs() || parsed.Hostname() == "" {
 		return fmt.Errorf("redirect URI must be an absolute URL")
 	}
+
 	if parsed.User != nil {
 		return fmt.Errorf("redirect URI must not contain user information")
 	}
+
 	if parsed.RawQuery != "" {
 		return fmt.Errorf("redirect URI must not contain a query")
 	}
+
 	if parsed.Fragment != "" {
 		return fmt.Errorf("redirect URI must not contain a fragment")
 	}
+
 	if parsed.Path != "/mgmt/spotify/callback" {
 		return fmt.Errorf("redirect URI path must be /mgmt/spotify/callback")
 	}
+
 	if parsed.Scheme == "https" {
 		return nil
 	}
+
 	if parsed.Scheme != "http" {
 		return fmt.Errorf("redirect URI must use HTTPS")
 	}
@@ -488,29 +499,16 @@ func (s *Server) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spotifySettingsTouched := settings.SpotifyClientID != "" ||
-		settings.SpotifyClientSecret != "" || settings.SpotifyRedirectURI != nil
-	if spotifySettingsTouched {
-		currentID, currentSecret, currentRedirect := s.GetSpotifyConfig()
-		candidateID := currentID
-		if settings.SpotifyClientID != "" {
-			candidateID = settings.SpotifyClientID
-		}
-		candidateSecret := currentSecret
-		if settings.SpotifyClientSecret != "" && settings.SpotifyClientSecret != "***" {
-			candidateSecret = settings.SpotifyClientSecret
-		}
-		candidateRedirect := currentRedirect
-		if settings.SpotifyRedirectURI != nil {
-			candidateRedirect = strings.TrimSpace(*settings.SpotifyRedirectURI)
-		}
-		if candidateRedirect == "" {
-			candidateRedirect = settings.ServerURL + "/mgmt/spotify/callback"
-		}
-		if err := ValidateSpotifyAuthorizationConfig(candidateID, candidateSecret, candidateRedirect); err != nil {
-			http.Error(w, "Invalid Spotify configuration: "+err.Error(), http.StatusBadRequest)
-			return
-		}
+	spotifyErr := s.validateSpotifySettingsUpdate(
+		settings.SpotifyClientID,
+		settings.SpotifyClientSecret,
+		settings.SpotifyRedirectURI,
+		settings.ServerURL,
+	)
+	if spotifyErr != nil {
+		http.Error(w, "Invalid Spotify configuration: "+spotifyErr.Error(), http.StatusBadRequest)
+
+		return
 	}
 
 	s.mu.Lock()
@@ -660,6 +658,32 @@ func (s *Server) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
+}
+
+func (s *Server) validateSpotifySettingsUpdate(clientID, clientSecret string, redirectURI *string, serverURL string) error {
+	settingsTouched := clientID != "" || clientSecret != "" || redirectURI != nil
+	if !settingsTouched {
+		return nil
+	}
+
+	candidateID, candidateSecret, candidateRedirect := s.GetSpotifyConfig()
+	if clientID != "" {
+		candidateID = clientID
+	}
+
+	if clientSecret != "" && clientSecret != "***" {
+		candidateSecret = clientSecret
+	}
+
+	if redirectURI != nil {
+		candidateRedirect = strings.TrimSpace(*redirectURI)
+	}
+
+	if candidateRedirect == "" {
+		candidateRedirect = serverURL + "/mgmt/spotify/callback"
+	}
+
+	return ValidateSpotifyAuthorizationConfig(candidateID, candidateSecret, candidateRedirect)
 }
 
 // NormalizeAdminAreaAuth trims/lowercases the admin-area auth mode and
@@ -1723,6 +1747,7 @@ func (s *Server) HandleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	s.spotifySourceMu.Lock()
 	err := s.ds.DeleteSourceByID(account, device, sourceID)
 	s.spotifySourceMu.Unlock()
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 

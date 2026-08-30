@@ -271,6 +271,7 @@ func (s *Server) HandleMargePowerOn(w http.ResponseWriter, r *http.Request) {
 	// allowed two first-seen peers to both validate and the later write to remap
 	// the same device.
 	s.spotifyPowerOnMu.Lock()
+
 	existing := s.findExistingDeviceInfoByDeviceID(deviceID)
 	if existing != nil && !sameMargePowerOnIP(existing.IPAddress, peerIP) {
 		s.spotifyPowerOnMu.Unlock()
@@ -280,6 +281,7 @@ func (s *Server) HandleMargePowerOn(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
 	if existing != nil && existing.AccountID == "" {
 		s.spotifyPowerOnMu.Unlock()
 		log.Printf("[Marge] Ignoring power_on metadata for device %s without a canonical account binding",
@@ -318,6 +320,7 @@ func (s *Server) HandleMargePowerOn(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
 	shouldPrime := existing != nil && accountID != "default"
 	s.spotifyPowerOnMu.Unlock()
 
@@ -765,6 +768,7 @@ func (s *Server) HandleMargeAddSource(w http.ResponseWriter, r *http.Request) {
 	s.spotifySourceMu.Lock()
 	resp, err := marge.AddSourceToAccount(s.ds, account, body)
 	s.spotifySourceMu.Unlock()
+
 	if err != nil {
 		log.Printf("[Marge] Failed to add source: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -793,6 +797,7 @@ func (s *Server) HandleMargeDeleteSource(w http.ResponseWriter, r *http.Request)
 	s.spotifySourceMu.Lock()
 	err := marge.RemoveSourceFromAccount(s.ds, account, sourceID)
 	s.spotifySourceMu.Unlock()
+
 	if err != nil {
 		log.Printf("[Marge] Failed to remove source %s: %v", sanitizeLog(sourceID), sanitizeErr(err))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)

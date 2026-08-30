@@ -36,11 +36,15 @@ const (
 )
 
 var (
-	ErrNoAccounts       = errors.New("no Spotify accounts linked")
+	// ErrNoAccounts indicates that no Spotify identity has been linked.
+	ErrNoAccounts = errors.New("no Spotify accounts linked")
+	// ErrAmbiguousAccount indicates that account selection requires an explicit identity.
 	ErrAmbiguousAccount = errors.New("multiple Spotify accounts linked; an explicit account is required")
-	ErrAccountNotFound  = errors.New("Spotify account not found")
-	ErrReauthRequired   = errors.New("Spotify account requires reauthorization")
-	errReconfigured     = errors.New("Spotify service reconfigured during operation")
+	// ErrAccountNotFound indicates that the requested Spotify identity is not linked.
+	ErrAccountNotFound = errors.New("spotify account not found")
+	// ErrReauthRequired indicates that the Spotify identity must be authorized again.
+	ErrReauthRequired = errors.New("spotify account requires reauthorization")
+	errReconfigured   = errors.New("spotify service reconfigured during operation")
 )
 
 // Account represents a stored Spotify account with tokens.
@@ -192,6 +196,7 @@ func (s *Service) snapshotConfig() configSnapshot {
 // BuildAuthorizeURL constructs the Spotify OAuth authorization URL.
 func (s *Service) BuildAuthorizeURL(state string) string {
 	config := s.snapshotConfig()
+
 	params := url.Values{
 		"client_id":     {config.clientID},
 		"response_type": {"code"},
@@ -231,6 +236,7 @@ func (s *Service) ExchangeCode(code string) (AuthorizationExchange, error) {
 
 	accessToken, _ := tokenResp["access_token"].(string)
 	refreshToken, _ := tokenResp["refresh_token"].(string)
+
 	if accessToken == "" {
 		return AuthorizationExchange{}, fmt.Errorf("token exchange returned no access token")
 	}
@@ -249,11 +255,13 @@ func (s *Service) ExchangeCode(code string) (AuthorizationExchange, error) {
 	userID, _ := profile["id"].(string)
 	displayName, _ := profile["display_name"].(string)
 	email, _ := profile["email"].(string)
+
 	if userID == "" {
-		return AuthorizationExchange{}, fmt.Errorf("Spotify profile returned no user ID")
+		return AuthorizationExchange{}, fmt.Errorf("spotify profile returned no user ID")
 	}
 
 	now := time.Now().Unix()
+
 	return AuthorizationExchange{
 		userID:           userID,
 		displayName:      displayName,
@@ -271,16 +279,20 @@ func (s *Service) ExchangeCode(code string) (AuthorizationExchange, error) {
 func (s *Service) StoreAuthorizationExchange(exchange AuthorizationExchange) (LinkedAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.configGeneration != exchange.configGeneration {
 		return LinkedAccount{}, errReconfigured
 	}
 
-	var boseSecret string
-	var accountGeneration uint64
+	var (
+		boseSecret        string
+		accountGeneration uint64
+	)
+
 	refreshToken := exchange.refreshToken
 	if existing := s.accounts[exchange.userID]; existing != nil {
-		boseSecret = existing.BoseSecret
-		accountGeneration = existing.Generation
+		boseSecret, accountGeneration = existing.BoseSecret, existing.Generation
+
 		if refreshToken == "" {
 			refreshToken = existing.RefreshToken
 		}
@@ -291,6 +303,7 @@ func (s *Service) StoreAuthorizationExchange(exchange AuthorizationExchange) (Li
 		if err != nil {
 			return LinkedAccount{}, fmt.Errorf("generate Bose surrogate secret: %w", err)
 		}
+
 		boseSecret = generatedSecret
 	}
 
@@ -311,10 +324,12 @@ func (s *Service) StoreAuthorizationExchange(exchange AuthorizationExchange) (Li
 	}
 
 	next := cloneAccounts(s.accounts)
+
 	next[exchange.userID] = account
 	if err := s.persistAccounts(next); err != nil {
 		return LinkedAccount{}, fmt.Errorf("save accounts: %w", err)
 	}
+
 	s.accounts = next
 
 	log.Printf("[Spotify] Account linked: %s (%s)", exchange.displayName, exchange.userID)
@@ -429,85 +444,39 @@ func (s *Service) refreshAccessTokenForUser(userID string) error {
 	if account == nil {
 		return ErrAccountNotFound
 	}
+
 	if account.ReauthRequired || account.RefreshToken == "" {
 		return ErrReauthRequired
 	}
 
-	data := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {account.RefreshToken},
-	}
-
-	req, err := http.NewRequest(http.MethodPost, config.tokenURL, strings.NewReader(data.Encode()))
+	refresh, invalidGrant, err := requestAccessTokenRefresh(config, account.RefreshToken)
 	if err != nil {
 		return err
 	}
 
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.SetBasicAuth(config.clientID, config.clientSecret)
-
-	resp, err := config.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("refresh request: %w", err)
-	}
-
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var spotifyError struct {
-			Error string `json:"error"`
-		}
-		_ = json.Unmarshal(body, &spotifyError)
-
-		if spotifyError.Error == "invalid_grant" {
-			transitioned, err := s.markReauthRequired(userID, config.generation, account.Generation)
-			if err != nil {
-				return fmt.Errorf("mark account for reauthorization: %w", err)
-			}
-			if transitioned {
-				return ErrReauthRequired
-			}
-
-			return nil
+	if invalidGrant {
+		transitioned, transitionErr := s.markReauthRequired(userID, config.generation, account.Generation)
+		if transitionErr != nil {
+			return fmt.Errorf("mark account for reauthorization: %w", transitionErr)
 		}
 
-		if spotifyError.Error == "" {
-			spotifyError.Error = "unknown_error"
+		if transitioned {
+			return ErrReauthRequired
 		}
 
-		return fmt.Errorf("token refresh failed (%d): %s", resp.StatusCode, spotifyError.Error)
+		return nil
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
+	account.AccessToken = refresh.accessToken
 
-	accessToken, _ := result["access_token"].(string)
-	if accessToken == "" {
-		return fmt.Errorf("token refresh returned no access token")
-	}
-
-	expiresIn, _ := result["expires_in"].(float64)
-	if expiresIn == 0 {
-		expiresIn = 3600
-	}
-
-	account.AccessToken = accessToken
-	account.ExpiresAt = time.Now().Unix() + int64(expiresIn)
-	if newRefresh, ok := result["refresh_token"].(string); ok && newRefresh != "" {
-		account.RefreshToken = newRefresh
+	account.ExpiresAt = time.Now().Unix() + int64(refresh.expiresIn)
+	if refresh.refreshToken != "" {
+		account.RefreshToken = refresh.refreshToken
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.configGeneration != config.generation {
 		return errReconfigured
 	}
@@ -516,6 +485,7 @@ func (s *Service) refreshAccessTokenForUser(userID string) error {
 	if current == nil {
 		return ErrAccountNotFound
 	}
+
 	if current.Generation != account.Generation {
 		// A newer account transition won the race. The refresh token may be
 		// unchanged across reauthorization, so generation is the stale fence.
@@ -524,18 +494,97 @@ func (s *Service) refreshAccessTokenForUser(userID string) error {
 
 	account.Generation++
 	next := cloneAccounts(s.accounts)
+
 	next[userID] = account
 	if err := s.persistAccounts(next); err != nil {
 		return fmt.Errorf("save accounts: %w", err)
 	}
+
 	s.accounts = next
 
 	return nil
 }
 
+type tokenRefreshResult struct {
+	accessToken  string
+	refreshToken string
+	expiresIn    float64
+}
+
+func requestAccessTokenRefresh(config configSnapshot, refreshToken string) (tokenRefreshResult, bool, error) {
+	data := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+	}
+
+	req, err := http.NewRequest(http.MethodPost, config.tokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return tokenRefreshResult{}, false, err
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(config.clientID, config.clientSecret)
+
+	resp, err := config.httpClient.Do(req)
+	if err != nil {
+		return tokenRefreshResult{}, false, fmt.Errorf("refresh request: %w", err)
+	}
+
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return tokenRefreshResult{}, false, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var spotifyError struct {
+			Error string `json:"error"`
+		}
+
+		_ = json.Unmarshal(body, &spotifyError)
+
+		if spotifyError.Error == "invalid_grant" {
+			return tokenRefreshResult{}, true, nil
+		}
+
+		if spotifyError.Error == "" {
+			spotifyError.Error = "unknown_error"
+		}
+
+		return tokenRefreshResult{}, false, fmt.Errorf("token refresh failed (%d): %s", resp.StatusCode, spotifyError.Error)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return tokenRefreshResult{}, false, fmt.Errorf("parse response: %w", err)
+	}
+
+	accessToken, _ := result["access_token"].(string)
+	if accessToken == "" {
+		return tokenRefreshResult{}, false, fmt.Errorf("token refresh returned no access token")
+	}
+
+	expiresIn, _ := result["expires_in"].(float64)
+	if expiresIn == 0 {
+		expiresIn = 3600
+	}
+
+	newRefreshToken, _ := result["refresh_token"].(string)
+
+	return tokenRefreshResult{
+		accessToken:  accessToken,
+		refreshToken: newRefreshToken,
+		expiresIn:    expiresIn,
+	}, false, nil
+}
+
 func (s *Service) markReauthRequired(userID string, configGeneration, accountGeneration uint64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.configGeneration != configGeneration {
 		return false, errReconfigured
 	}
@@ -544,6 +593,7 @@ func (s *Service) markReauthRequired(userID string, configGeneration, accountGen
 	if current == nil {
 		return false, ErrAccountNotFound
 	}
+
 	if current.Generation != accountGeneration {
 		return false, nil
 	}
@@ -555,9 +605,11 @@ func (s *Service) markReauthRequired(userID string, configGeneration, accountGen
 	nextAccount.ExpiresAt = 0
 	nextAccount.ReauthRequired = true
 	nextAccount.Generation++
+
 	if err := s.persistAccounts(next); err != nil {
 		return false, err
 	}
+
 	s.accounts = next
 
 	return true, nil
@@ -567,10 +619,12 @@ func (s *Service) markReauthRequired(userID string, configGeneration, accountGen
 // Multi-account callers must use GetFreshTokenForUser.
 func (s *Service) GetFreshToken() (accessToken, username string, err error) {
 	s.mu.RLock()
+
 	if len(s.accounts) == 0 {
 		s.mu.RUnlock()
 		return "", "", ErrNoAccounts
 	}
+
 	if len(s.accounts) != 1 {
 		s.mu.RUnlock()
 		return "", "", ErrAmbiguousAccount
@@ -581,6 +635,7 @@ func (s *Service) GetFreshToken() (accessToken, username string, err error) {
 		userID = id
 		break
 	}
+
 	s.mu.RUnlock()
 
 	return s.GetFreshTokenForUser(userID)
@@ -595,6 +650,7 @@ func (s *Service) GetFreshTokenForUser(userID string) (accessToken, username str
 	if account == nil {
 		return "", "", ErrAccountNotFound
 	}
+
 	if account.ReauthRequired || account.RefreshToken == "" {
 		return "", "", ErrReauthRequired
 	}
@@ -607,10 +663,12 @@ func (s *Service) GetFreshTokenForUser(userID string) (accessToken, username str
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	account = s.accounts[userID]
 	if account == nil {
 		return "", "", ErrAccountNotFound
 	}
+
 	if account.ReauthRequired || account.AccessToken == "" {
 		return "", "", ErrReauthRequired
 	}
@@ -634,6 +692,7 @@ func (s *Service) GetAccounts() []AccountSummary {
 			ReauthRequired: a.ReauthRequired,
 		})
 	}
+
 	sort.Slice(result, func(i, j int) bool { return result[i].UserID < result[j].UserID })
 
 	return result
@@ -667,19 +726,23 @@ func (s *Service) AdoptBoseSecret(userID, secret string) error {
 	if current == nil {
 		return ErrAccountNotFound
 	}
+
 	if current.BoseSecret != "" {
 		if current.BoseSecret != secret {
 			return fmt.Errorf("existing Bose surrogate differs")
 		}
+
 		return nil
 	}
 
 	next := cloneAccounts(s.accounts)
 	next[userID].BoseSecret = secret
+
 	next[userID].Generation++
 	if err := s.persistAccounts(next); err != nil {
 		return err
 	}
+
 	s.accounts = next
 
 	return nil
@@ -689,6 +752,7 @@ func isBoseSurrogateSecret(secret string) bool {
 	if len(secret) != len("bs-")+32 || !strings.HasPrefix(secret, "bs-") {
 		return false
 	}
+
 	_, err := hex.DecodeString(strings.TrimPrefix(secret, "bs-"))
 
 	return err == nil
@@ -702,6 +766,7 @@ func (s *Service) GetUserIDBySecret(secret string) (string, bool) {
 	if secret == "" {
 		return "", false
 	}
+
 	for _, a := range s.accounts {
 		if a.BoseSecret == secret {
 			return a.UserID, true
@@ -743,6 +808,7 @@ func (s *Service) ResolveEntityForUser(userID, uri string) (name, imageURL strin
 	if err != nil {
 		return "", "", fmt.Errorf("get token: %w", err)
 	}
+
 	config := s.snapshotConfig()
 
 	apiURL := fmt.Sprintf("%s/%s/%s", config.apiBase, entityType, entityID)
@@ -756,7 +822,7 @@ func (s *Service) ResolveEntityForUser(userID, uri string) (name, imageURL strin
 
 	resp, err := config.httpClient.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("API request: %w", err)
+		return "", "", fmt.Errorf("API request failed: %w", err)
 	}
 
 	defer func() {
@@ -854,9 +920,9 @@ func cloneAccount(account *Account) *Account {
 		return nil
 	}
 
-	copy := *account
+	accountCopy := *account
 
-	return &copy
+	return &accountCopy
 }
 
 func cloneAccounts(accounts map[string]*Account) map[string]*Account {
@@ -869,25 +935,29 @@ func cloneAccounts(accounts map[string]*Account) map[string]*Account {
 }
 
 func (s *Service) persistAccounts(accounts map[string]*Account) error {
-	jsonData, err := json.MarshalIndent(accounts, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal accounts: %w", err)
+	jsonData, marshalErr := json.MarshalIndent(accounts, "", "  ")
+	if marshalErr != nil {
+		return fmt.Errorf("marshal accounts: %w", marshalErr)
 	}
 
 	dir := filepath.Join(s.dataDir, "spotify")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create directory: %w", err)
+	if mkdirErr := os.MkdirAll(dir, 0700); mkdirErr != nil {
+		return fmt.Errorf("create directory: %w", mkdirErr)
 	}
-	if err := os.Chmod(dir, 0700); err != nil {
-		return fmt.Errorf("secure directory: %w", err)
+
+	if chmodErr := os.Chmod(dir, 0700); chmodErr != nil {
+		return fmt.Errorf("secure directory: %w", chmodErr)
 	}
 
 	path := filepath.Join(dir, "accounts.json")
-	tmp, err := os.CreateTemp(dir, ".accounts-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temporary file: %w", err)
+
+	tmp, createErr := os.CreateTemp(dir, ".accounts-*.tmp")
+	if createErr != nil {
+		return fmt.Errorf("create temporary file: %w", createErr)
 	}
+
 	tmpPath := tmp.Name()
+
 	removeTemp := true
 	defer func() {
 		if removeTemp {
@@ -895,38 +965,46 @@ func (s *Service) persistAccounts(accounts map[string]*Account) error {
 		}
 	}()
 
-	if err := tmp.Chmod(0600); err != nil {
+	if chmodErr := tmp.Chmod(0600); chmodErr != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("secure temporary file: %w", err)
+		return fmt.Errorf("secure temporary file: %w", chmodErr)
 	}
+
 	if _, err := tmp.Write(jsonData); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write temporary file: %w", err)
 	}
+
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("sync temporary file: %w", err)
 	}
+
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary file: %w", err)
 	}
+
 	if err := s.renameFile(tmpPath, path); err != nil {
 		return fmt.Errorf("replace accounts file: %w", err)
 	}
+
 	removeTemp = false
 
-	dirHandle, err := s.openDirectory(dir)
-	if err != nil {
-		log.Printf("[Spotify] Warning: accounts file replaced but opening its directory for durability sync failed: %v", err)
+	dirHandle, openErr := s.openDirectory(dir)
+	if openErr != nil {
+		log.Printf("[Spotify] Warning: accounts file replaced but opening its directory for durability sync failed: %v", openErr)
 
 		return nil
 	}
+
 	if err := dirHandle.Sync(); err != nil {
 		_ = dirHandle.Close()
+
 		log.Printf("[Spotify] Warning: accounts file replaced but directory durability sync failed: %v", err)
 
 		return nil
 	}
+
 	if err := dirHandle.Close(); err != nil {
 		log.Printf("[Spotify] Warning: accounts file replaced but closing its directory after durability sync failed: %v", err)
 	}
@@ -951,20 +1029,25 @@ func (s *Service) load() error {
 	if err := json.Unmarshal(jsonData, &accounts); err != nil {
 		return fmt.Errorf("unmarshal accounts: %w", err)
 	}
+
 	if accounts == nil {
 		accounts = make(map[string]*Account)
 	}
+
 	for userID, account := range accounts {
 		if account == nil {
 			return fmt.Errorf("account %q is null", userID)
 		}
+
 		if account.UserID == "" {
 			account.UserID = userID
 		}
+
 		if account.UserID != userID {
 			return fmt.Errorf("account key %q does not match user_id %q", userID, account.UserID)
 		}
 	}
+
 	if err := os.Chmod(path, 0600); err != nil {
 		return fmt.Errorf("secure accounts file: %w", err)
 	}

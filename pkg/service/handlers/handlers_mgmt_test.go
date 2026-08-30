@@ -369,7 +369,8 @@ func TestHandleMgmtSpotifyConfirm(t *testing.T) {
 }
 
 func hasSpotifySourceForUser(sources []models.ConfiguredSource, userID string) bool {
-	for _, source := range sources {
+	for i := range sources {
+		source := &sources[i]
 		if isSpotifyConfiguredSource(source) && source.SourceKey.Account == userID && source.Secret != "" && source.SecretType == constants.CredentialTypeTokenV3 {
 			return true
 		}

@@ -88,8 +88,9 @@ func readSpotifyTokenRequest(r *http.Request) (spotifyTokenRequest, error) {
 	if err != nil {
 		return spotifyTokenRequest{}, err
 	}
+
 	if len(body) > maxSpotifyTokenRequestBytes {
-		return spotifyTokenRequest{}, fmt.Errorf("Spotify token request exceeds %d bytes", maxSpotifyTokenRequestBytes)
+		return spotifyTokenRequest{}, fmt.Errorf("spotify token request exceeds %d bytes", maxSpotifyTokenRequestBytes)
 	}
 
 	var request spotifyTokenRequest
@@ -204,6 +205,7 @@ func (s *Server) HandleBoseAmazonToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleBoseSpotifyToken(w http.ResponseWriter, r *http.Request) {
 	deviceID := chi.URLParam(r, "deviceID")
 	log.Printf("[Spotify Proxy] Token request for device %s", sanitizeLog(deviceID))
+
 	if !isTrustedSpotifyOAuthClient(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
@@ -230,12 +232,15 @@ func (s *Server) HandleBoseSpotifyToken(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		log.Printf("[Spotify Proxy] Device ownership resolution failed for %s: %s", sanitizeLog(deviceID), sanitizeErr(err))
 		http.Error(w, "Spotify account binding unavailable", http.StatusConflict)
+
 		return
 	}
-	if err := validateSpotifyDeviceClient(r, binding); err != nil {
+
+	if clientErr := validateSpotifyDeviceClient(r, binding); clientErr != nil {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
+
 	linked, err := s.validateSpotifyBinding(binding, tokenReq.secret())
 	if err != nil {
 		http.Error(w, "Invalid Spotify credential", http.StatusUnauthorized)
@@ -250,6 +255,7 @@ func (s *Server) writeSpotifyAccessToken(w http.ResponseWriter, svc *spotify.Ser
 	if err != nil {
 		log.Printf("[Spotify Proxy] Token unavailable for user %s: %s", sanitizeLog(userID), sanitizeErr(err))
 		http.Error(w, "Failed to get fresh token", http.StatusBadGateway)
+
 		return
 	}
 

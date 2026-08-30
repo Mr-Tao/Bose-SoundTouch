@@ -154,24 +154,30 @@ func (s *Server) HandleMgmtSpotifyInit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"spotify not configured"}`, http.StatusServiceUnavailable)
 		return
 	}
+
 	clientID, clientSecret, _ := s.GetSpotifyConfig()
 	if err := ValidateSpotifyAuthorizationConfig(clientID, clientSecret, s.EffectiveSpotifyRedirectURI()); err != nil {
 		log.Printf("[Mgmt] Spotify authorization preflight failed: %s", sanitizeErr(err))
 		http.Error(w, `{"error":"spotify configuration is incomplete or invalid"}`, http.StatusPreconditionFailed)
+
 		return
 	}
 
 	accountID := r.URL.Query().Get("account")
+
 	state, session, err := s.newSpotifyOAuthTransaction(accountID)
 	if err != nil {
 		log.Printf("[Mgmt] Spotify authorization could not start: %s", sanitizeErr(err))
 		http.Error(w, `{"error":"valid explicit Marge account required"}`, http.StatusBadRequest)
+
 		return
 	}
+
 	redirectURL, err := spotifyOAuthBootstrapURL(s.EffectiveSpotifyRedirectURI(), state, session)
 	if err != nil {
 		log.Printf("[Mgmt] Spotify authorization bootstrap URL failed: %s", sanitizeErr(err))
 		http.Error(w, `{"error":"spotify callback configuration is invalid"}`, http.StatusPreconditionFailed)
+
 		return
 	}
 
@@ -191,6 +197,7 @@ func spotifyOAuthBootstrapURL(callbackURI, state, session string) (string, error
 	if err != nil {
 		return "", err
 	}
+
 	parsed.Path = "/mgmt/spotify/start"
 	parsed.RawPath = ""
 	parsed.RawQuery = url.Values{"state": {state}, "session": {session}}.Encode()
@@ -226,12 +233,14 @@ func (s *Server) HandleMgmtSpotifyStart(w http.ResponseWriter, r *http.Request) 
 	s.mu.RLock()
 	svc := s.spotifyService
 	s.mu.RUnlock()
+
 	if svc == nil {
 		http.Error(w, "Spotify integration not configured", http.StatusServiceUnavailable)
 		return
 	}
 
 	state := r.URL.Query().Get("state")
+
 	session := r.URL.Query().Get("session")
 	if err := s.bootstrapSpotifyOAuthTransaction(state, session); err != nil {
 		http.Error(w, "Invalid or already used Spotify authorization bootstrap", http.StatusBadRequest)
@@ -243,6 +252,7 @@ func (s *Server) HandleMgmtSpotifyStart(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Spotify callback configuration is invalid", http.StatusPreconditionFailed)
 		return
 	}
+
 	setSpotifyOAuthCookie(w, state, session, callbackURI.Scheme == "https", int(s.spotifyOAuthTTL.Seconds()))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -251,14 +261,17 @@ func (s *Server) HandleMgmtSpotifyStart(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) consumeSpotifyOAuthBrowserTransaction(w http.ResponseWriter, r *http.Request) (spotifyOAuthTransaction, error) {
 	state := r.URL.Query().Get("state")
+
 	cookie, err := r.Cookie(spotifyOAuthCookieName(state))
 	if err != nil {
 		return spotifyOAuthTransaction{}, errSpotifyOAuthSession
 	}
+
 	transaction, err := s.consumeSpotifyOAuthTransaction(state, cookie.Value)
 	if err != nil {
 		return spotifyOAuthTransaction{}, err
 	}
+
 	setSpotifyOAuthCookie(w, state, "", cookie.Secure, -1)
 
 	return transaction, nil
@@ -289,11 +302,14 @@ func (s *Server) commitAndPublishSpotifyAuthorization(svc *spotify.Service, tran
 		s.spotifySourceMu.Unlock()
 		return spotify.LinkedAccount{}, spotifySourcePublicationResult{}, err
 	}
+
 	if s.spotifyOAuthAfterStore != nil {
 		s.spotifyOAuthAfterStore()
 	}
+
 	publication, err := s.bridgeSpotifyToMargeLocked(transaction, linked)
 	s.spotifySourceMu.Unlock()
+
 	if err == nil {
 		s.notifyDevicesChanged()
 	}
@@ -322,6 +338,7 @@ func (s *Server) HandleMgmtSpotifyCallback(w http.ResponseWriter, r *http.Reques
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`<html><body><h1>Spotify Authorization Failed</h1><p>Invalid, expired, or already used authorization state.</p></body></html>`))
+
 		return
 	}
 
@@ -348,22 +365,29 @@ func (s *Server) HandleMgmtSpotifyCallback(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusInternalServerError)
+
 		if linked.UserID == "" {
 			log.Printf("[Mgmt] Spotify callback failed: %v", err)
+
 			_, _ = w.Write([]byte(`<html><body><h1>Error</h1><p>Token exchange failed</p></body></html>`))
 		} else {
 			log.Printf("[Mgmt] Spotify callback bridge failed: %s", sanitizeErr(err))
+
 			_, _ = w.Write([]byte(`<html><body><h1>Error</h1><p>Spotify account was linked, but source registration failed.</p></body></html>`))
 		}
+
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/html")
+
 	if publication.Pending != 0 || publication.Unverified != 0 {
 		count := publication.Pending + publication.Unverified
 		_, _ = w.Write([]byte(`<html><body><h1>Spotify Connected</h1><p>The source was stored, but publication remains unverified on ` + strconv.Itoa(count) + ` speaker(s).</p><p>You can close this window.</p></body></html>`))
+
 		return
 	}
+
 	_, _ = w.Write([]byte(`<html><body><h1>Spotify Connected</h1><p>The source was stored and published to ` + strconv.Itoa(publication.Confirmed) + ` speaker(s). You can close this window.</p></body></html>`))
 }
 
@@ -401,11 +425,13 @@ func (s *Server) HandleMgmtSpotifyConfirm(w http.ResponseWriter, r *http.Request
 			log.Printf("[Mgmt] Spotify confirm bridge failed: %s", sanitizeErr(err))
 			http.Error(w, `{"error":"source registration failed"}`, http.StatusInternalServerError)
 		}
+
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+
 	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"ok":          true,
 		"publication": publication,
@@ -424,6 +450,7 @@ func (s *Server) bridgeSpotifyToMarge(transaction spotifyOAuthTransaction, accou
 	s.spotifySourceMu.Lock()
 	result, err := s.bridgeSpotifyToMargeLocked(transaction, account)
 	s.spotifySourceMu.Unlock()
+
 	if err == nil {
 		s.notifyDevicesChanged()
 	}
@@ -436,19 +463,22 @@ func (s *Server) bridgeSpotifyToMarge(transaction spotifyOAuthTransaction, accou
 // the caller's responsibility after releasing the ownership lock.
 func (s *Server) bridgeSpotifyToMargeLocked(transaction spotifyOAuthTransaction, account spotify.LinkedAccount) (spotifySourcePublicationResult, error) {
 	accountID := transaction.MargeAccountID
+
 	result := spotifySourcePublicationResult{}
 	if accountID == "" || accountID == "default" || account.UserID == "" || account.BoseSecret == "" {
 		return result, fmt.Errorf("incomplete account binding")
 	}
+
 	if !s.hasMargeAccount(accountID) {
-		return result, fmt.Errorf("Marge account no longer exists")
+		return result, fmt.Errorf("marge account no longer exists")
 	}
 
 	if !s.spotifyOAuthPublicationCurrent(transaction) {
 		return result, fmt.Errorf("%w before source publication", errSpotifyOAuthSuperseded)
 	}
+
 	if !s.spotifyLinkedIdentityCurrent(account) {
-		return result, fmt.Errorf("Spotify identity changed before source publication")
+		return result, fmt.Errorf("spotify identity changed before source publication")
 	}
 
 	log.Printf("[Spotify Bridge] Registering Spotify user %s in Marge for account %s", sanitizeLog(account.UserID), sanitizeLog(accountID))
@@ -462,16 +492,19 @@ func (s *Server) bridgeSpotifyToMargeLocked(transaction spotifyOAuthTransaction,
 	if err != nil {
 		return result, fmt.Errorf("list devices: %w", err)
 	}
+
 	if !s.spotifyLinkedIdentityCurrent(account) {
-		return result, fmt.Errorf("Spotify identity changed during source publication")
+		return result, fmt.Errorf("spotify identity changed during source publication")
 	}
 
 	type publicationResult struct {
 		device models.ServiceDeviceInfo
 		err    error
 	}
+
 	results := make(chan publicationResult, len(allDevices))
 	pending := 0
+
 	for i := range allDevices {
 		dev := &allDevices[i]
 		if dev.AccountID != accountID {
@@ -480,11 +513,14 @@ func (s *Server) bridgeSpotifyToMargeLocked(transaction spotifyOAuthTransaction,
 
 		if dev.IPAddress == "" {
 			log.Printf("[Spotify Bridge] Speaker %s has no address; source inventory remains pending", sanitizeLog(dev.Name))
+
 			result.Pending++
+
 			continue
 		}
 
 		pending++
+
 		go func(d models.ServiceDeviceInfo) {
 			results <- publicationResult{device: d, err: s.publishSpotifyAccountToSpeaker(d, account)}
 		}(*dev)
@@ -494,14 +530,17 @@ func (s *Server) bridgeSpotifyToMargeLocked(transaction spotifyOAuthTransaction,
 		publication := <-results
 		if publication.err != nil {
 			log.Printf("[Spotify Bridge] Speaker %s source publication remains unverified: %v", sanitizeLog(publication.device.Name), publication.err)
+
 			result.Unverified++
 		} else {
 			log.Printf("[Spotify Bridge] Speaker %s confirmed the exact ready Spotify source", sanitizeLog(publication.device.Name))
+
 			result.Confirmed++
 		}
 	}
+
 	if !s.spotifyLinkedIdentityCurrent(account) {
-		return result, fmt.Errorf("Spotify identity changed before source publication completed")
+		return result, fmt.Errorf("spotify identity changed before source publication completed")
 	}
 
 	return result, nil
@@ -511,9 +550,11 @@ func (s *Server) spotifyLinkedIdentityCurrent(expected spotify.LinkedAccount) bo
 	s.mu.RLock()
 	svc := s.spotifyService
 	s.mu.RUnlock()
+
 	if svc == nil {
 		return false
 	}
+
 	current, ok := svc.GetLinkedAccount(expected.UserID)
 
 	return ok && current.BoseSecret == expected.BoseSecret
@@ -523,9 +564,11 @@ func (s *Server) spotifyLinkedAccountCurrent(expected spotify.LinkedAccount) boo
 	s.mu.RLock()
 	svc := s.spotifyService
 	s.mu.RUnlock()
+
 	if svc == nil {
 		return false
 	}
+
 	current, ok := svc.GetLinkedAccount(expected.UserID)
 
 	return ok && current.BoseSecret == expected.BoseSecret && current.Generation == expected.Generation
@@ -533,26 +576,30 @@ func (s *Server) spotifyLinkedAccountCurrent(expected spotify.LinkedAccount) boo
 
 func (s *Server) publishSpotifyAccountToSpeaker(device models.ServiceDeviceInfo, account spotify.LinkedAccount) error {
 	if !s.spotifyPublicationBindingCurrent(device, account) {
-		return fmt.Errorf("Marge Spotify credential binding changed before speaker publication")
+		return fmt.Errorf("marge Spotify credential binding changed before speaker publication")
 	}
 
 	cfg := client.DefaultConfig()
 	cfg.Host = device.IPAddress
 	cfg.Timeout = 5 * time.Second
 	c := client.NewClient(cfg)
+
 	creds := models.NewSpotifyOAuthCredentials(account.UserID, account.BoseSecret, account.DisplayName)
 	if err := c.SetMusicServiceOAuthAccount(creds); err != nil {
 		errs := &models.ErrorsResponse{}
 		if !errors.As(err, &errs) {
 			return err
 		}
+
 		unsupported := false
+
 		for _, speakerErr := range errs.Errors {
 			if speakerErr.Value == 1029 {
 				unsupported = true
 				break
 			}
 		}
+
 		if !unsupported {
 			return err
 		}
@@ -569,11 +616,13 @@ func (s *Server) publishSpotifyAccountToSpeaker(device models.ServiceDeviceInfo,
 	if err != nil {
 		return fmt.Errorf("read back speaker sources: %w", err)
 	}
+
 	for _, source := range sources.SourceItem {
 		if source.IsSpotify() && source.Status.IsReady() && source.SourceAccount == account.UserID {
 			if !s.spotifyPublicationBindingCurrent(device, account) {
-				return fmt.Errorf("Marge Spotify credential binding changed during speaker publication")
+				return fmt.Errorf("marge Spotify credential binding changed during speaker publication")
 			}
+
 			return nil
 		}
 	}
@@ -585,10 +634,12 @@ func (s *Server) spotifyPublicationBindingCurrent(device models.ServiceDeviceInf
 	if device.AccountID == "" || device.DeviceID == "" {
 		return false
 	}
+
 	sources, err := s.ds.GetConfiguredSources(device.AccountID, device.DeviceID)
 	if err != nil {
 		return false
 	}
+
 	binding, err := bindingFromSources(device.AccountID, device.DeviceID, sources)
 
 	return err == nil && binding.UserID == account.UserID && binding.Secret == account.BoseSecret
@@ -688,12 +739,16 @@ func (s *Server) HandleMgmtPrimeDevice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
 	result := s.PrimeDeviceWithSpotify(deviceIP)
+
 	status := http.StatusOK
 	if result.Outcome != "confirmed" {
 		status = http.StatusConflict
 	}
+
 	w.WriteHeader(status)
+
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		log.Printf("[Mgmt] Failed to encode Spotify priming result: %v", err)
 	}

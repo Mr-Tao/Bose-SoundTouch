@@ -49,8 +49,9 @@ type spotifySourceMutex struct {
 }
 
 func (m *spotifySourceMutex) Lock() {
-	observer := m.observe
 	var call uint64
+
+	observer := m.observe
 	if observer != nil {
 		call = m.sequence.Add(1)
 		observer(call, false)
@@ -1085,6 +1086,7 @@ func (s *Server) ReinitSpotifyService() {
 	if redirectURI == "" {
 		redirectURI = s.EffectiveSpotifyRedirectURI()
 	}
+
 	if err := ValidateSpotifyAuthorizationConfig(clientID, clientSecret, redirectURI); err != nil {
 		log.Printf("[Spotify] Service not reinitialized: %s", sanitizeErr(err))
 		return
@@ -1093,9 +1095,11 @@ func (s *Server) ReinitSpotifyService() {
 	s.mu.RLock()
 	svc := s.spotifyService
 	s.mu.RUnlock()
+
 	if svc != nil {
 		svc.Reconfigure(clientID, clientSecret, redirectURI)
 		log.Printf("[Spotify] Service reconfigured")
+
 		return
 	}
 
@@ -1509,6 +1513,19 @@ type SpotifyPrimeResult struct {
 	Detail         string `json:"detail,omitempty"`
 }
 
+type spotifyPrimeAttempt struct {
+	accountID      string
+	deviceID       string
+	userID         string
+	host           string
+	port           string
+	username       string
+	accessToken    string
+	linked         spotify.LinkedAccount
+	info           spotify.ZeroConfInfo
+	readbackDelays []time.Duration
+}
+
 // PrimeDeviceWithSpotify verifies or establishes one speaker's active Spotify
 // identity. Concurrent requests for the same target share one operation.
 func (s *Server) PrimeDeviceWithSpotify(deviceIP string) SpotifyPrimeResult {
@@ -1516,120 +1533,85 @@ func (s *Server) PrimeDeviceWithSpotify(deviceIP string) SpotifyPrimeResult {
 		return s.primeDeviceWithSpotify(deviceIP), nil
 	})
 
-	return value.(SpotifyPrimeResult)
+	result, ok := value.(SpotifyPrimeResult)
+	if !ok {
+		panic(fmt.Sprintf("unexpected Spotify prime result type %T", value))
+	}
+
+	return result
 }
 
 func (s *Server) primeDeviceWithSpotify(deviceIP string) SpotifyPrimeResult {
 	result := SpotifyPrimeResult{DeviceIP: deviceIP, Outcome: "failed"}
+	attempt, detail := s.prepareSpotifyPrime(deviceIP)
+	result.DeviceID = attempt.deviceID
+	result.UserID = attempt.userID
 
-	s.mu.RLock()
-	svc := s.spotifyService
-	readbackDelays := append([]time.Duration(nil), s.spotifyPrimeReadbackDelays...)
-	s.mu.RUnlock()
+	if detail != "" {
+		result.Detail = detail
 
-	if svc == nil {
-		result.Detail = "Spotify service not configured"
-		return result
-	}
-
-	host := deviceIP
-	port := "8200"
-	if parsedHost, parsedPort, err := net.SplitHostPort(deviceIP); err == nil {
-		host = parsedHost
-		port = parsedPort
-	}
-
-	accountID, deviceID := s.resolvePairedAccount(deviceIP, host)
-	result.DeviceID = deviceID
-	if accountID == "" || deviceID == "" {
-		result.Detail = "speaker has no exact Marge account binding"
 		return result
 	}
 
-	sources, err := s.ds.GetConfiguredSources(accountID, deviceID)
-	if err != nil {
-		result.Detail = "configured sources unavailable"
-		return result
-	}
-	binding, err := bindingFromSources(accountID, deviceID, sources)
-	if err != nil {
-		result.Detail = "Spotify source ownership unavailable"
-		return result
-	}
-	linked, err := s.validateSpotifyBinding(binding, binding.Secret)
-	if err != nil {
-		result.Detail = "Spotify source does not match a linked identity"
-		return result
-	}
-	result.UserID = linked.UserID
-
-	accessToken, username, err := svc.GetFreshTokenForUser(linked.UserID)
-	if err != nil {
-		log.Printf("[Spotify Watchdog] Failed to get fresh token for %s: %v", sanitizeLog(deviceIP), err)
-		result.Detail = "Spotify token unavailable"
-		return result
-	}
-	currentLinked, ok := svc.GetLinkedAccount(linked.UserID)
-	if !ok || currentLinked.BoseSecret != linked.BoseSecret {
-		result.Detail = "Spotify identity changed while obtaining a token"
-		return result
-	}
-	linked = currentLinked
-
-	info, err := spotify.ZeroConfFetchInfo(host, port)
-	if err != nil {
-		result.Detail = "ZeroConf getInfo failed"
-		return result
-	}
-	if info.ActiveUser != "" && info.ActiveUser != username {
-		result.Detail = "speaker has a different active Spotify user"
-		return result
-	}
-
-	log.Printf("[Spotify Watchdog] Priming %s with Spotify user %s", sanitizeLog(deviceIP), sanitizeLog(username))
+	log.Printf("[Spotify Watchdog] Priming %s with Spotify user %s", sanitizeLog(deviceIP), sanitizeLog(attempt.username))
 	s.spotifySourceMu.Lock()
-	if !s.spotifyPrimeOwnershipCurrent(accountID, deviceID, linked) {
+	if !s.spotifyPrimeOwnershipCurrent(attempt.accountID, attempt.deviceID, attempt.linked) {
 		s.spotifySourceMu.Unlock()
+
 		result.Detail = "Spotify source ownership changed before credential write"
+
 		return result
 	}
+
 	result.WriteAttempted = true
-	pushErr := s.pushSpotifyTokenToDevice(deviceIP, info, username, accessToken)
+	pushErr := s.pushSpotifyTokenToDevice(deviceIP, attempt.info, attempt.username, attempt.accessToken)
 	s.spotifySourceMu.Unlock()
+
 	writeNoOp := errors.Is(pushErr, spotify.ErrAddUserNoOp)
 	if pushErr != nil && !writeNoOp {
 		log.Printf("[Spotify Watchdog] Failed to prime %s: %s", sanitizeLog(deviceIP), sanitizeErr(pushErr))
+
 		result.Detail = "ZeroConf addUser failed"
+
 		return result
 	}
 
 	readbackStart := time.Now()
-	for _, delay := range readbackDelays {
+	for _, delay := range attempt.readbackDelays {
 		if remaining := delay - time.Since(readbackStart); remaining > 0 {
 			time.Sleep(remaining)
 		}
-		readback, readErr := spotify.ZeroConfFetchInfo(host, port)
+
+		readback, readErr := spotify.ZeroConfFetchInfo(attempt.host, attempt.port)
 		if readErr != nil {
 			continue
 		}
-		if readback.ActiveUser == username {
-			if err := s.refreshSpotifySourceAfterPrime(deviceIP, accountID, deviceID, linked); err != nil {
+
+		if readback.ActiveUser == attempt.username {
+			if refreshErr := s.refreshSpotifySourceAfterPrime(deviceIP, attempt.accountID, attempt.deviceID, attempt.linked); refreshErr != nil {
 				result.Outcome = "unverified"
 				result.Detail = "active user verified but source inventory publication failed"
+
 				return result
 			}
+
 			if writeNoOp {
 				result.Outcome = "unverified"
 				result.Detail = "speaker retained the target user after an unconfirmed addUser no-op"
+
 				return result
 			}
+
 			result.Outcome = "confirmed"
 			result.Detail = "active user and source inventory verified after one credential write"
+
 			return result
 		}
+
 		if readback.ActiveUser != "" {
 			result.Outcome = "failed"
 			result.Detail = "speaker switched to a different active Spotify user"
+
 			return result
 		}
 	}
@@ -1640,7 +1622,76 @@ func (s *Server) primeDeviceWithSpotify(deviceIP string) SpotifyPrimeResult {
 	} else {
 		result.Detail = "credential write was not confirmed by getInfo"
 	}
+
 	return result
+}
+
+func (s *Server) prepareSpotifyPrime(deviceIP string) (spotifyPrimeAttempt, string) {
+	attempt := spotifyPrimeAttempt{
+		host: deviceIP,
+		port: "8200",
+	}
+
+	s.mu.RLock()
+	svc := s.spotifyService
+	attempt.readbackDelays = append([]time.Duration(nil), s.spotifyPrimeReadbackDelays...)
+	s.mu.RUnlock()
+
+	if svc == nil {
+		return attempt, "Spotify service not configured"
+	}
+
+	if parsedHost, parsedPort, splitErr := net.SplitHostPort(deviceIP); splitErr == nil {
+		attempt.host = parsedHost
+		attempt.port = parsedPort
+	}
+
+	attempt.accountID, attempt.deviceID = s.resolvePairedAccount(deviceIP, attempt.host)
+	if attempt.accountID == "" || attempt.deviceID == "" {
+		return attempt, "speaker has no exact Marge account binding"
+	}
+
+	sources, err := s.ds.GetConfiguredSources(attempt.accountID, attempt.deviceID)
+	if err != nil {
+		return attempt, "configured sources unavailable"
+	}
+
+	binding, err := bindingFromSources(attempt.accountID, attempt.deviceID, sources)
+	if err != nil {
+		return attempt, "Spotify source ownership unavailable"
+	}
+
+	linked, err := s.validateSpotifyBinding(binding, binding.Secret)
+	if err != nil {
+		return attempt, "Spotify source does not match a linked identity"
+	}
+
+	attempt.userID = linked.UserID
+
+	attempt.accessToken, attempt.username, err = svc.GetFreshTokenForUser(linked.UserID)
+	if err != nil {
+		log.Printf("[Spotify Watchdog] Failed to get fresh token for %s: %v", sanitizeLog(deviceIP), err)
+
+		return attempt, "Spotify token unavailable"
+	}
+
+	currentLinked, ok := svc.GetLinkedAccount(linked.UserID)
+	if !ok || currentLinked.BoseSecret != linked.BoseSecret {
+		return attempt, "Spotify identity changed while obtaining a token"
+	}
+
+	attempt.linked = currentLinked
+
+	attempt.info, err = spotify.ZeroConfFetchInfo(attempt.host, attempt.port)
+	if err != nil {
+		return attempt, "ZeroConf getInfo failed"
+	}
+
+	if attempt.info.ActiveUser != "" && attempt.info.ActiveUser != attempt.username {
+		return attempt, "speaker has a different active Spotify user"
+	}
+
+	return attempt, ""
 }
 
 // spotifyPrimeOwnershipCurrent must be called with spotifySourceMu held. The
@@ -1651,6 +1702,7 @@ func (s *Server) spotifyPrimeOwnershipCurrent(accountID, deviceID string, expect
 	if err != nil {
 		return false
 	}
+
 	binding, err := bindingFromSources(accountID, deviceID, sources)
 	if err != nil || binding.UserID != expected.UserID || binding.Secret != expected.BoseSecret {
 		return false
@@ -1663,49 +1715,59 @@ func (s *Server) refreshSpotifySourceAfterPrime(deviceIP, accountID, deviceID st
 	s.spotifySourceMu.Lock()
 	if !s.spotifyLinkedAccountCurrent(account) {
 		s.spotifySourceMu.Unlock()
-		return fmt.Errorf("Spotify identity changed before priming source publication")
+		return fmt.Errorf("spotify identity changed before priming source publication")
 	}
+
 	configuredSources, err := s.ds.GetConfiguredSources(accountID, deviceID)
 	if err != nil {
 		s.spotifySourceMu.Unlock()
 		return fmt.Errorf("read authoritative Spotify source: %w", err)
 	}
+
 	binding, err := bindingFromSources(accountID, deviceID, configuredSources)
 	if err != nil || binding.UserID != account.UserID || binding.Secret != account.BoseSecret {
 		s.spotifySourceMu.Unlock()
-		return fmt.Errorf("Spotify source ownership changed before priming publication")
+		return fmt.Errorf("spotify source ownership changed before priming publication")
 	}
-	if _, err := marge.AddSource(s.ds, accountID, account.UserID, strconv.Itoa(constants.SpotifyProviderID), account.BoseSecret, constants.CredentialTypeTokenV3, account.DisplayName); err != nil {
+
+	if _, addErr := marge.AddSource(s.ds, accountID, account.UserID, strconv.Itoa(constants.SpotifyProviderID), account.BoseSecret, constants.CredentialTypeTokenV3, account.DisplayName); addErr != nil {
 		s.spotifySourceMu.Unlock()
-		log.Printf("[Spotify Watchdog] Failed to refresh Spotify source for account %s: %v", sanitizeLog(accountID), err)
-		return err
+		log.Printf("[Spotify Watchdog] Failed to refresh Spotify source for account %s: %v", sanitizeLog(accountID), addErr)
+
+		return addErr
 	}
+
 	if !s.spotifyLinkedAccountCurrent(account) {
 		s.spotifySourceMu.Unlock()
-		return fmt.Errorf("Spotify identity changed during priming source publication")
+		return fmt.Errorf("spotify identity changed during priming source publication")
 	}
 	s.spotifySourceMu.Unlock()
 
 	cfg := client.DefaultConfig()
 	cfg.Host = deviceIP
 	cfg.Timeout = 5 * time.Second
+
 	c := client.NewClient(cfg)
-	if err := c.NotifySourcesUpdated(deviceID); err != nil {
-		log.Printf("[Spotify Watchdog] sourcesUpdated notification for %s failed: %v", sanitizeLog(deviceIP), err)
-		return err
+	if notifyErr := c.NotifySourcesUpdated(deviceID); notifyErr != nil {
+		log.Printf("[Spotify Watchdog] sourcesUpdated notification for %s failed: %v", sanitizeLog(deviceIP), notifyErr)
+		return notifyErr
 	}
+
 	sources, err := c.GetSources()
 	if err != nil {
 		log.Printf("[Spotify Watchdog] /sources readback for %s failed: %v", sanitizeLog(deviceIP), err)
 		return err
 	}
+
 	found := false
+
 	for _, source := range sources.GetReadySpotifySources() {
 		if source.SourceAccount == account.UserID {
 			found = true
 			break
 		}
 	}
+
 	if !found {
 		return fmt.Errorf("speaker source inventory does not contain a ready Spotify source for the linked identity")
 	}
@@ -1716,11 +1778,13 @@ func (s *Server) refreshSpotifySourceAfterPrime(deviceIP, accountID, deviceID st
 	s.spotifySourceMu.Lock()
 	current := s.spotifyPrimeOwnershipCurrent(accountID, deviceID, account)
 	s.spotifySourceMu.Unlock()
+
 	if !current {
-		return fmt.Errorf("Spotify identity or source ownership changed during priming readback")
+		return fmt.Errorf("spotify identity or source ownership changed during priming readback")
 	}
 
 	s.notifyDevicesChanged()
+
 	return nil
 }
 

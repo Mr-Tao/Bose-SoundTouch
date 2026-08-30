@@ -72,6 +72,7 @@ func IsSensitiveRecordingPath(requestPath string) bool {
 		if !strings.HasPrefix(requestPath, prefix) {
 			continue
 		}
+
 		switch strings.TrimPrefix(requestPath, prefix) {
 		case "init", "start", "confirm", "callback":
 			return true
@@ -352,6 +353,7 @@ func (r *Recorder) Record(category string, req *http.Request, res *http.Response
 	if r.BaseDir == "" {
 		return nil
 	}
+
 	if IsSensitiveRecordingPath(req.URL.Path) {
 		return nil
 	}

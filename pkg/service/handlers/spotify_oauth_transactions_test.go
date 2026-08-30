@@ -442,8 +442,8 @@ func TestSpotifyOAuthCommitAndPublicationShareOwnershipBoundary(t *testing.T) {
 		t.Fatalf("authorization reacquired spotifySourceMu before publication: %+v", event)
 	default:
 	}
-	if s.spotifySourceMu.Mutex.TryLock() {
-		s.spotifySourceMu.Mutex.Unlock()
+	if s.spotifySourceMu.TryLock() {
+		s.spotifySourceMu.Unlock()
 		t.Fatal("spotifySourceMu was not held at the post-store publication boundary")
 	}
 	if _, ok := svc.GetLinkedAccount("linked-user"); !ok {

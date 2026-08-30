@@ -189,6 +189,7 @@ func isAlwaysSensitive(header string) bool {
 	// token/secret headers and common app/API key spellings as credentials even
 	// when a vendor adds its own prefix or separator convention.
 	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(header))
+
 	return strings.Contains(normalized, "token") ||
 		strings.Contains(normalized, "secret") ||
 		strings.Contains(normalized, "credential") ||

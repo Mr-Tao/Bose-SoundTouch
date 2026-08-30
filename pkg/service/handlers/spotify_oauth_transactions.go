@@ -11,11 +11,11 @@ import (
 )
 
 var (
-	errSpotifyOAuthStateInvalid = errors.New("Spotify OAuth state is invalid or already used")
-	errSpotifyOAuthStateExpired = errors.New("Spotify OAuth state expired")
-	errSpotifyOAuthSession      = errors.New("Spotify OAuth browser session does not match")
-	errSpotifyOAuthBootstrap    = errors.New("Spotify OAuth browser bootstrap is invalid or already used")
-	errSpotifyOAuthSuperseded   = errors.New("Spotify OAuth transaction was superseded")
+	errSpotifyOAuthStateInvalid = errors.New("spotify OAuth state is invalid or already used")
+	errSpotifyOAuthStateExpired = errors.New("spotify OAuth state expired")
+	errSpotifyOAuthSession      = errors.New("spotify OAuth browser session does not match")
+	errSpotifyOAuthBootstrap    = errors.New("spotify OAuth browser bootstrap is invalid or already used")
+	errSpotifyOAuthSuperseded   = errors.New("spotify OAuth transaction was superseded")
 )
 
 const maxSpotifyOAuthTransactions = 128
@@ -30,13 +30,14 @@ type spotifyOAuthTransaction struct {
 
 func (s *Server) newSpotifyOAuthTransaction(accountID string) (state, session string, err error) {
 	if !s.hasMargeAccount(accountID) {
-		return "", "", fmt.Errorf("Marge account %q not found", accountID)
+		return "", "", fmt.Errorf("marge account %q not found", accountID)
 	}
 
 	random := make([]byte, 64)
 	if _, err := io.ReadFull(s.spotifyOAuthRandom, random); err != nil {
 		return "", "", fmt.Errorf("generate OAuth transaction: %w", err)
 	}
+
 	state = hex.EncodeToString(random[:32])
 	session = hex.EncodeToString(random[32:])
 	now := time.Now()
@@ -46,15 +47,20 @@ func (s *Server) newSpotifyOAuthTransaction(accountID string) (state, session st
 	// longer replace the account's configured Spotify source.
 	s.spotifySourceMu.Lock()
 	defer s.spotifySourceMu.Unlock()
+
 	s.spotifyOAuthMu.Lock()
 	defer s.spotifyOAuthMu.Unlock()
+
 	s.pruneSpotifyOAuthTransactionsLocked(now)
+
 	if len(s.spotifyOAuthTransactions) >= maxSpotifyOAuthTransactions {
 		return "", "", fmt.Errorf("too many pending Spotify OAuth transactions")
 	}
+
 	if _, exists := s.spotifyOAuthTransactions[state]; exists {
 		return "", "", fmt.Errorf("generated duplicate OAuth state")
 	}
+
 	generation := s.spotifyOAuthGenerations[accountID] + 1
 	s.spotifyOAuthGenerations[accountID] = generation
 	s.spotifyOAuthTransactions[state] = spotifyOAuthTransaction{
@@ -73,19 +79,23 @@ func (s *Server) bootstrapSpotifyOAuthTransaction(state, session string) error {
 	}
 
 	now := time.Now()
+
 	s.spotifyOAuthMu.Lock()
 	defer s.spotifyOAuthMu.Unlock()
 
 	transaction, ok := s.spotifyOAuthTransactions[state]
 	s.pruneSpotifyOAuthTransactionsLocked(now)
+
 	if !ok || !transaction.ExpiresAt.After(now) || transaction.Bootstrapped ||
 		!spotifyOAuthSessionMatches(transaction, session) {
 		return errSpotifyOAuthBootstrap
 	}
+
 	if !s.spotifyOAuthPublicationCurrentLocked(transaction) {
 		delete(s.spotifyOAuthTransactions, state)
 		return errSpotifyOAuthSuperseded
 	}
+
 	transaction.Bootstrapped = true
 	s.spotifyOAuthTransactions[state] = transaction
 
@@ -98,24 +108,30 @@ func (s *Server) consumeSpotifyOAuthTransaction(state, session string) (spotifyO
 	}
 
 	now := time.Now()
+
 	s.spotifyOAuthMu.Lock()
 	defer s.spotifyOAuthMu.Unlock()
 
 	transaction, ok := s.spotifyOAuthTransactions[state]
 	s.pruneSpotifyOAuthTransactionsLocked(now)
+
 	if !ok {
 		return spotifyOAuthTransaction{}, errSpotifyOAuthStateInvalid
 	}
+
 	if !transaction.ExpiresAt.After(now) {
 		return spotifyOAuthTransaction{}, errSpotifyOAuthStateExpired
 	}
+
 	if !s.spotifyOAuthPublicationCurrentLocked(transaction) {
 		delete(s.spotifyOAuthTransactions, state)
 		return spotifyOAuthTransaction{}, errSpotifyOAuthSuperseded
 	}
+
 	if !transaction.Bootstrapped || !spotifyOAuthSessionMatches(transaction, session) {
 		return spotifyOAuthTransaction{}, errSpotifyOAuthSession
 	}
+
 	delete(s.spotifyOAuthTransactions, state)
 
 	return transaction, nil
@@ -150,10 +166,12 @@ func (s *Server) spotifyOAuthPublicationCurrentLocked(transaction spotifyOAuthTr
 func (s *Server) supersedeSpotifyOAuthTransactions() {
 	s.spotifySourceMu.Lock()
 	defer s.spotifySourceMu.Unlock()
+
 	s.spotifyOAuthMu.Lock()
 	for accountID := range s.spotifyOAuthGenerations {
 		s.spotifyOAuthGenerations[accountID]++
 	}
+
 	s.spotifyOAuthTransactions = make(map[string]spotifyOAuthTransaction)
 	s.spotifyOAuthMu.Unlock()
 }
@@ -167,6 +185,7 @@ func (s *Server) hasMargeAccount(accountID string) bool {
 	if err != nil {
 		return false
 	}
+
 	for i := range devices {
 		if devices[i].AccountID == accountID {
 			return true
