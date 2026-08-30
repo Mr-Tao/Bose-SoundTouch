@@ -1,12 +1,15 @@
 import { h } from 'preact';
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
 import { resolvedZoneMember } from '../devicePresentation.mjs';
 import {
+    isCurrentZoneRefresh,
     physicalMemberMetadata,
+    zoneRefreshContext,
     zoneMemberCountSummary,
     zoneMemberMetadata,
+    zoneTopologyVersion,
 } from '../zonePresentation.mjs';
 
 const html = htm.bind(h);
@@ -32,17 +35,29 @@ export function Zone({ deviceId, devices }) {
     const [candidates, setCandidates] = useState({});
     const [loading, setLoading] = useState(true);
     const [showPicker, setShowPicker] = useState(false);
+    const topologyVersion = zoneTopologyVersion(devices?.[deviceId]?.zone);
+    const refreshContext = useRef(null);
+    refreshContext.current = zoneRefreshContext(
+        refreshContext.current,
+        deviceId,
+        topologyVersion,
+    );
 
     function refresh() {
+        const context = refreshContext.current;
+        const generation = ++context.generation;
         Promise.all([api.zone(deviceId), api.zoneCandidates(deviceId)])
             .then(([zoneResp, candidatesResp]) => {
+                if (!isCurrentZoneRefresh(context, refreshContext.current, generation)) return;
                 if (zoneResp.success) setZone(zoneResp.data);
                 if (candidatesResp.success) setCandidates(candidatesResp.data || {});
             })
-            .finally(() => setLoading(false));
+            .finally(() => {
+                if (isCurrentZoneRefresh(context, refreshContext.current, generation)) setLoading(false);
+            });
     }
 
-    useEffect(() => { refresh(); }, [deviceId]);
+    useEffect(() => { refresh(); }, [deviceId, topologyVersion]);
 
     async function addDevice(slaveId) {
         setShowPicker(false);

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -853,14 +854,41 @@ func TestHandleGetZoneProjectsLogicalStereoMember(t *testing.T) {
 // removing the last member (empty set == dissolve) worked.
 func TestHandleZoneRemove_UsesRemoveZoneSlave(t *testing.T) {
 	var gotPath, gotBody string
+	var mutated atomic.Bool
 
 	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		b, _ := io.ReadAll(r.Body)
-		gotBody = string(b)
-		w.WriteHeader(http.StatusOK)
+		switch r.URL.Path {
+		case "/getZone":
+			w.Header().Set("Content-Type", "application/xml")
+			if mutated.Load() {
+				_, _ = w.Write([]byte(`<zone master="MASTERHW01"/>`))
+			} else {
+				_, _ = w.Write([]byte(`<zone master="MASTERHW01"><member ipaddress="192.0.2.20">SLAVEHW02</member></zone>`))
+			}
+		case "/removeZoneSlave":
+			gotPath = r.URL.Path
+			b, _ := io.ReadAll(r.Body)
+			gotBody = string(b)
+			mutated.Store(true)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer speaker.Close()
+	slaveSpeaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/getZone" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		if mutated.Load() {
+			_, _ = w.Write([]byte(`<zone master="SLAVEHW02"/>`))
+		} else {
+			_, _ = w.Write([]byte(`<zone master="MASTERHW01"><member ipaddress="192.0.2.20">SLAVEHW02</member></zone>`))
+		}
+	}))
+	defer slaveSpeaker.Close()
 
 	app := NewWebApp()
 
@@ -872,7 +900,10 @@ func TestHandleZoneRemove_UsesRemoveZoneSlave(t *testing.T) {
 	master.SetStatus(&webtypes.DeviceStatus{IsConnected: true, LastActivity: time.Now()})
 	app.AddDevice("192.0.2.10", master)
 
-	slave := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{Name: "Slave", DeviceID: "SLAVEHW02"})
+	slave := webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: slaveSpeaker.URL}),
+		&models.DeviceInfo{Name: "Slave", DeviceID: "SLAVEHW02"},
+	)
 	app.AddDevice("192.0.2.20", slave)
 
 	req := httptest.NewRequest("POST", "/api/control/devices/192.0.2.10/zone/remove/192.0.2.20", nil)
@@ -905,13 +936,27 @@ func TestHandleZoneRemove_UsesRemoveZoneSlave(t *testing.T) {
 // in its /getZone, which we resolve to the master's registry entry.
 func TestHandleZoneLeave_UsesRemoveZoneSlave(t *testing.T) {
 	var masterPath, masterBody string
+	var mutated atomic.Bool
 
 	// Master speaker captures the /removeZoneSlave call.
 	masterSpeaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		masterPath = r.URL.Path
-		b, _ := io.ReadAll(r.Body)
-		masterBody = string(b)
-		w.WriteHeader(http.StatusOK)
+		switch r.URL.Path {
+		case "/getZone":
+			w.Header().Set("Content-Type", "application/xml")
+			if mutated.Load() {
+				_, _ = w.Write([]byte(`<zone master="MASTERHW01"/>`))
+			} else {
+				_, _ = w.Write([]byte(`<zone master="MASTERHW01"><member ipaddress="192.0.2.20">SLAVEHW02</member></zone>`))
+			}
+		case "/removeZoneSlave":
+			masterPath = r.URL.Path
+			b, _ := io.ReadAll(r.Body)
+			masterBody = string(b)
+			mutated.Store(true)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer masterSpeaker.Close()
 
@@ -919,6 +964,10 @@ func TestHandleZoneLeave_UsesRemoveZoneSlave(t *testing.T) {
 	slaveSpeaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/getZone" {
 			w.Header().Set("Content-Type", "application/xml")
+			if mutated.Load() {
+				_, _ = w.Write([]byte(`<zone master="SLAVEHW02"/>`))
+				return
+			}
 			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8" ?>
 <zone master="MASTERHW01">
 	<member ipaddress="192.0.2.20">SLAVEHW02</member>

@@ -28,6 +28,43 @@ function memberIPAddress(member) {
     return representative?.ip || direct;
 }
 
+export function zoneTopologyVersion(zone) {
+    if (!zone) return 'standalone';
+
+    const members = (zone.members || []).map(member => {
+        const deviceIds = [...(member?.deviceIds || [])].sort();
+        const physicalMembers = (member?.physicalMembers || []).map(physical => [
+            physical?.deviceId || '',
+            physical?.role || '',
+        ]).sort((left, right) => left.join('\0').localeCompare(right.join('\0')));
+
+        return [
+            member?.controlId || '',
+            member?.kind || '',
+            deviceIds,
+            physicalMembers,
+        ];
+    }).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+
+    return JSON.stringify([
+        zone.masterControlId || '',
+        zone.masterDeviceId || '',
+        members,
+    ]);
+}
+
+export function zoneRefreshContext(current, deviceId, topologyVersion) {
+    if (current?.deviceId === deviceId && current?.topologyVersion === topologyVersion) {
+        return current;
+    }
+
+    return { deviceId, topologyVersion, generation: 0 };
+}
+
+export function isCurrentZoneRefresh(context, current, generation) {
+    return context === current && generation === context.generation;
+}
+
 export function zoneCardPresentation(zone) {
     const members = zone?.members || [];
     const memberCount = count(zone?.memberCount, members.length);

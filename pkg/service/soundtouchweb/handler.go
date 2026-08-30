@@ -1018,9 +1018,13 @@ func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	zoneReq.AddMember(slaveHwID, slaveIP)
+	affected, expectations, cachedMasterExpectation := zoneAddMutationPlan(zoneReq, slaveHwID)
+	readbacks := app.prepareZoneMutationReadbacks(affected, expectations, cachedMasterExpectation)
 
 	w.Header().Set("Content-Type", "application/json")
-	app.sendControlResponse(w, masterConn.Client.SetZone(zoneReq), "Device added to zone")
+	app.sendZoneMutationResponse(w, app.runZoneMutation(readbacks, func() error {
+		return masterConn.Client.SetZone(zoneReq)
+	}), "Device added to zone")
 }
 
 // HandleZoneRemove removes a slave from the zone.
@@ -1047,6 +1051,13 @@ func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 
 	masterHwID := masterConn.DeviceInfo.DeviceID
 	slaveHwID := slaveConn.DeviceInfo.DeviceID
+	zone, err := masterConn.Client.GetZone()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	affected, expectations, cachedMasterExpectation := zoneRemoveMutationPlan(zone, masterHwID, slaveHwID)
+	readbacks := app.prepareZoneMutationReadbacks(affected, expectations, cachedMasterExpectation)
 
 	// Remove a single member with the dedicated /removeZoneSlave endpoint.
 	// Rebuilding the zone via /setZone with the remaining members does not
@@ -1055,7 +1066,9 @@ func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 	// several members appeared to do nothing (#511). /removeZoneSlave targets the
 	// specific member.
 	w.Header().Set("Content-Type", "application/json")
-	app.sendControlResponse(w, masterConn.Client.RemoveZoneSlave(masterHwID, slaveHwID, slaveIP), "Device removed from zone")
+	app.sendZoneMutationResponse(w, app.runZoneMutation(readbacks, func() error {
+		return masterConn.Client.RemoveZoneSlave(masterHwID, slaveHwID, slaveIP)
+	}), "Device removed from zone")
 }
 
 // HandleZoneDissolve dissolves the zone, making all devices standalone.
@@ -1072,11 +1085,23 @@ func (app *WebApp) HandleZoneDissolve(w http.ResponseWriter, r *http.Request) {
 		app.sendError(w, "Device not ready", http.StatusInternalServerError)
 		return
 	}
+	zone, err := masterConn.Client.GetZone()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	zoneReq := models.NewZoneRequest(masterConn.DeviceInfo.DeviceID)
+	affected, expectations, cachedMasterExpectation := zoneDissolveMutationPlan(
+		zone,
+		masterConn.DeviceInfo.DeviceID,
+	)
+	readbacks := app.prepareZoneMutationReadbacks(affected, expectations, cachedMasterExpectation)
 
 	w.Header().Set("Content-Type", "application/json")
-	app.sendControlResponse(w, masterConn.Client.SetZone(zoneReq), "Zone dissolved")
+	app.sendZoneMutationResponse(w, app.runZoneMutation(readbacks, func() error {
+		return masterConn.Client.SetZone(zoneReq)
+	}), "Zone dissolved")
 }
 
 // HandleZoneLeave removes the calling device from its zone (slave
@@ -1114,6 +1139,17 @@ func (app *WebApp) HandleZoneLeave(w http.ResponseWriter, r *http.Request) {
 		app.sendError(w, "Master device not available", http.StatusInternalServerError)
 		return
 	}
+	masterZone, err := masterConn.Client.GetZone()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	affected, expectations, cachedMasterExpectation := zoneRemoveMutationPlan(
+		masterZone,
+		zone.Master,
+		slaveConn.DeviceInfo.DeviceID,
+	)
+	readbacks := app.prepareZoneMutationReadbacks(affected, expectations, cachedMasterExpectation)
 
 	// Drop this slave with the dedicated /removeZoneSlave endpoint sent to the
 	// master. Rebuilding the zone via /setZone with the remaining members does
@@ -1121,9 +1157,9 @@ func (app *WebApp) HandleZoneLeave(w http.ResponseWriter, r *http.Request) {
 	// when the resulting set is empty), so leaving a 3+ device zone did nothing
 	// (#511). zone.Master is the master's hwID.
 	w.Header().Set("Content-Type", "application/json")
-	app.sendControlResponse(w,
-		masterConn.Client.RemoveZoneSlave(zone.Master, slaveConn.DeviceInfo.DeviceID, slaveIP),
-		"Left zone")
+	app.sendZoneMutationResponse(w, app.runZoneMutation(readbacks, func() error {
+		return masterConn.Client.RemoveZoneSlave(zone.Master, slaveConn.DeviceInfo.DeviceID, slaveIP)
+	}), "Left zone")
 }
 
 // HandleGetZoneCandidates returns every registered physical device, for the

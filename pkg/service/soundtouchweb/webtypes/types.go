@@ -237,11 +237,24 @@ func (c *DeviceConnection) ApplyPolledZone(
 	queriedDeviceID string,
 	zone *models.ZoneInfo,
 ) bool {
+	_, changed := c.ApplyPolledZoneChanged(generation, queriedDeviceID, zone)
+
+	return changed
+}
+
+// ApplyPolledZoneChanged distinguishes an authoritative current readback from
+// one that also changed the browser projection. Callers which verify a write
+// need the former even when the speaker already reports the expected topology.
+func (c *DeviceConnection) ApplyPolledZoneChanged(
+	generation uint64,
+	queriedDeviceID string,
+	zone *models.ZoneInfo,
+) (bool, bool) {
 	c.zoneMu.Lock()
 	defer c.zoneMu.Unlock()
 
 	if generation != c.zoneGeneration || zone == nil {
-		return false
+		return false, false
 	}
 
 	master := strings.TrimSpace(zone.Master)
@@ -249,10 +262,32 @@ func (c *DeviceConnection) ApplyPolledZone(
 	if queriedDeviceID == "" ||
 		(master == "" && len(zone.Members) != 0) ||
 		(master != "" && master != queriedDeviceID) {
-		return false
+		return false, false
 	}
 
-	return c.replaceZone(normalizeZone(zone))
+	return true, c.replaceZone(normalizeZone(zone))
+}
+
+// ApplyZoneMemberReadback accepts a generation-fenced member observation after
+// a topology mutation. A member cannot own an authoritative master projection,
+// so a current observation clears only that connection's obsolete master cache.
+func (c *DeviceConnection) ApplyZoneMemberReadback(
+	generation uint64,
+	queriedDeviceID string,
+	zone *models.ZoneInfo,
+) (bool, bool) {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	queriedDeviceID = strings.TrimSpace(queriedDeviceID)
+	if generation != c.zoneGeneration || zone == nil || queriedDeviceID == "" ||
+		strings.TrimSpace(zone.Master) == "" ||
+		strings.TrimSpace(zone.Master) == queriedDeviceID ||
+		!zone.IsMember(queriedDeviceID) {
+		return false, false
+	}
+
+	return true, c.replaceZone(nil)
 }
 
 func (c *DeviceConnection) replaceZone(zone *models.ZoneInfo) bool {
