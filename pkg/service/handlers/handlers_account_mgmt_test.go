@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gesellix/bose-soundtouch/pkg/models"
@@ -325,6 +326,8 @@ func TestHandleMgmtAccountDetails_Sources(t *testing.T) {
 			DisplayName: "Audio",
 			SourceName:  "Audio",
 			Name:        "Audio",
+			Secret:      "mgmt-source-secret-8d795b",
+			SecretType:  "token_version_3",
 			SourceKey: struct {
 				Type    string `xml:"type,attr"`
 				Account string `xml:"account,attr"`
@@ -395,6 +398,16 @@ func TestHandleMgmtAccountDetails_Sources(t *testing.T) {
 	if gesellixSource == nil {
 		t.Fatal("gesellix source not found")
 	} else {
+		if strings.Contains(w.Body.String(), "mgmt-source-secret-8d795b") {
+			t.Fatal("management account response exposed configured-source secret")
+		}
+		if gesellixSource.Credential.Value != "" {
+			t.Errorf("expected redacted credential value, got %q", gesellixSource.Credential.Value)
+		}
+		if gesellixSource.Credential.Type != "token_version_3" {
+			t.Errorf("expected credential type metadata to be retained, got %q", gesellixSource.Credential.Type)
+		}
+
 		// It should have fallen back to Account name "gesellix" because DisplayName was generic "Audio"
 		if gesellixSource.DisplayName != "gesellix" {
 			t.Errorf("Expected display_name 'gesellix', got '%s'", gesellixSource.DisplayName)

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -183,6 +185,10 @@ func (s *Server) HandleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	spotifyClientID := s.spotifyClientID
 	spotifyClientSecret := s.spotifyClientSecret
 	spotifyRedirectURI := s.spotifyRedirectURI
+	spotifyEffectiveRedirectURI := spotifyRedirectURI
+	if spotifyEffectiveRedirectURI == "" {
+		spotifyEffectiveRedirectURI = serverURL + "/mgmt/spotify/callback"
+	}
 	amazonConfigured := s.amazonService != nil
 	amazonClientID := s.amazonClientID
 	amazonClientSecret := s.amazonClientSecret
@@ -215,6 +221,12 @@ func (s *Server) HandleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	if spotifyClientSecret != "" {
 		spotifyClientSecret = "***"
 	}
+	spotifyRedirectValid := true
+	spotifyRedirectError := ""
+	if err := ValidateSpotifyAuthorizationConfig(spotifyClientID, spotifyClientSecret, spotifyEffectiveRedirectURI); err != nil {
+		spotifyRedirectValid = false
+		spotifyRedirectError = err.Error()
+	}
 
 	if amazonClientSecret != "" {
 		amazonClientSecret = "***"
@@ -235,57 +247,108 @@ func (s *Server) HandleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(map[string]interface{}{
-		"server_url":                    serverURL,
-		"server_url_resolved_ip":        serverURLResolvedIP,
-		"server_url_resolve_error":      serverURLResolveError,
-		"https_server_url":              httpsServerURL,
-		"https_server_url_override":     httpsOverride,
-		"https_listener_port":           httpsListenerPort,
-		"https_443_check_skipped":       probe443.Skipped,
-		"https_443_not_applicable":      probe443.NotApplicable,
-		"https_443_reason":              probe443.Reason,
-		"tls_extra_hosts":               s.persistedTLSExtraHosts(),
-		"tls_san_hosts":                 s.ExpectedHosts(),
-		"https_443_localhost_reachable": probe443.Localhost.Reachable,
-		"https_443_localhost_error":     probe443.Localhost.Error,
-		"https_443_lan_reachable":       probe443.LAN.Reachable,
-		"https_443_lan_error":           probe443.LAN.Error,
-		"https_443_lan_host":            probe443.LANHost,
-		"discovery_interval":            discoveryInterval,
-		"discovery_enabled":             discoveryEnabled,
-		"update_check_interval":         updateCheckInterval,
-		"update_check_enabled":          updateCheckEnabled,
-		"dns_enabled":                   dnsEnabled,
-		"dns_running":                   dnsRunning,
-		"dns_actual_bind":               actualBind,
-		"dns_upstream":                  strings.Join(dnsUpstream, ","),
-		"dns_bind_addr":                 dnsBindAddr,
-		"internal_paths":                internalPaths,
-		"redact_logs":                   redact,
-		"log_bodies":                    logBody,
-		"record_interactions":           record,
-		"shortcuts":                     shortcuts,
-		"spotify_configured":            spotifyConfigured,
-		"spotify_client_id":             spotifyClientID,
-		"spotify_client_secret":         spotifyClientSecret,
-		"spotify_redirect_uri":          spotifyRedirectURI,
-		"amazon_configured":             amazonConfigured,
-		"amazon_client_id":              amazonClientID,
-		"amazon_client_secret":          amazonClientSecret,
-		"amazon_redirect_uri":           amazonRedirectURI,
-		"tts_configured":                ttsConfigured,
-		"tts_provider":                  ttsProvider,
-		"tts_google_api_key":            ttsGoogleAPIKey,
-		"tts_app_key":                   ttsAppKey,
-		"tts_language":                  ttsLanguage,
-		"tts_voice":                     ttsVoice,
-		"tts_volume":                    ttsVolume,
-		"default_landing":               defaultLanding,
-		"admin_area_auth":               adminAreaAuth,
+		"server_url":                     serverURL,
+		"server_url_resolved_ip":         serverURLResolvedIP,
+		"server_url_resolve_error":       serverURLResolveError,
+		"https_server_url":               httpsServerURL,
+		"https_server_url_override":      httpsOverride,
+		"https_listener_port":            httpsListenerPort,
+		"https_443_check_skipped":        probe443.Skipped,
+		"https_443_not_applicable":       probe443.NotApplicable,
+		"https_443_reason":               probe443.Reason,
+		"tls_extra_hosts":                s.persistedTLSExtraHosts(),
+		"tls_san_hosts":                  s.ExpectedHosts(),
+		"https_443_localhost_reachable":  probe443.Localhost.Reachable,
+		"https_443_localhost_error":      probe443.Localhost.Error,
+		"https_443_lan_reachable":        probe443.LAN.Reachable,
+		"https_443_lan_error":            probe443.LAN.Error,
+		"https_443_lan_host":             probe443.LANHost,
+		"discovery_interval":             discoveryInterval,
+		"discovery_enabled":              discoveryEnabled,
+		"update_check_interval":          updateCheckInterval,
+		"update_check_enabled":           updateCheckEnabled,
+		"dns_enabled":                    dnsEnabled,
+		"dns_running":                    dnsRunning,
+		"dns_actual_bind":                actualBind,
+		"dns_upstream":                   strings.Join(dnsUpstream, ","),
+		"dns_bind_addr":                  dnsBindAddr,
+		"internal_paths":                 internalPaths,
+		"redact_logs":                    redact,
+		"log_bodies":                     logBody,
+		"record_interactions":            record,
+		"shortcuts":                      shortcuts,
+		"spotify_configured":             spotifyConfigured,
+		"spotify_client_id":              spotifyClientID,
+		"spotify_client_secret":          spotifyClientSecret,
+		"spotify_redirect_uri":           spotifyRedirectURI,
+		"spotify_effective_redirect_uri": spotifyEffectiveRedirectURI,
+		"spotify_redirect_uri_valid":     spotifyRedirectValid,
+		"spotify_redirect_uri_error":     spotifyRedirectError,
+		"spotify_authorization_valid":    spotifyRedirectValid,
+		"spotify_authorization_error":    spotifyRedirectError,
+		"amazon_configured":              amazonConfigured,
+		"amazon_client_id":               amazonClientID,
+		"amazon_client_secret":           amazonClientSecret,
+		"amazon_redirect_uri":            amazonRedirectURI,
+		"tts_configured":                 ttsConfigured,
+		"tts_provider":                   ttsProvider,
+		"tts_google_api_key":             ttsGoogleAPIKey,
+		"tts_app_key":                    ttsAppKey,
+		"tts_language":                   ttsLanguage,
+		"tts_voice":                      ttsVoice,
+		"tts_volume":                     ttsVolume,
+		"default_landing":                defaultLanding,
+		"admin_area_auth":                adminAreaAuth,
 	}); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
+}
+
+// ValidateSpotifyAuthorizationConfig validates the complete configuration used
+// for an authorization-code exchange. Startup and management preflight share
+// this path so they cannot disagree about whether linking is safe to start.
+func ValidateSpotifyAuthorizationConfig(clientID, clientSecret, rawURI string) error {
+	if strings.TrimSpace(clientID) == "" {
+		return fmt.Errorf("Spotify client ID is required")
+	}
+	if strings.TrimSpace(clientSecret) == "" {
+		return fmt.Errorf("Spotify client secret is required")
+	}
+
+	return validateSpotifyRedirectURI(rawURI)
+}
+
+func validateSpotifyRedirectURI(rawURI string) error {
+	parsed, err := url.Parse(rawURI)
+	if err != nil || !parsed.IsAbs() || parsed.Hostname() == "" {
+		return fmt.Errorf("redirect URI must be an absolute URL")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("redirect URI must not contain user information")
+	}
+	if parsed.RawQuery != "" {
+		return fmt.Errorf("redirect URI must not contain a query")
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("redirect URI must not contain a fragment")
+	}
+	if parsed.Path != "/mgmt/spotify/callback" {
+		return fmt.Errorf("redirect URI path must be /mgmt/spotify/callback")
+	}
+	if parsed.Scheme == "https" {
+		return nil
+	}
+	if parsed.Scheme != "http" {
+		return fmt.Errorf("redirect URI must use HTTPS")
+	}
+
+	ip := net.ParseIP(parsed.Hostname())
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("HTTP is allowed only for an explicit loopback IP")
+	}
+
+	return nil
 }
 
 // parseDNSUpstreamList splits a comma-separated DNS upstream list into its
@@ -357,7 +420,7 @@ func (s *Server) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		Shortcuts              map[string]int `json:"shortcuts"`
 		SpotifyClientID        string         `json:"spotify_client_id"`
 		SpotifyClientSecret    string         `json:"spotify_client_secret"`
-		SpotifyRedirectURI     string         `json:"spotify_redirect_uri"`
+		SpotifyRedirectURI     *string        `json:"spotify_redirect_uri"`
 		AmazonClientID         string         `json:"amazon_client_id"`
 		AmazonClientSecret     string         `json:"amazon_client_secret"`
 		AmazonRedirectURI      string         `json:"amazon_redirect_uri"`
@@ -423,6 +486,31 @@ func (s *Server) HandleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Invalid update check interval: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	spotifySettingsTouched := settings.SpotifyClientID != "" ||
+		settings.SpotifyClientSecret != "" || settings.SpotifyRedirectURI != nil
+	if spotifySettingsTouched {
+		currentID, currentSecret, currentRedirect := s.GetSpotifyConfig()
+		candidateID := currentID
+		if settings.SpotifyClientID != "" {
+			candidateID = settings.SpotifyClientID
+		}
+		candidateSecret := currentSecret
+		if settings.SpotifyClientSecret != "" && settings.SpotifyClientSecret != "***" {
+			candidateSecret = settings.SpotifyClientSecret
+		}
+		candidateRedirect := currentRedirect
+		if settings.SpotifyRedirectURI != nil {
+			candidateRedirect = strings.TrimSpace(*settings.SpotifyRedirectURI)
+		}
+		if candidateRedirect == "" {
+			candidateRedirect = settings.ServerURL + "/mgmt/spotify/callback"
+		}
+		if err := ValidateSpotifyAuthorizationConfig(candidateID, candidateSecret, candidateRedirect); err != nil {
+			http.Error(w, "Invalid Spotify configuration: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	s.mu.Lock()
@@ -1632,7 +1720,10 @@ func (s *Server) HandleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.ds.DeleteSourceByID(account, device, sourceID); err != nil {
+	s.spotifySourceMu.Lock()
+	err := s.ds.DeleteSourceByID(account, device, sourceID)
+	s.spotifySourceMu.Unlock()
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 
 		return

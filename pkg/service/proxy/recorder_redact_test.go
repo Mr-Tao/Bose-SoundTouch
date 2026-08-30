@@ -85,7 +85,7 @@ func TestRecorder_Redaction(t *testing.T) {
 	}
 }
 
-func TestRecorder_NoRedaction(t *testing.T) {
+func TestRecorder_NoOptionalRedactionStillProtectsCredentialHeaders(t *testing.T) {
 	// Disable async for testing
 	t.Setenv("RECORDER_ASYNC", "false")
 
@@ -99,10 +99,33 @@ func TestRecorder_NoRedaction(t *testing.T) {
 	r.Redact = false // Disable redaction
 
 	req := httptest.NewRequest("GET", "http://example.com/api/test", nil)
-	req.Header.Set("Authorization", "Bearer sensitive-token")
+	requestSecrets := map[string]string{
+		"Authorization":       "Bearer request-authorization-secret",
+		"Proxy-Authorization": "Basic request-proxy-secret",
+		"Cookie":              "session=request-cookie-secret",
+		"X-Application-Key":   "request-app-key-secret",
+		"X-Provider-Token":    "request-token-secret",
+		"X-Client-Secret":     "request-client-secret",
+		"Credentials":         "request-credentials-secret",
+	}
+	for header, value := range requestSecrets {
+		req.Header.Set(header, value)
+	}
+	req.Header.Set("X-Trace-ID", "useful-request-header")
 
 	w := httptest.NewRecorder()
-	w.Header().Set("X-Bose-Token", "sensitive-bose-token")
+	responseSecrets := map[string]string{
+		"Set-Cookie":            "session=response-cookie-secret",
+		"X-Bose-Token":          "response-bose-token-secret",
+		"X-Api_Key":             "response-api-key-secret",
+		"X-Upstream-Secret":     "response-provider-secret",
+		"Application-Token":     "response-app-token-secret",
+		"X-Provider-Credential": "response-credential-secret",
+	}
+	for header, value := range responseSecrets {
+		w.Header().Set(header, value)
+	}
+	w.Header().Set("X-Request-ID", "useful-response-header")
 	_, _ = w.WriteString("hello")
 	res := w.Result()
 	res.Request = req
@@ -124,10 +147,25 @@ func TestRecorder_NoRedaction(t *testing.T) {
 	content, _ := os.ReadFile(recordedFile)
 	contentStr := string(content)
 
-	if !strings.Contains(contentStr, "Bearer sensitive-token") {
-		t.Errorf("Recorded file should contain sensitive Authorization header when Redact=false:\n%s", contentStr)
+	for header, secret := range requestSecrets {
+		if strings.Contains(contentStr, secret) {
+			t.Errorf("recorded request persisted %s with Redact=false:\n%s", header, contentStr)
+		}
+		if !strings.Contains(strings.ToLower(contentStr), strings.ToLower(header)+": [redacted]") {
+			t.Errorf("recorded request omitted redacted %s header:\n%s", header, contentStr)
+		}
 	}
-	if !strings.Contains(contentStr, "sensitive-bose-token") {
-		t.Errorf("Recorded file should contain sensitive X-Bose-Token header when Redact=false:\n%s", contentStr)
+	for header, secret := range responseSecrets {
+		if strings.Contains(contentStr, secret) {
+			t.Errorf("recorded response persisted %s with Redact=false:\n%s", header, contentStr)
+		}
+		if !strings.Contains(strings.ToLower(contentStr), strings.ToLower(header)+": [redacted]") {
+			t.Errorf("recorded response omitted redacted %s header:\n%s", header, contentStr)
+		}
+	}
+	for _, value := range []string{"useful-request-header", "useful-response-header"} {
+		if !strings.Contains(contentStr, value) {
+			t.Errorf("recording lost non-sensitive header %q:\n%s", value, contentStr)
+		}
 	}
 }

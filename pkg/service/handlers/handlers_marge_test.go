@@ -5,12 +5,15 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/datastore"
@@ -1455,8 +1458,11 @@ func TestMargePowerOn(t *testing.T) {
 		if info.ProductSerialNumber != productSerial {
 			t.Errorf("Expected ProductSerialNumber %s, got %s", productSerial, info.ProductSerialNumber)
 		}
-		if info.IPAddress != ipAddress {
-			t.Errorf("Expected IPAddress %s, got %s", ipAddress, info.IPAddress)
+		if parsed := net.ParseIP(info.IPAddress); parsed == nil || !parsed.IsLoopback() {
+			t.Errorf("Expected loopback TCP peer IP, got %s", info.IPAddress)
+		}
+		if info.IPAddress == ipAddress {
+			t.Errorf("power_on persisted untrusted body IP %s", ipAddress)
 		}
 		if info.MacAddress != macAddress {
 			t.Errorf("Expected MacAddress %s, got %s", macAddress, info.MacAddress)
@@ -1465,6 +1471,217 @@ func TestMargePowerOn(t *testing.T) {
 			t.Errorf("Expected DiscoveryMethod power_on, got %s", info.DiscoveryMethod)
 		}
 	})
+}
+
+func TestMargePowerOnRequiresCanonicalPeerBinding(t *testing.T) {
+	ds := datastore.NewDataStore(t.TempDir())
+	server := NewServer(ds, nil, "http://localhost:8001", false, false, false)
+
+	const (
+		accountID = "account-1"
+		deviceID  = "001122334455"
+		storedIP  = "192.0.2.10"
+	)
+
+	if err := ds.SaveDeviceInfo(accountID, deviceID, &models.ServiceDeviceInfo{
+		DeviceID:            deviceID,
+		AccountID:           accountID,
+		ProductCode:         "SoundTouch 10",
+		DeviceSerialNumber:  "device-serial-original",
+		ProductSerialNumber: "product-serial-original",
+		FirmwareVersion:     "1.0.0",
+		IPAddress:           storedIP,
+		MacAddress:          "001122334455",
+		DiscoveryMethod:     "existing",
+	}); err != nil {
+		t.Fatalf("save canonical device: %v", err)
+	}
+
+	original, err := ds.GetDeviceInfo(accountID, deviceID)
+	if err != nil {
+		t.Fatalf("read canonical device: %v", err)
+	}
+
+	primeCalls := make(chan string, 4)
+	server.spotifyPowerOnPrimer = func(host string) {
+		primeCalls <- host
+	}
+
+	payload := func(id, bodyIP, firmware string) string {
+		return fmt.Sprintf(`<device-data>
+			<device id="%s">
+				<serialnumber>device-serial-refreshed</serialnumber>
+				<firmware-version>%s</firmware-version>
+				<product product_code="SoundTouch 20"><serialnumber>product-serial-refreshed</serialnumber></product>
+			</device>
+			<diagnostic-data><device-landscape>
+				<macaddresses><macaddress>AABBCCDDEEFF</macaddress></macaddresses>
+				<ip-address>%s</ip-address>
+			</device-landscape></diagnostic-data>
+		</device-data>`, id, firmware, bodyIP)
+	}
+
+	invoke := func(remoteAddr, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/streaming/support/power_on", strings.NewReader(body))
+		req.RemoteAddr = remoteAddr
+		response := httptest.NewRecorder()
+		server.HandleMargePowerOn(response, req)
+		if response.Code != http.StatusOK {
+			t.Fatalf("power_on status = %d, want %d", response.Code, http.StatusOK)
+		}
+	}
+
+	assertNoPrime := func() {
+		t.Helper()
+		select {
+		case host := <-primeCalls:
+			t.Fatalf("unexpected Spotify prime for %s", host)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	t.Run("known device from mismatched peer", func(t *testing.T) {
+		invoke("198.51.100.22:4321", payload(deviceID, storedIP, "attacker-firmware"))
+
+		after, err := ds.GetDeviceInfo(accountID, deviceID)
+		if err != nil {
+			t.Fatalf("read device after mismatched request: %v", err)
+		}
+		if !reflect.DeepEqual(after, original) {
+			t.Fatalf("mismatched peer rewrote canonical device\n got: %#v\nwant: %#v", after, original)
+		}
+		assertNoPrime()
+	})
+
+	t.Run("known device from matching peer", func(t *testing.T) {
+		invoke(storedIP+":4321", payload(deviceID, "203.0.113.99", "2.0.0"))
+
+		select {
+		case host := <-primeCalls:
+			if host != storedIP {
+				t.Fatalf("prime host = %q, want %q", host, storedIP)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("matching canonical peer did not trigger Spotify priming")
+		}
+
+		after, err := ds.GetDeviceInfo(accountID, deviceID)
+		if err != nil {
+			t.Fatalf("read refreshed device: %v", err)
+		}
+		if after.AccountID != accountID || after.IPAddress != storedIP {
+			t.Fatalf("canonical binding changed: account=%q IP=%q", after.AccountID, after.IPAddress)
+		}
+		if after.FirmwareVersion != "2.0.0" || after.ProductCode != "SoundTouch 20" {
+			t.Fatalf("metadata was not refreshed: %#v", after)
+		}
+	})
+
+	t.Run("unknown device is discovered without priming", func(t *testing.T) {
+		const unknownID = "AABBCCDDEEFF"
+		invoke("198.51.100.40:4321", payload(unknownID, "203.0.113.40", "3.0.0"))
+
+		discovered, err := ds.GetDeviceInfo("default", unknownID)
+		if err != nil {
+			t.Fatalf("read discovered device: %v", err)
+		}
+		if discovered.IPAddress != "198.51.100.40" {
+			t.Fatalf("discovered IP = %q, want TCP peer", discovered.IPAddress)
+		}
+		assertNoPrime()
+
+		invoke("198.51.100.40:9876", payload(unknownID, "203.0.113.41", "3.1.0"))
+		assertNoPrime()
+	})
+
+	t.Run("invalid request never falls back to body IP", func(t *testing.T) {
+		invoke("not-a-valid-remote-address", payload("FFEEDDCCBBAA", "203.0.113.50", "4.0.0"))
+		if discovered := server.findExistingDeviceInfoByDeviceID("FFEEDDCCBBAA"); discovered != nil {
+			t.Fatalf("invalid RemoteAddr persisted device: %#v", discovered)
+		}
+		assertNoPrime()
+
+		invoke(storedIP+":4321", "<not-valid-xml")
+		assertNoPrime()
+	})
+}
+
+func TestMargePowerOnConcurrentDiscoveryCannotRemapDevice(t *testing.T) {
+	ds := datastore.NewDataStore(t.TempDir())
+	server := NewServer(ds, nil, "http://localhost:8001", false, false, false)
+	primeCalls := make(chan string, 2)
+	server.spotifyPowerOnPrimer = func(host string) { primeCalls <- host }
+
+	const deviceID = "CONCURRENT01"
+	type attempt struct {
+		peer     string
+		firmware string
+	}
+	attempts := []attempt{
+		{peer: "192.0.2.10:4100", firmware: "firmware-a"},
+		{peer: "192.0.2.11:4200", firmware: "firmware-b"},
+	}
+	start := make(chan struct{})
+	done := make(chan struct{}, len(attempts))
+	for _, item := range attempts {
+		item := item
+		go func() {
+			<-start
+			body := fmt.Sprintf(`<device-data><device id="%s"><firmware-version>%s</firmware-version><product product_code="SoundTouch 10"/></device><diagnostic-data><device-landscape><ip-address>203.0.113.99</ip-address></device-landscape></diagnostic-data></device-data>`, deviceID, item.firmware)
+			req := httptest.NewRequest(http.MethodPost, "/streaming/support/power_on", strings.NewReader(body))
+			req.RemoteAddr = item.peer
+			server.HandleMargePowerOn(httptest.NewRecorder(), req)
+			done <- struct{}{}
+		}()
+	}
+	close(start)
+	for range attempts {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for concurrent power_on requests")
+		}
+	}
+
+	stored, err := ds.GetDeviceInfo("default", deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored == nil {
+		t.Fatal("concurrent discovery did not persist a device")
+	}
+	winner := -1
+	for i, item := range attempts {
+		host, _, _ := net.SplitHostPort(item.peer)
+		if stored.IPAddress == host {
+			winner = i
+			if stored.FirmwareVersion != item.firmware {
+				t.Fatalf("mixed concurrent metadata: IP=%q firmware=%q", stored.IPAddress, stored.FirmwareVersion)
+			}
+		}
+	}
+	if winner < 0 {
+		t.Fatalf("stored peer %q did not match either normalized socket peer", stored.IPAddress)
+	}
+
+	loser := attempts[1-winner]
+	body := fmt.Sprintf(`<device-data><device id="%s"><firmware-version>second-loser</firmware-version><product product_code="SoundTouch 10"/></device></device-data>`, deviceID)
+	req := httptest.NewRequest(http.MethodPost, "/streaming/support/power_on", strings.NewReader(body))
+	req.RemoteAddr = loser.peer
+	server.HandleMargePowerOn(httptest.NewRecorder(), req)
+	after, err := ds.GetDeviceInfo("default", deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.IPAddress != stored.IPAddress || after.FirmwareVersion != stored.FirmwareVersion {
+		t.Fatalf("second request remapped discovered device: before=%+v after=%+v", stored, after)
+	}
+	select {
+	case host := <-primeCalls:
+		t.Fatalf("default-account discovery was primed for %s", host)
+	default:
+	}
 }
 
 func TestMargeAdvancedFeatures(t *testing.T) {

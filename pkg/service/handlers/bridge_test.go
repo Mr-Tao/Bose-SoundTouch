@@ -72,12 +72,14 @@ func TestSpotifyBridge(t *testing.T) {
 	ss := spotify.NewSpotifyService("client-id", "client-secret", "http://localhost/callback", tmpDir)
 	ss.SetEndpoints(ts.URL+"/token", ts.URL)
 	server.SetSpotifyService(ss)
+	state, session := prepareSpotifyOAuthBrowserSession(t, server, "acc123")
 
 	r := chi.NewRouter()
 	r.Get("/mgmt/spotify/callback", server.HandleMgmtSpotifyCallback)
 
 	// Trigger the callback
-	req := httptest.NewRequest("GET", "/mgmt/spotify/callback?code=fake-code&account=acc123", nil)
+	req := httptest.NewRequest("GET", "/mgmt/spotify/callback?code=fake-code&state="+state+"&account=attacker-account", nil)
+	addSpotifyOAuthSessionCookie(req, state, session)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -155,6 +157,7 @@ func TestSpotifyBridge(t *testing.T) {
 	}
 
 	refreshReq := httptest.NewRequest("POST", "/oauth/device/DEV123/music/musicprovider/15/token/cs3", strings.NewReader(string(body)))
+	refreshReq.RemoteAddr = "127.0.0.1:54321"
 	refreshW := httptest.NewRecorder()
 
 	// Need to register the route for testing

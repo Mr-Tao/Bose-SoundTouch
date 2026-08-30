@@ -187,7 +187,7 @@ func TestRecorder_Record_Sanitization_Account(t *testing.T) {
 	req := &http.Request{
 		Method: "GET",
 		URL: &url.URL{
-			Path: "/marge/accounts/" + accountID + "/full",
+			Path: "/marge/accounts/" + accountID + "/devices",
 		},
 		Header: make(http.Header),
 	}
@@ -197,7 +197,7 @@ func TestRecorder_Record_Sanitization_Account(t *testing.T) {
 		t.Fatalf("Record failed: %v", err)
 	}
 
-	expectedDir := filepath.Join(tmpDir, "interactions", r.SessionID, "self", "marge", "accounts", "{accountId}", "full")
+	expectedDir := filepath.Join(tmpDir, "interactions", r.SessionID, "self", "marge", "accounts", "{accountId}", "devices")
 	if _, err := os.Stat(expectedDir); os.IsNotExist(err) {
 		t.Errorf("Expected directory %s does not exist", expectedDir)
 	}
@@ -210,10 +210,10 @@ func TestRecorder_Record_Sanitization_Account(t *testing.T) {
 	content, _ := os.ReadFile(filepath.Join(expectedDir, files[0].Name()))
 	contentStr := string(content)
 
-	if !strings.Contains(contentStr, "### GET /marge/accounts/{{accountId}}/full") {
+	if !strings.Contains(contentStr, "### GET /marge/accounts/{{accountId}}/devices") {
 		t.Errorf("Expected sanitized comment in .http file, got:\n%s", contentStr)
 	}
-	if !strings.Contains(contentStr, "GET /marge/accounts/{{accountId}}/full") {
+	if !strings.Contains(contentStr, "GET /marge/accounts/{{accountId}}/devices") {
 		t.Errorf("Expected sanitized URL in .http file, got:\n%s", contentStr)
 	}
 	if !strings.Contains(contentStr, "// accountId: "+accountID) {

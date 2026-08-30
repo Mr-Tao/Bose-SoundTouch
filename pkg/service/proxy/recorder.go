@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,6 +18,68 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+var sensitiveRecordingPaths = []string{
+	"/setup/settings",
+	"/api/setup/settings",
+	"/streaming/account",
+	"/streaming/account/login",
+	"/streaming/account/*/full",
+	"/streaming/account/*/sources",
+	"/streaming/account/*/source",
+	"/streaming/account/*/presets",
+	"/streaming/account/*/presets/all",
+	"/streaming/account/*/device/*/presets",
+	"/streaming/account/*/device/*/presets/*",
+	"/streaming/account/*/device/*/preset/*",
+	"/streaming/account/*/device/*/recent",
+	"/streaming/account/*/device/*/recents",
+	"/accounts/*/full",
+	"/accounts/*/sources",
+	"/accounts/*/devices/*/presets",
+	"/accounts/*/devices/*/presets/*",
+	"/accounts/*/devices/*/preset/*",
+	"/accounts/*/devices/*/recents",
+}
+
+// IsSensitiveRecordingPath reports whether an interaction can carry a
+// credential. Recorder.Record enforces this itself so callers cannot bypass
+// the privacy boundary by omitting middleware or disabling optional redaction.
+func IsSensitiveRecordingPath(requestPath string) bool {
+	requestPath = path.Clean("/" + strings.TrimPrefix(requestPath, "/"))
+	for _, segment := range strings.Split(strings.Trim(requestPath, "/"), "/") {
+		lower := strings.ToLower(segment)
+		if lower == "token" || strings.HasSuffix(lower, "_token") || lower == "password" ||
+			strings.Contains(lower, "credential") {
+			return true
+		}
+	}
+
+	for _, pattern := range sensitiveRecordingPaths {
+		for _, prefix := range []string{"", "/marge"} {
+			if matched, _ := path.Match(prefix+pattern, requestPath); matched {
+				return true
+			}
+		}
+	}
+
+	for _, prefix := range []string{
+		"/mgmt/spotify/",
+		"/api/mgmt/spotify/",
+		"/mgmt/amazon/",
+		"/api/mgmt/amazon/",
+	} {
+		if !strings.HasPrefix(requestPath, prefix) {
+			continue
+		}
+		switch strings.TrimPrefix(requestPath, prefix) {
+		case "init", "start", "confirm", "callback":
+			return true
+		}
+	}
+
+	return false
+}
 
 // Recorder handles persisting HTTP interactions as .http files.
 type Recorder struct {
@@ -289,6 +352,9 @@ func (r *Recorder) Record(category string, req *http.Request, res *http.Response
 	if r.BaseDir == "" {
 		return nil
 	}
+	if IsSensitiveRecordingPath(req.URL.Path) {
+		return nil
+	}
 
 	sanitizedSegments, replacements := r.getSanitizedSegments(req.URL.Path)
 
@@ -502,7 +568,7 @@ func (r *Recorder) writeRequestWithEnrichment(buf *bytes.Buffer, req *http.Reque
 	fmt.Fprintf(buf, "Host: %s\n", req.Host)
 
 	for k, vv := range req.Header {
-		if r.Redact && isSensitive(k) {
+		if isAlwaysSensitive(k) || r.Redact && isSensitive(k) {
 			fmt.Fprintf(buf, "%s: [REDACTED]\n", k)
 			continue
 		}
@@ -555,7 +621,7 @@ func (r *Recorder) writeResponseWithEnrichment(buf *bytes.Buffer, res *http.Resp
 	buf.WriteString("    // Headers:\n")
 
 	for k, vv := range res.Header {
-		if r.Redact && isSensitive(k) {
+		if isAlwaysSensitive(k) || r.Redact && isSensitive(k) {
 			fmt.Fprintf(buf, "    // %s: [REDACTED]\n", k)
 			continue
 		}

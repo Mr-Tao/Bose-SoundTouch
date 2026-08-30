@@ -126,6 +126,7 @@ GET      /mgmt/amazon/token                                           handlers.(
 GET      /mgmt/devices/{deviceId}/events                              handlers.(*Server).HandleMgmtDeviceEvents-fm
 GET      /mgmt/spotify/accounts                                       handlers.(*Server).HandleMgmtSpotifyAccounts-fm
 GET      /mgmt/spotify/callback                                       handlers.(*Server).HandleMgmtSpotifyCallback-fm
+GET      /mgmt/spotify/start                                          handlers.(*Server).HandleMgmtSpotifyStart-fm
 GET      /mgmt/spotify/token                                          handlers.(*Server).HandleMgmtSpotifyToken-fm
 GET      /setup/account-id-suggestions/{deviceId}                     handlers.(*Server).HandleAccountIDSuggestions-fm
 GET      /setup/ca.crt                                                handlers.(*Server).HandleGetCACert-fm

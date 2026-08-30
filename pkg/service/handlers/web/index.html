@@ -414,6 +414,7 @@
                             <label for="spotify-redirect-uri" style="display: inline-block; width: 130px">Redirect URI:</label>
                             <input type="text" id="spotify-redirect-uri" placeholder="<your-service-url>/mgmt/spotify/callback" style="width: 280px"/>
                         </div>
+                        <div id="spotify-effective-redirect" style="margin: 4px 0 0 134px; font-size: 0.85em"></div>
                         <div id="spotify-config-status" style="margin-top: 5px; font-size: 0.9em">Checking configuration...</div>
                     </div>
                 </details>
@@ -1656,7 +1657,7 @@
             <div style="display: flex; gap: 10px; align-items: center;">
                 <label for="account-selector">Account:</label>
                 <select id="account-selector" onchange="fetchAccountDetails(this.value)">
-                    <option value="default">Default</option>
+                    <option value="">Select a local account...</option>
                 </select>
                 <button onclick="fetchAccountDetails(document.getElementById('account-selector').value)">Refresh</button>
             </div>

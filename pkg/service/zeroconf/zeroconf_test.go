@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -219,6 +220,105 @@ func TestPushCredentials_FullRoundTrip(t *testing.T) {
 	}
 	if uint64(got.authType) != AuthTypeOAuthToken {
 		t.Errorf("authType = %d, want %d (AuthTypeOAuthToken)", got.authType, AuthTypeOAuthToken)
+	}
+}
+
+func TestPushCredentialsWithInfo_UsesSuppliedInfoWithoutGetInfo(t *testing.T) {
+	speakerPrivate, speakerPublicBytes, err := GenerateDHKeyPair()
+	if err != nil {
+		t.Fatalf("speaker keygen: %v", err)
+	}
+
+	var getInfoCalls atomic.Int32
+	var addUserCalls atomic.Int32
+	var gotUsername, gotToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "getInfo":
+			getInfoCalls.Add(1)
+			http.Error(w, "unexpected getInfo", http.StatusInternalServerError)
+		case "addUser":
+			addUserCalls.Add(1)
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			blob, err := base64.StdEncoding.DecodeString(r.FormValue("blob"))
+			if err != nil {
+				http.Error(w, "bad blob: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			clientKey, err := base64.StdEncoding.DecodeString(r.FormValue("clientKey"))
+			if err != nil {
+				http.Error(w, "bad client key: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			shared := ComputeSharedSecret(speakerPrivate, clientKey)
+			encKey, macKey := DeriveKeys(shared)
+			plaintext, err := DecryptBlob(encKey, macKey, blob)
+			if err != nil {
+				http.Error(w, "decrypt: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			credentials, err := parseCredentialsBlob(plaintext)
+			if err != nil {
+				http.Error(w, "parse: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			gotUsername = credentials.username
+			gotToken = string(credentials.authData)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	const wantUsername = "supplied-info-user"
+	const wantToken = "supplied-info-token"
+	host, port := srvHostPort(srv)
+	if err := PushCredentialsWithInfo(host, port, Info{PublicKey: speakerPublicBytes}, wantUsername, wantToken); err != nil {
+		t.Fatalf("PushCredentialsWithInfo: %v", err)
+	}
+	if got := getInfoCalls.Load(); got != 0 {
+		t.Fatalf("getInfo calls = %d, want 0", got)
+	}
+	if got := addUserCalls.Load(); got != 1 {
+		t.Fatalf("addUser calls = %d, want 1", got)
+	}
+	if gotUsername != wantUsername || gotToken != wantToken {
+		t.Fatalf("credentials = (%q, %q), want (%q, %q)", gotUsername, gotToken, wantUsername, wantToken)
+	}
+}
+
+func TestFetchInfoExposesActiveUser(t *testing.T) {
+	publicKey := make([]byte, dhKeySize)
+	for i := range publicKey {
+		publicKey[i] = byte(i)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("action"); got != "getInfo" {
+			t.Errorf("action = %q, want getInfo", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"publicKey":  base64.StdEncoding.EncodeToString(publicKey),
+			"activeUser": "spotify-user-123",
+		})
+	}))
+	defer srv.Close()
+
+	host, port := srvHostPort(srv)
+	info, err := FetchInfo(host, port)
+	if err != nil {
+		t.Fatalf("FetchInfo: %v", err)
+	}
+	if string(info.PublicKey) != string(publicKey) {
+		t.Fatalf("PublicKey mismatch: got %x want %x", info.PublicKey, publicKey)
+	}
+	if info.ActiveUser != "spotify-user-123" {
+		t.Fatalf("ActiveUser = %q, want spotify-user-123", info.ActiveUser)
 	}
 }
 

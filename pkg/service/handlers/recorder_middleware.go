@@ -8,12 +8,18 @@ import (
 	"net"
 	"net/http"
 	"path"
+
+	"github.com/gesellix/bose-soundtouch/pkg/service/proxy"
 )
+
+func isSensitiveRecordingPath(requestPath string) bool {
+	return proxy.IsSensitiveRecordingPath(requestPath)
+}
 
 // RecordMiddleware returns a middleware that records "self" requests and responses.
 func (s *Server) RecordMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.recorder == nil || !s.recordEnabled {
+		if s.recorder == nil || !s.recordEnabled || isSensitiveRecordingPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

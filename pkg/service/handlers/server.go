@@ -3,10 +3,12 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/client"
@@ -33,68 +36,103 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/service/updatecheck"
 	"github.com/gesellix/bose-soundtouch/pkg/ssh"
 	"github.com/miekg/dns"
+	"golang.org/x/sync/singleflight"
 )
+
+// spotifySourceMutex is a zero-value mutex with an optional test observer.
+// The observer is installed before concurrent work starts and is nil in
+// production.
+type spotifySourceMutex struct {
+	sync.Mutex
+	sequence atomic.Uint64
+	observe  func(call uint64, acquired bool)
+}
+
+func (m *spotifySourceMutex) Lock() {
+	observer := m.observe
+	var call uint64
+	if observer != nil {
+		call = m.sequence.Add(1)
+		observer(call, false)
+	}
+
+	m.Mutex.Lock()
+	if observer != nil {
+		observer(call, true)
+	}
+}
 
 // Server handles HTTP requests for the SoundTouch service.
 type Server struct {
-	ds                       *datastore.DataStore
-	sm                       *setup.Manager
-	mu                       sync.RWMutex
-	serverURL                string
-	httpsServerURL           string // effective (derived or overridden) HTTPS URL
-	httpsOverride            string // explicit HTTPS URL override; "" means derive from serverURL
-	httpsPort                string // configured HTTPS port, used when deriving
-	httpsDefaultURL          string // startup hostname-based fallback when serverURL has no host
-	httpsListenAddr          string
-	discovering              bool
-	redactLogs               bool
-	logBodies                bool
-	recordEnabled            bool
-	discoveryInterval        time.Duration
-	discoveryEnabled         bool
-	updateCheckInterval      time.Duration // live update-check interval; see SetUpdateCheckSettings
-	updateCheckEnabled       bool          // live update-check opt-in; defaults off (#591)
-	dnsEnabled               bool
-	dnsUpstream              []string
-	dnsBindAddr              string
-	internalPaths            []string
-	shortcuts                map[string]int
-	recorder                 *proxy.Recorder
-	dnsDiscovery             *discovery.DNSDiscovery
-	authProbes               *authProbeRegistry
-	authProbeTimeoutOverride time.Duration // zero means use defaultAuthProbeTimeout; injectable for tests
-	deprecatedRoutes         *deprecatedRouteTracker
-	devicesChangedHook       func()
-	Version                  string
-	Commit                   string
-	Date                     string
-	RepoURL                  string
-	mgmtUsername             string
-	mgmtPassword             string
-	adminAreaAuth            string               // "" (unset) / "enabled" / "disabled" — see datastore.Settings.AdminAreaAuth
-	dismissedAnnouncements   map[string]time.Time // announcement id -> most recent dismissal; see RecordDismissal
-	updateChecker            *updatecheck.Checker // the HTTP-checking object; nil unless SetUpdateChecker was called
-	spotifyClientID          string
-	spotifyClientSecret      string
-	spotifyRedirectURI       string
-	spotifyService           *spotify.Service
-	amazonClientID           string
-	amazonClientSecret       string
-	amazonRedirectURI        string
-	amazonService            *amazon.Service
-	ttsService               *tts.Service
-	ttsProvider              string
-	ttsGoogleAPIKey          string
-	ttsGoogleEndpoint        string // test-only override; not exposed in the UI
-	ttsAppKey                string
-	ttsLanguage              string
-	ttsVoice                 string
-	ttsVolume                int
-	peerObserver             *peerObserver
-	healthRegistry           *health.Registry
-	logBuf                   *logbuf.Buffer
-	expectedHosts            []string
-	ownCACache               struct {
+	ds                         *datastore.DataStore
+	sm                         *setup.Manager
+	mu                         sync.RWMutex
+	serverURL                  string
+	httpsServerURL             string // effective (derived or overridden) HTTPS URL
+	httpsOverride              string // explicit HTTPS URL override; "" means derive from serverURL
+	httpsPort                  string // configured HTTPS port, used when deriving
+	httpsDefaultURL            string // startup hostname-based fallback when serverURL has no host
+	httpsListenAddr            string
+	discovering                bool
+	redactLogs                 bool
+	logBodies                  bool
+	recordEnabled              bool
+	discoveryInterval          time.Duration
+	discoveryEnabled           bool
+	updateCheckInterval        time.Duration // live update-check interval; see SetUpdateCheckSettings
+	updateCheckEnabled         bool          // live update-check opt-in; defaults off (#591)
+	dnsEnabled                 bool
+	dnsUpstream                []string
+	dnsBindAddr                string
+	internalPaths              []string
+	shortcuts                  map[string]int
+	recorder                   *proxy.Recorder
+	dnsDiscovery               *discovery.DNSDiscovery
+	authProbes                 *authProbeRegistry
+	authProbeTimeoutOverride   time.Duration // zero means use defaultAuthProbeTimeout; injectable for tests
+	deprecatedRoutes           *deprecatedRouteTracker
+	devicesChangedHook         func()
+	Version                    string
+	Commit                     string
+	Date                       string
+	RepoURL                    string
+	mgmtUsername               string
+	mgmtPassword               string
+	adminAreaAuth              string               // "" (unset) / "enabled" / "disabled" — see datastore.Settings.AdminAreaAuth
+	dismissedAnnouncements     map[string]time.Time // announcement id -> most recent dismissal; see RecordDismissal
+	updateChecker              *updatecheck.Checker // the HTTP-checking object; nil unless SetUpdateChecker was called
+	spotifyClientID            string
+	spotifyClientSecret        string
+	spotifyRedirectURI         string
+	spotifyService             *spotify.Service
+	spotifyOAuthMu             sync.Mutex
+	spotifyOAuthTransactions   map[string]spotifyOAuthTransaction
+	spotifyOAuthGenerations    map[string]uint64
+	spotifyOAuthTTL            time.Duration
+	spotifyOAuthRandom         io.Reader
+	spotifyPrimes              singleflight.Group
+	spotifySourceMu            spotifySourceMutex
+	spotifyOAuthAfterStore     func() // test-only barrier at the commit/publication boundary
+	spotifyPowerOnMu           sync.Mutex
+	spotifyPrimeReadbackDelays []time.Duration
+	spotifyPowerOnPrimer       func(string)
+	amazonClientID             string
+	amazonClientSecret         string
+	amazonRedirectURI          string
+	amazonService              *amazon.Service
+	ttsService                 *tts.Service
+	ttsProvider                string
+	ttsGoogleAPIKey            string
+	ttsGoogleEndpoint          string // test-only override; not exposed in the UI
+	ttsAppKey                  string
+	ttsLanguage                string
+	ttsVoice                   string
+	ttsVolume                  int
+	peerObserver               *peerObserver
+	healthRegistry             *health.Registry
+	logBuf                     *logbuf.Buffer
+	expectedHosts              []string
+	ownCACache                 struct {
 		once sync.Once
 		cert *x509.Certificate
 	}
@@ -146,11 +184,19 @@ func NewServer(ds *datastore.DataStore, sm *setup.Manager, serverURL string, red
 		// The update check is opt-in (#591): only the interval gets a default,
 		// updateCheckEnabled stays false so no install starts making outbound
 		// GitHub calls without an explicit yes.
-		updateCheckInterval: 24 * time.Hour,
-		peerObserver:        newPeerObserver(),
-		healthRegistry:      health.NewRegistry(),
-		authProbes:          newAuthProbeRegistry(defaultAuthProbeTTL),
-		deprecatedRoutes:    newDeprecatedRouteTracker(),
+		updateCheckInterval:        24 * time.Hour,
+		peerObserver:               newPeerObserver(),
+		healthRegistry:             health.NewRegistry(),
+		authProbes:                 newAuthProbeRegistry(defaultAuthProbeTTL),
+		deprecatedRoutes:           newDeprecatedRouteTracker(),
+		spotifyOAuthTransactions:   make(map[string]spotifyOAuthTransaction),
+		spotifyOAuthGenerations:    make(map[string]uint64),
+		spotifyOAuthTTL:            10 * time.Minute,
+		spotifyOAuthRandom:         rand.Reader,
+		spotifyPrimeReadbackDelays: []time.Duration{250 * time.Millisecond, time.Second, 2 * time.Second},
+	}
+	s.spotifyPowerOnPrimer = func(host string) {
+		go s.PrimeDeviceWithSpotify(host)
 	}
 
 	health.RegisterSourcesXMLPresent(s.healthRegistry, ds)
@@ -985,9 +1031,11 @@ func (s *Server) GetAmazonConfig() (clientID, clientSecret, redirectURI string) 
 	return s.amazonClientID, s.amazonClientSecret, s.amazonRedirectURI
 }
 
-// applyMusicServiceCredentials updates music service credential fields on the server.
-// Must be called with s.mu held. Empty string or "***" (the masked GET value) means "unchanged".
-func (s *Server) applyMusicServiceCredentials(spotifyID, spotifySecret, spotifyURI, amazonID, amazonSecret, amazonURI string) {
+// applyMusicServiceCredentials updates music service credential fields on the
+// server. Must be called with s.mu held. Empty secrets and "***" mean
+// unchanged. A present redirect-URI pointer, including an empty value, replaces
+// the override so operators can return to the derived callback URL.
+func (s *Server) applyMusicServiceCredentials(spotifyID, spotifySecret string, spotifyURI *string, amazonID, amazonSecret, amazonURI string) {
 	if spotifyID != "" {
 		s.spotifyClientID = spotifyID
 	}
@@ -996,8 +1044,8 @@ func (s *Server) applyMusicServiceCredentials(spotifyID, spotifySecret, spotifyU
 		s.spotifyClientSecret = spotifySecret
 	}
 
-	if spotifyURI != "" {
-		s.spotifyRedirectURI = spotifyURI
+	if spotifyURI != nil {
+		s.spotifyRedirectURI = strings.TrimSpace(*spotifyURI)
 	}
 
 	if amazonID != "" {
@@ -1013,18 +1061,45 @@ func (s *Server) applyMusicServiceCredentials(spotifyID, spotifySecret, spotifyU
 	}
 }
 
-// ReinitSpotifyService creates a new Spotify service from current config and replaces the running one.
+// EffectiveSpotifyRedirectURI returns the exact callback URI used in Spotify
+// authorization and token exchange requests.
+func (s *Server) EffectiveSpotifyRedirectURI() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.spotifyRedirectURI != "" {
+		return s.spotifyRedirectURI
+	}
+
+	return s.serverURL + "/mgmt/spotify/callback"
+}
+
+// ReinitSpotifyService applies the current config without replacing a live
+// service. Keeping one service instance preserves its account-generation fence,
+// so an operation started before reconfiguration cannot later overwrite the
+// same accounts file through a detached instance.
 func (s *Server) ReinitSpotifyService() {
+	s.supersedeSpotifyOAuthTransactions()
+
 	clientID, clientSecret, redirectURI := s.GetSpotifyConfig()
-	if clientID == "" {
+	if redirectURI == "" {
+		redirectURI = s.EffectiveSpotifyRedirectURI()
+	}
+	if err := ValidateSpotifyAuthorizationConfig(clientID, clientSecret, redirectURI); err != nil {
+		log.Printf("[Spotify] Service not reinitialized: %s", sanitizeErr(err))
 		return
 	}
 
-	if redirectURI == "" {
-		redirectURI = s.serverURL + "/mgmt/spotify/callback"
+	s.mu.RLock()
+	svc := s.spotifyService
+	s.mu.RUnlock()
+	if svc != nil {
+		svc.Reconfigure(clientID, clientSecret, redirectURI)
+		log.Printf("[Spotify] Service reconfigured")
+		return
 	}
 
-	svc := spotify.NewSpotifyService(clientID, clientSecret, redirectURI, s.ds.DataDir)
+	svc = spotify.NewSpotifyService(clientID, clientSecret, redirectURI, s.ds.DataDir)
 	if err := svc.Load(); err != nil {
 		log.Printf("[Spotify] Failed to load accounts during reinit: %v", err)
 	}
@@ -1423,99 +1498,230 @@ func (s *Server) findExistingDeviceInfoByDeviceID(deviceID string) *models.Servi
 	return nil
 }
 
-// PrimeDeviceWithSpotify triggers a Spotify priming of the speaker if a Spotify account is linked.
-func (s *Server) PrimeDeviceWithSpotify(deviceIP string) {
+// SpotifyPrimeResult describes the verified result of one coalesced priming
+// operation. An HTTP write alone is never reported as confirmed.
+type SpotifyPrimeResult struct {
+	DeviceIP       string `json:"device_ip"`
+	DeviceID       string `json:"device_id,omitempty"`
+	UserID         string `json:"user_id,omitempty"`
+	Outcome        string `json:"outcome"`
+	WriteAttempted bool   `json:"write_attempted"`
+	Detail         string `json:"detail,omitempty"`
+}
+
+// PrimeDeviceWithSpotify verifies or establishes one speaker's active Spotify
+// identity. Concurrent requests for the same target share one operation.
+func (s *Server) PrimeDeviceWithSpotify(deviceIP string) SpotifyPrimeResult {
+	value, _, _ := s.spotifyPrimes.Do(deviceIP, func() (interface{}, error) {
+		return s.primeDeviceWithSpotify(deviceIP), nil
+	})
+
+	return value.(SpotifyPrimeResult)
+}
+
+func (s *Server) primeDeviceWithSpotify(deviceIP string) SpotifyPrimeResult {
+	result := SpotifyPrimeResult{DeviceIP: deviceIP, Outcome: "failed"}
+
 	s.mu.RLock()
 	svc := s.spotifyService
+	readbackDelays := append([]time.Duration(nil), s.spotifyPrimeReadbackDelays...)
 	s.mu.RUnlock()
 
 	if svc == nil {
-		return
+		result.Detail = "Spotify service not configured"
+		return result
 	}
 
-	accounts := svc.GetAccounts()
-	if len(accounts) == 0 {
-		return
-	}
-
-	// We'll use the first linked account. In the future, we might want to let the user
-	// pick or map accounts to speakers, but for now, we follow the "One linked account" model.
-	accessToken, username, err := svc.GetFreshToken()
-	if err != nil {
-		log.Printf("[Spotify Watchdog] Failed to get fresh token for %s: %v", sanitizeLog(deviceIP), err)
-		return
-	}
-
-	log.Printf("[Spotify Watchdog] Proactively priming %s with Spotify user %s", sanitizeLog(deviceIP), sanitizeLog(username))
-
-	// Register the SPOTIFY source in our marge datastore before pushing credentials.
-	// Without this, storePreset later fails with "AddPreset - failed due to invalid SourceID"
-	// because marge.UpdatePreset can't match SourceID="SPOTIFY" against any ConfiguredSource.
-	s.registerSpotifySourceForDevice(deviceIP, accounts)
-
-	if err := s.pushSpotifyTokenToDevice(deviceIP, username, accessToken); err != nil {
-		// addUser may return a benign 404+empty-body no-op when the speaker
-		// already has the activeUser set. The zeroconf-level log already
-		// recorded the specifics; here we just upgrade the watchdog's view to
-		// "primed" since marge holds the authoritative SPOTIFY source.
-		if errors.Is(err, spotify.ErrAddUserNoOp) {
-			log.Printf("[Spotify Watchdog] Successfully primed %s (ZeroConf addUser was an expected no-op)", sanitizeLog(deviceIP))
-		} else {
-			log.Printf("[Spotify Watchdog] Failed to prime %s: %s", sanitizeLog(deviceIP), sanitizeErr(err))
-		}
-	} else {
-		log.Printf("[Spotify Watchdog] Successfully primed %s", sanitizeLog(deviceIP))
-	}
-}
-
-// registerSpotifySourceForDevice writes a SPOTIFY ConfiguredSource into the marge
-// datastore under the device's currently-paired account. No-op (with a log
-// message) if the device can't be resolved to an account — falling back to
-// "default" here would risk polluting an unrelated account's source list, and
-// any storePreset the device sends will be under its real paired account anyway.
-func (s *Server) registerSpotifySourceForDevice(deviceIP string, accounts []spotify.Account) {
 	host := deviceIP
-	if h, _, err := net.SplitHostPort(deviceIP); err == nil {
-		host = h
+	port := "8200"
+	if parsedHost, parsedPort, err := net.SplitHostPort(deviceIP); err == nil {
+		host = parsedHost
+		port = parsedPort
 	}
 
 	accountID, deviceID := s.resolvePairedAccount(deviceIP, host)
-	if accountID == "" {
-		log.Printf("[Spotify Watchdog] No paired account for %s yet — skipping marge source registration", sanitizeLog(deviceIP))
-		return
+	result.DeviceID = deviceID
+	if accountID == "" || deviceID == "" {
+		result.Detail = "speaker has no exact Marge account binding"
+		return result
 	}
 
-	registered := false
+	sources, err := s.ds.GetConfiguredSources(accountID, deviceID)
+	if err != nil {
+		result.Detail = "configured sources unavailable"
+		return result
+	}
+	binding, err := bindingFromSources(accountID, deviceID, sources)
+	if err != nil {
+		result.Detail = "Spotify source ownership unavailable"
+		return result
+	}
+	linked, err := s.validateSpotifyBinding(binding, binding.Secret)
+	if err != nil {
+		result.Detail = "Spotify source does not match a linked identity"
+		return result
+	}
+	result.UserID = linked.UserID
 
-	for _, acc := range accounts {
-		credential := acc.BoseSecret
-		if credential == "" {
-			credential = acc.AccessToken
+	accessToken, username, err := svc.GetFreshTokenForUser(linked.UserID)
+	if err != nil {
+		log.Printf("[Spotify Watchdog] Failed to get fresh token for %s: %v", sanitizeLog(deviceIP), err)
+		result.Detail = "Spotify token unavailable"
+		return result
+	}
+	currentLinked, ok := svc.GetLinkedAccount(linked.UserID)
+	if !ok || currentLinked.BoseSecret != linked.BoseSecret {
+		result.Detail = "Spotify identity changed while obtaining a token"
+		return result
+	}
+	linked = currentLinked
+
+	info, err := spotify.ZeroConfFetchInfo(host, port)
+	if err != nil {
+		result.Detail = "ZeroConf getInfo failed"
+		return result
+	}
+	if info.ActiveUser != "" && info.ActiveUser != username {
+		result.Detail = "speaker has a different active Spotify user"
+		return result
+	}
+
+	log.Printf("[Spotify Watchdog] Priming %s with Spotify user %s", sanitizeLog(deviceIP), sanitizeLog(username))
+	s.spotifySourceMu.Lock()
+	if !s.spotifyPrimeOwnershipCurrent(accountID, deviceID, linked) {
+		s.spotifySourceMu.Unlock()
+		result.Detail = "Spotify source ownership changed before credential write"
+		return result
+	}
+	result.WriteAttempted = true
+	pushErr := s.pushSpotifyTokenToDevice(deviceIP, info, username, accessToken)
+	s.spotifySourceMu.Unlock()
+	writeNoOp := errors.Is(pushErr, spotify.ErrAddUserNoOp)
+	if pushErr != nil && !writeNoOp {
+		log.Printf("[Spotify Watchdog] Failed to prime %s: %s", sanitizeLog(deviceIP), sanitizeErr(pushErr))
+		result.Detail = "ZeroConf addUser failed"
+		return result
+	}
+
+	readbackStart := time.Now()
+	for _, delay := range readbackDelays {
+		if remaining := delay - time.Since(readbackStart); remaining > 0 {
+			time.Sleep(remaining)
 		}
-
-		if _, err := marge.AddSource(s.ds, accountID, acc.UserID, strconv.Itoa(constants.SpotifyProviderID), credential, "token_version_3", acc.DisplayName); err != nil {
-			log.Printf("[Spotify Watchdog] Failed to register Spotify source for account %s: %v", sanitizeLog(accountID), err)
+		readback, readErr := spotify.ZeroConfFetchInfo(host, port)
+		if readErr != nil {
 			continue
 		}
-
-		log.Printf("[Spotify Watchdog] Registered Spotify source %s for account %s (device %s)", sanitizeLog(acc.UserID), sanitizeLog(accountID), sanitizeLog(deviceID))
-
-		registered = true
-	}
-
-	// Tell the speaker its sources list changed so it re-fetches from marge.
-	// Without this its on-device Sources.xml stays stale until something else
-	// triggers a sync — which leaves storePreset failing with
-	// "AddPreset - failed due to invalid SourceID" even though our marge
-	// datastore already has the SPOTIFY entry.
-	if registered && deviceID != "" {
-		c := client.NewClientFromHost(deviceIP)
-		if err := c.NotifySourcesUpdated(deviceID); err != nil {
-			log.Printf("[Spotify Watchdog] sourcesUpdated notification for %s failed: %v", sanitizeLog(deviceIP), err)
-		} else {
-			log.Printf("[Spotify Watchdog] Notified %s to re-sync sources (deviceID=%s)", sanitizeLog(deviceIP), sanitizeLog(deviceID))
+		if readback.ActiveUser == username {
+			if err := s.refreshSpotifySourceAfterPrime(deviceIP, accountID, deviceID, linked); err != nil {
+				result.Outcome = "unverified"
+				result.Detail = "active user verified but source inventory publication failed"
+				return result
+			}
+			if writeNoOp {
+				result.Outcome = "unverified"
+				result.Detail = "speaker retained the target user after an unconfirmed addUser no-op"
+				return result
+			}
+			result.Outcome = "confirmed"
+			result.Detail = "active user and source inventory verified after one credential write"
+			return result
+		}
+		if readback.ActiveUser != "" {
+			result.Outcome = "failed"
+			result.Detail = "speaker switched to a different active Spotify user"
+			return result
 		}
 	}
+
+	result.Outcome = "unverified"
+	if writeNoOp {
+		result.Detail = "addUser returned an unconfirmed no-op and getInfo did not verify new credentials"
+	} else {
+		result.Detail = "credential write was not confirmed by getInfo"
+	}
+	return result
+}
+
+// spotifyPrimeOwnershipCurrent must be called with spotifySourceMu held. The
+// caller keeps that lock through its one bounded external credential write so
+// a newer source publication cannot pass this check and then be overwritten.
+func (s *Server) spotifyPrimeOwnershipCurrent(accountID, deviceID string, expected spotify.LinkedAccount) bool {
+	sources, err := s.ds.GetConfiguredSources(accountID, deviceID)
+	if err != nil {
+		return false
+	}
+	binding, err := bindingFromSources(accountID, deviceID, sources)
+	if err != nil || binding.UserID != expected.UserID || binding.Secret != expected.BoseSecret {
+		return false
+	}
+
+	return s.spotifyLinkedAccountCurrent(expected)
+}
+
+func (s *Server) refreshSpotifySourceAfterPrime(deviceIP, accountID, deviceID string, account spotify.LinkedAccount) error {
+	s.spotifySourceMu.Lock()
+	if !s.spotifyLinkedAccountCurrent(account) {
+		s.spotifySourceMu.Unlock()
+		return fmt.Errorf("Spotify identity changed before priming source publication")
+	}
+	configuredSources, err := s.ds.GetConfiguredSources(accountID, deviceID)
+	if err != nil {
+		s.spotifySourceMu.Unlock()
+		return fmt.Errorf("read authoritative Spotify source: %w", err)
+	}
+	binding, err := bindingFromSources(accountID, deviceID, configuredSources)
+	if err != nil || binding.UserID != account.UserID || binding.Secret != account.BoseSecret {
+		s.spotifySourceMu.Unlock()
+		return fmt.Errorf("Spotify source ownership changed before priming publication")
+	}
+	if _, err := marge.AddSource(s.ds, accountID, account.UserID, strconv.Itoa(constants.SpotifyProviderID), account.BoseSecret, constants.CredentialTypeTokenV3, account.DisplayName); err != nil {
+		s.spotifySourceMu.Unlock()
+		log.Printf("[Spotify Watchdog] Failed to refresh Spotify source for account %s: %v", sanitizeLog(accountID), err)
+		return err
+	}
+	if !s.spotifyLinkedAccountCurrent(account) {
+		s.spotifySourceMu.Unlock()
+		return fmt.Errorf("Spotify identity changed during priming source publication")
+	}
+	s.spotifySourceMu.Unlock()
+
+	cfg := client.DefaultConfig()
+	cfg.Host = deviceIP
+	cfg.Timeout = 5 * time.Second
+	c := client.NewClient(cfg)
+	if err := c.NotifySourcesUpdated(deviceID); err != nil {
+		log.Printf("[Spotify Watchdog] sourcesUpdated notification for %s failed: %v", sanitizeLog(deviceIP), err)
+		return err
+	}
+	sources, err := c.GetSources()
+	if err != nil {
+		log.Printf("[Spotify Watchdog] /sources readback for %s failed: %v", sanitizeLog(deviceIP), err)
+		return err
+	}
+	found := false
+	for _, source := range sources.GetReadySpotifySources() {
+		if source.SourceAccount == account.UserID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("speaker source inventory does not contain a ready Spotify source for the linked identity")
+	}
+
+	// The provider exchange and configured-source writers can advance ownership
+	// while the external notification/readback is in flight. Recheck under the
+	// shared ownership lock before allowing the caller to report confirmation.
+	s.spotifySourceMu.Lock()
+	current := s.spotifyPrimeOwnershipCurrent(accountID, deviceID, account)
+	s.spotifySourceMu.Unlock()
+	if !current {
+		return fmt.Errorf("Spotify identity or source ownership changed during priming readback")
+	}
+
+	s.notifyDevicesChanged()
+	return nil
 }
 
 // resolvePairedAccount returns the device's currently-paired account ID and its
@@ -1565,7 +1771,7 @@ func (s *Server) findExistingDeviceInfoByIP(ip string) *models.ServiceDeviceInfo
 	return nil
 }
 
-func (s *Server) pushSpotifyTokenToDevice(deviceIP, username, accessToken string) error {
+func (s *Server) pushSpotifyTokenToDevice(deviceIP string, info spotify.ZeroConfInfo, username, accessToken string) error {
 	host, port, err := net.SplitHostPort(deviceIP)
 	if err != nil {
 		// deviceIP has no port component — use the standard ZeroConf port.
@@ -1573,7 +1779,7 @@ func (s *Server) pushSpotifyTokenToDevice(deviceIP, username, accessToken string
 		port = "8200"
 	}
 
-	return spotify.PushSpotifyCredentials(host, port, username, accessToken)
+	return spotify.PushSpotifyCredentialsWithInfo(host, port, info, username, accessToken)
 }
 
 // PrimeDeviceWithAmazon triggers an Amazon Music priming of the speaker if an Amazon account is linked.

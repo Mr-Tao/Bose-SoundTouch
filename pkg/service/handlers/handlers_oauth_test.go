@@ -36,6 +36,7 @@ func TestHandleBoseSpotifyToken_LocalResponse(t *testing.T) {
 			"access_token":  "valid-token",
 			"refresh_token": "refresh-token",
 			"expires_at":    time.Now().Add(1 * time.Hour).Unix(),
+			"bose_secret":   spotifyUserASecret,
 		},
 	}
 	data, err := json.Marshal(account)
@@ -51,12 +52,15 @@ func TestHandleBoseSpotifyToken_LocalResponse(t *testing.T) {
 	}
 
 	server.SetSpotifyService(ss)
+	saveSpotifyBindingForTest(t, ds, "marge-a", "DEVICE123", "user1", spotifyUserASecret)
 
 	// chi.URLParam works when using chi router
 	r := chi.NewRouter()
 	r.Post("/oauth/device/{deviceID}/music/musicprovider/{sourceID}/token/cs3", server.HandleBoseToken)
 
-	req := httptest.NewRequest("POST", "/oauth/device/DEVICE123/music/musicprovider/15/token/cs3", nil)
+	req := httptest.NewRequest("POST", "/oauth/device/DEVICE123/music/musicprovider/15/token/cs3",
+		strings.NewReader(`{"grant_type":"refresh_token","refresh_token":"`+spotifyUserASecret+`"}`))
+	setPrivateRemoteAddr(req)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -89,6 +93,7 @@ func TestHandleBoseSpotifyToken_FallbackToProxy(t *testing.T) {
 
 	// Without a configured Spotify service, the handler returns 503.
 	req := httptest.NewRequest("POST", "/oauth/device/DEVICE123/music/musicprovider/15/token/cs3", nil)
+	setPrivateRemoteAddr(req)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -265,6 +270,7 @@ func TestHandleBoseLegacyToken(t *testing.T) {
 
 	// Since we are not configuring Spotify, it should fall back to proxy
 	req := httptest.NewRequest("POST", "/oauth/device/DEVICE123/music/musicprovider/15/token", nil)
+	setPrivateRemoteAddr(req)
 	req.Host = "localhost"
 	w := httptest.NewRecorder()
 

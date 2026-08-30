@@ -272,7 +272,6 @@ func mapToFullResponseSource(src *models.ConfiguredSource) models.FullResponseSo
 		ProviderLabel:    constants.GetProviderLabel(src.SourceProviderID),
 		SourceSettings:   src.SourceSettings,
 	}
-	fs.Credential.Value = src.Secret
 	fs.Credential.Type = src.SecretType
 
 	// If DisplayName is generic (e.g. "Audio") and we have a more specific Account name, use it.

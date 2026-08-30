@@ -79,28 +79,29 @@ func TestSpotifyAdditionFlow(t *testing.T) {
 		}
 	})
 
-	// 1. Step: OAuth Exchange
-	t.Run("OAuth Exchange (Step 1)", func(t *testing.T) {
-		// Since I can't easily point the service to the mock server without modifying service.go,
-		// I will just test that the handler correctly parses the body and calls the service.
-		// If I can't mock the service, I'll mock the service's behavior by pre-loading an account if needed,
-		// or just check that the handler reaches the service call.
-
-		// For this test, let's just assume the service call would fail but the handler logic is correct.
-		// Or better, let's pre-populate the accounts.json so HandleBoseSpotifyToken can return something.
-
+	// The Stockholm compatibility login token is not an authenticated local
+	// account identity. It must never be exchangeable for a provider bearer.
+	t.Run("Account OAuth Exchange Is Disabled", func(t *testing.T) {
 		spotifyDir := filepath.Join(tmpDir, "spotify")
 		_ = os.MkdirAll(spotifyDir, 0755)
 		_ = os.WriteFile(filepath.Join(spotifyDir, "accounts.json"), []byte("{}"), 0644)
 
 		body := `{"grant_type": "authorization_code", "code": "fake-code", "redirect_uri": "http://localhost"}`
 		req := httptest.NewRequest("POST", "/oauth/account/123/music/musicprovider/15/token/cs", strings.NewReader(body))
+		setPrivateRemoteAddr(req)
+		req.Header.Set("Authorization", "mock-token-123")
 		w := httptest.NewRecorder()
 
 		r.ServeHTTP(w, req)
 
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected 200, got %d: %s", w.Code, w.Body.String())
+		if w.Code != http.StatusGone {
+			t.Errorf("Expected 410, got %d: %s", w.Code, w.Body.String())
+		}
+		if w.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", w.Header().Get("Cache-Control"))
+		}
+		if strings.Contains(w.Body.String(), "access-123") || strings.Contains(w.Body.String(), "refresh-123") {
+			t.Fatalf("disabled account route exposed provider credentials: %s", w.Body.String())
 		}
 	})
 

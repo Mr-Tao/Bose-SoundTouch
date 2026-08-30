@@ -60,7 +60,14 @@ var dhGenerator = big.NewInt(2)
 const dhKeySize = 96 // bytes, matches the 768-bit prime
 
 type getInfoResponse struct {
-	PublicKey string `json:"publicKey"`
+	PublicKey  string `json:"publicKey"`
+	ActiveUser string `json:"activeUser"`
+}
+
+// Info is the typed state returned by a speaker's ZeroConf getInfo endpoint.
+type Info struct {
+	PublicKey  []byte
+	ActiveUser string
 }
 
 // GenerateDHKeyPair generates a fresh DH private key and derives the public key.
@@ -276,36 +283,48 @@ func withAction(base *url.URL, action string) string {
 // host must be a literal private-network IP address.
 // port is the ZeroConf port (typically "8200"); pass "" to omit it from the URL.
 func GetInfo(host, port string) ([]byte, error) {
+	info, err := FetchInfo(host, port)
+	if err != nil {
+		return nil, err
+	}
+
+	return info.PublicKey, nil
+}
+
+// FetchInfo returns both the DH public key and the currently active Spotify
+// identity. Callers that mutate credentials must read ActiveUser back rather
+// than inferring success from addUser's transport status.
+func FetchInfo(host, port string) (Info, error) {
 	ip, err := validateZcHost(host)
 	if err != nil {
-		return nil, fmt.Errorf("getInfo: %w", err)
+		return Info{}, fmt.Errorf("getInfo: %w", err)
 	}
 
 	base, err := buildZcBase(ip, port)
 	if err != nil {
-		return nil, fmt.Errorf("getInfo: %w", err)
+		return Info{}, fmt.Errorf("getInfo: %w", err)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	resp, err := client.Get(withAction(base, "getInfo"))
 	if err != nil {
-		return nil, fmt.Errorf("getInfo: %w", err)
+		return Info{}, fmt.Errorf("getInfo: %w", err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("getInfo: status %d", resp.StatusCode)
+		return Info{}, fmt.Errorf("getInfo: status %d", resp.StatusCode)
 	}
 
 	var info getInfoResponse
 	if decodeErr := json.NewDecoder(resp.Body).Decode(&info); decodeErr != nil {
-		return nil, fmt.Errorf("getInfo: decode: %w", decodeErr)
+		return Info{}, fmt.Errorf("getInfo: decode: %w", decodeErr)
 	}
 
 	if info.PublicKey == "" {
-		return nil, fmt.Errorf("getInfo: empty publicKey")
+		return Info{}, fmt.Errorf("getInfo: empty publicKey")
 	}
 
 	// Accept both standard and URL-safe base64.
@@ -313,11 +332,11 @@ func GetInfo(host, port string) ([]byte, error) {
 	if err != nil {
 		pubKey, err = base64.URLEncoding.DecodeString(info.PublicKey)
 		if err != nil {
-			return nil, fmt.Errorf("getInfo: invalid base64 publicKey: %w", err)
+			return Info{}, fmt.Errorf("getInfo: invalid base64 publicKey: %w", err)
 		}
 	}
 
-	return pubKey, nil
+	return Info{PublicKey: pubKey, ActiveUser: info.ActiveUser}, nil
 }
 
 // PushCredentials pushes OAuth credentials to a speaker using the ZeroConf DH
@@ -326,6 +345,19 @@ func GetInfo(host, port string) ([]byte, error) {
 // host must be a literal private-network IP address.
 // port is the ZeroConf port (typically "8200"); pass "" to omit it from the URL.
 func PushCredentials(host, port, username, accessToken string) error {
+	info, err := FetchInfo(host, port)
+	if err != nil {
+		log.Printf("[ZeroConf] getInfo failed (%s), falling back to simplified token push", sanitizeErr(err))
+		return pushSimplifiedToken(host, port, username, accessToken)
+	}
+
+	return PushCredentialsWithInfo(host, port, info, username, accessToken)
+}
+
+// PushCredentialsWithInfo pushes credentials using a caller-supplied getInfo
+// snapshot. It never performs another getInfo request and therefore cannot
+// silently widen a verified one-read/one-write priming transaction.
+func PushCredentialsWithInfo(host, port string, info Info, username, accessToken string) error {
 	ip, err := validateZcHost(host)
 	if err != nil {
 		return fmt.Errorf("pushCredentials: %w", err)
@@ -336,10 +368,8 @@ func PushCredentials(host, port, username, accessToken string) error {
 		return fmt.Errorf("pushCredentials: %w", err)
 	}
 
-	speakerPublicKey, err := GetInfo(host, port)
-	if err != nil {
-		log.Printf("[ZeroConf] getInfo failed (%s), falling back to simplified token push", sanitizeErr(err))
-		return pushSimplifiedToken(host, port, username, accessToken)
+	if len(info.PublicKey) == 0 {
+		return fmt.Errorf("pushCredentials: empty speaker public key")
 	}
 
 	privateKey, ourPublicKeyBytes, err := GenerateDHKeyPair()
@@ -347,7 +377,7 @@ func PushCredentials(host, port, username, accessToken string) error {
 		return fmt.Errorf("pushCredentials: keygen: %w", err)
 	}
 
-	sharedSecret := ComputeSharedSecret(privateKey, speakerPublicKey)
+	sharedSecret := ComputeSharedSecret(privateKey, info.PublicKey)
 	encKey, macKey := DeriveKeys(sharedSecret)
 
 	plaintext := BuildCredentialsBlob(username, accessToken, AuthTypeOAuthToken)

@@ -14,6 +14,14 @@ func ZeroConfGetInfo(host, port string) ([]byte, error) {
 	return zeroconf.GetInfo(host, port)
 }
 
+// ZeroConfInfo is the typed getInfo response used to verify credential priming.
+type ZeroConfInfo = zeroconf.Info
+
+// ZeroConfFetchInfo returns the speaker's public key and active Spotify user.
+func ZeroConfFetchInfo(host, port string) (ZeroConfInfo, error) {
+	return zeroconf.FetchInfo(host, port)
+}
+
 // PushSpotifyCredentials pushes Spotify credentials to a speaker using the full
 // ZeroConf DH key exchange protocol. Falls back to simplified token push if
 // the speaker does not support DH (older firmware).
@@ -21,4 +29,11 @@ func ZeroConfGetInfo(host, port string) ([]byte, error) {
 // port is the ZeroConf port (typically "8200"); pass "" to omit it from the URL.
 func PushSpotifyCredentials(host, port, username, accessToken string) error {
 	return zeroconf.PushCredentials(host, port, username, accessToken)
+}
+
+// PushSpotifyCredentialsWithInfo performs one credential write using the
+// already-read speaker state. Priming uses this form to avoid a second getInfo
+// request between identity validation and addUser.
+func PushSpotifyCredentialsWithInfo(host, port string, info ZeroConfInfo, username, accessToken string) error {
+	return zeroconf.PushCredentialsWithInfo(host, port, info, username, accessToken)
 }

@@ -185,7 +185,16 @@ func isAlwaysSensitive(header string) bool {
 		}
 	}
 
-	return false
+	// Credential headers are not consistently named across providers. Treat
+	// token/secret headers and common app/API key spellings as credentials even
+	// when a vendor adds its own prefix or separator convention.
+	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(header))
+	return strings.Contains(normalized, "token") ||
+		strings.Contains(normalized, "secret") ||
+		strings.Contains(normalized, "credential") ||
+		strings.Contains(normalized, "apikey") ||
+		strings.Contains(normalized, "appkey") ||
+		strings.Contains(normalized, "applicationkey")
 }
 
 func isSensitive(header string) bool {

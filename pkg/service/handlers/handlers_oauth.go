@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -49,55 +50,56 @@ func (s *Server) HandleBoseLegacyToken(w http.ResponseWriter, r *http.Request) {
 // POST /oauth/account/{account}/music/musicprovider/{sourceID}/token/cs
 func (s *Server) HandleBoseAccountToken(w http.ResponseWriter, r *http.Request) {
 	sourceID := chi.URLParam(r, "sourceID")
+	if sourceID != strconv.Itoa(constants.SpotifyProviderID) {
+		http.Error(w, "Unknown music provider", http.StatusNotFound)
+		return
+	}
 
-	// If it's Spotify, handle it.
-	if sourceID == strconv.Itoa(constants.SpotifyProviderID) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("[OAuth Proxy] Failed to read body: %v", err)
-			http.Error(w, "Bad Request", http.StatusBadRequest)
+	// Local Marge accounts currently have no authenticated login identity:
+	// Stockholm's compatibility login returns a synthetic account token. Never
+	// turn that token into a real provider bearer. Account linking remains on
+	// the Basic-Auth-protected management OAuth flow; speakers refresh through
+	// the exact device-bound route below.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Deprecation", "true")
+	http.Error(w, "Spotify account token exchange is unavailable; use the management authorization flow", http.StatusGone)
+}
 
-			return
-		}
+type spotifyTokenRequest struct {
+	RefreshToken string `json:"refresh_token"`
+	GrantType    string `json:"grant_type"`
+	Code         string `json:"code"`
+}
 
-		_ = r.Body.Close()
+func (r spotifyTokenRequest) secret() string {
+	if r.RefreshToken != "" {
+		return r.RefreshToken
+	}
 
-		var tokenReq struct {
-			GrantType   string `json:"grant_type"`
-			Code        string `json:"code"`
-			RedirectURI string `json:"redirect_uri"`
-		}
+	return r.Code
+}
 
-		if err := json.Unmarshal(body, &tokenReq); err == nil && tokenReq.GrantType == "authorization_code" {
-			log.Printf("[Spotify Proxy] Handling authorization_code grant for account addition")
+func readSpotifyTokenRequest(r *http.Request) (spotifyTokenRequest, error) {
+	defer func() { _ = r.Body.Close() }()
 
-			s.mu.RLock()
-			svc := s.spotifyService
-			s.mu.RUnlock()
+	const maxSpotifyTokenRequestBytes = 64 << 10
 
-			if svc == nil {
-				log.Printf("[Spotify Proxy] Spotify service not configured")
-				http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxSpotifyTokenRequestBytes+1))
+	if err != nil {
+		return spotifyTokenRequest{}, err
+	}
+	if len(body) > maxSpotifyTokenRequestBytes {
+		return spotifyTokenRequest{}, fmt.Errorf("Spotify token request exceeds %d bytes", maxSpotifyTokenRequestBytes)
+	}
 
-				return
-			}
-
-			if err := svc.ExchangeCodeAndStore(tokenReq.Code); err != nil {
-				log.Printf("[Spotify Proxy] Failed to exchange code: %v", err)
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-
-				return
-			}
-
-			// After successful exchange, we can return the token for the newly added account.
-			// HandleBoseSpotifyToken will pick the first account, which is fine if this is the only one.
-			s.HandleBoseSpotifyToken(w, r)
-
-			return
+	var request spotifyTokenRequest
+	if len(body) != 0 {
+		if err := json.Unmarshal(body, &request); err != nil {
+			return spotifyTokenRequest{}, err
 		}
 	}
 
-	s.HandleBoseSpotifyToken(w, r)
+	return request, nil
 }
 
 // HandleBoseAmazonToken handles the Amazon Music token refresh request from the speaker.
@@ -189,6 +191,7 @@ func (s *Server) HandleBoseAmazonToken(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Proxy-Origin", "self")
+	w.Header().Set("Cache-Control", "no-store")
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		log.Printf("[Amazon] Failed to encode response: %v", err)
@@ -200,7 +203,11 @@ func (s *Server) HandleBoseAmazonToken(w http.ResponseWriter, r *http.Request) {
 // POST /oauth/device/{deviceID}/music/musicprovider/15/token/cs3
 func (s *Server) HandleBoseSpotifyToken(w http.ResponseWriter, r *http.Request) {
 	deviceID := chi.URLParam(r, "deviceID")
-	log.Printf("[Spotify Proxy] Intercepted token request for device %s", sanitizeLog(deviceID))
+	log.Printf("[Spotify Proxy] Token request for device %s", sanitizeLog(deviceID))
+	if !isTrustedSpotifyOAuthClient(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 
 	s.mu.RLock()
 	svc := s.spotifyService
@@ -213,70 +220,37 @@ func (s *Server) HandleBoseSpotifyToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	accounts := svc.GetAccounts()
-	if len(accounts) == 0 {
-		log.Printf("[Spotify Proxy] No Spotify accounts linked, returning 503")
-		http.Error(w, "No linked Spotify accounts", http.StatusServiceUnavailable)
-
+	tokenReq, err := readSpotifyTokenRequest(r)
+	if err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
-	// We use the first linked account.
-	// However, if the request provides a "secret" (which we use as our Bose surrogate token),
-	// we should use that to find the specific account.
-	var (
-		account     *spotify.Account
-		accessToken string
-		userID      string
-	)
-
-	// Spotify registration/refresh often passes the secret in the body as "refresh_token"
-	// or in the registration flow as "code".
-	body, _ := io.ReadAll(r.Body)
-	_ = r.Body.Close()
-
-	var tokenReq struct {
-		RefreshToken string `json:"refresh_token"`
-		GrantType    string `json:"grant_type"`
-		Code         string `json:"code"`
+	binding, err := s.spotifyBindingForDevice(deviceID)
+	if err != nil {
+		log.Printf("[Spotify Proxy] Device ownership resolution failed for %s: %s", sanitizeLog(deviceID), sanitizeErr(err))
+		http.Error(w, "Spotify account binding unavailable", http.StatusConflict)
+		return
+	}
+	if err := validateSpotifyDeviceClient(r, binding); err != nil {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	linked, err := s.validateSpotifyBinding(binding, tokenReq.secret())
+	if err != nil {
+		http.Error(w, "Invalid Spotify credential", http.StatusUnauthorized)
+		return
 	}
 
-	_ = json.Unmarshal(body, &tokenReq)
+	s.writeSpotifyAccessToken(w, svc, linked.UserID)
+}
 
-	secret := tokenReq.RefreshToken
-	if secret == "" {
-		secret = tokenReq.Code
-	}
-
-	if secret != "" {
-		if acc, ok := svc.GetAccountBySecret(secret); ok {
-			account = acc
-			log.Printf("[Spotify Proxy] Found account for secret %s: %s", sanitizeLog(secret), sanitizeLog(acc.UserID))
-		}
-	}
-
-	if account != nil {
-		if err := svc.RefreshAccessToken(account); err != nil {
-			log.Printf("[Spotify Proxy] Failed to refresh token for %s: %v. Returning 502", sanitizeLog(account.UserID), err)
-			http.Error(w, "Token refresh failed", http.StatusBadGateway)
-
-			return
-		}
-
-		accessToken = account.AccessToken
-	} else {
-		// Fallback to first account for backward compatibility or when secret is missing
-		var err error
-
-		accessToken, userID, err = svc.GetFreshToken()
-		if err != nil {
-			log.Printf("[Spotify Proxy] Failed to get fresh token: %v. Returning 502", err)
-			http.Error(w, "Failed to get fresh token", http.StatusBadGateway)
-
-			return
-		}
-
-		log.Printf("[Spotify Proxy] Using default account %s", sanitizeLog(userID))
+func (s *Server) writeSpotifyAccessToken(w http.ResponseWriter, svc *spotify.Service, userID string) {
+	accessToken, _, err := svc.GetFreshTokenForUser(userID)
+	if err != nil {
+		log.Printf("[Spotify Proxy] Token unavailable for user %s: %s", sanitizeLog(userID), sanitizeErr(err))
+		http.Error(w, "Failed to get fresh token", http.StatusBadGateway)
+		return
 	}
 
 	// Format response as expected by Bose firmware.
@@ -292,6 +266,7 @@ func (s *Server) HandleBoseSpotifyToken(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Proxy-Origin", "self")
+	w.Header().Set("Cache-Control", "no-store")
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		log.Printf("[Spotify Proxy] Failed to encode response: %v", err)

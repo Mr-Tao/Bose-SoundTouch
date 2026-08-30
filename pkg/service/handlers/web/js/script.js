@@ -141,10 +141,21 @@ async function fetchSpotifyStatus() {
         const data = await response.json();
 
         if (data.accounts && data.accounts.length > 0) {
-            header.style.background = "#e6ffed";
-            header.style.border = "1px solid #28a745";
-            nameEl.innerText = data.accounts[0].display_name || data.accounts[0].user_id || "Linked";
-            if (linkBtn) linkBtn.style.display = "none";
+            const reauthCount = data.accounts.filter(account => account.reauth_required).length;
+            header.style.background = reauthCount ? "#fff3cd" : "#e6ffed";
+            header.style.border = reauthCount ? "1px solid #d39e00" : "1px solid #28a745";
+            const labels = data.accounts.map(account =>
+                account.display_name || account.user_id || "Linked");
+            const linkedLabel = labels.length === 1
+                ? labels[0]
+                : `${labels.length} linked accounts`;
+            nameEl.innerText = reauthCount
+                ? `${linkedLabel} (${reauthCount} need reauthorization)`
+                : linkedLabel;
+            if (linkBtn) {
+                linkBtn.innerText = "Manage";
+                linkBtn.style.display = "inline-block";
+            }
 
             // Show Prime Spotify buttons on all devices
             document.querySelectorAll(".btn-spotify").forEach((btn) => {
@@ -154,7 +165,10 @@ async function fetchSpotifyStatus() {
             header.style.background = "#f0f0f0";
             header.style.border = "1px solid #ccc";
             nameEl.innerText = "Not Linked";
-            if (linkBtn) linkBtn.style.display = "inline-block";
+            if (linkBtn) {
+                linkBtn.innerText = "Link Account";
+                linkBtn.style.display = "inline-block";
+            }
 
             document.querySelectorAll(".btn-spotify").forEach((btn) => {
                 btn.style.display = "none";
@@ -173,43 +187,12 @@ function toggleInfo(id) {
 }
 
 async function linkSpotify() {
-    try {
-        const response = await fetch("/api/mgmt/spotify/init", {method: "POST"});
-        if (!response.ok) {
-            if (response.status === 401) {
-                alert("Management login failed or was cancelled. Please try again — your browser should prompt for the Management API username/password.");
-            } else {
-                const err = await response.text();
-                alert("Failed to initialize Spotify link: " + err);
-            }
-            return;
-        }
-        const data = await response.json();
-        if (data.redirectUrl) {
-            // Open in a new tab
-            const win = window.open(data.redirectUrl, "_blank");
-            if (win) {
-                win.focus();
-                // Start polling for status change
-                const pollInterval = setInterval(async () => {
-                    const statusResponse = await fetch("/api/mgmt/spotify/accounts");
-                    if (statusResponse.ok) {
-                        const statusData = await statusResponse.json();
-                        if (statusData.accounts && statusData.accounts.length > 0) {
-                            clearInterval(pollInterval);
-                            fetchSpotifyStatus();
-                        }
-                    }
-                }, 2000);
-                // Stop polling after 2 minutes
-                setTimeout(() => clearInterval(pollInterval), 120000);
-            } else {
-                alert("Please allow popups to link your Spotify account.");
-            }
-        }
-    } catch (error) {
-        alert("Error linking Spotify: " + error.message);
+    openTab(null, "tab-account");
+    const statusEl = document.getElementById("spotify-reg-status");
+    if (statusEl) {
+        statusEl.innerText = "Select the local account that should own the Spotify source, then continue.";
     }
+    document.getElementById("account-selector")?.focus();
 }
 
 async function primeSpotify(deviceId) {
@@ -409,8 +392,21 @@ async function fetchSettings() {
         if (settings.spotify_redirect_uri !== undefined) {
             document.getElementById("spotify-redirect-uri").value = settings.spotify_redirect_uri || "";
         }
+        const spotifyRedirectStatus = document.getElementById("spotify-effective-redirect");
+        if (spotifyRedirectStatus && settings.spotify_effective_redirect_uri) {
+            spotifyRedirectStatus.textContent = "Effective callback: " + settings.spotify_effective_redirect_uri;
+            spotifyRedirectStatus.style.color = settings.spotify_redirect_uri_valid ? "#4b5563" : "#c62828";
+            if (!settings.spotify_redirect_uri_valid && settings.spotify_redirect_uri_error) {
+                spotifyRedirectStatus.textContent += " (" + settings.spotify_redirect_uri_error + ")";
+            }
+        }
         const spotifyStatus = document.getElementById("spotify-config-status");
-        if (settings.spotify_configured) {
+        if (!settings.spotify_authorization_valid && settings.spotify_client_id) {
+            const error = settings.spotify_authorization_error || "configuration is invalid";
+            if (spotifyStatus) spotifyStatus.textContent = "Invalid: " + error;
+            if (spotifyStatus) spotifyStatus.style.color = "#c62828";
+            setIntegrationBadge("spotify-badge", "inactive");
+        } else if (settings.spotify_configured) {
             if (spotifyStatus) spotifyStatus.innerHTML = '<span style="color: green;">✅ Active</span>';
             setIntegrationBadge("spotify-badge", "active");
         } else if (settings.spotify_client_id) {
@@ -1060,16 +1056,21 @@ async function fetchAccountList() {
         const data = await response.json();
         const selector = document.getElementById("account-selector");
         if (selector) {
+            const previous = selector.value;
             // Account IDs can contain non-alphanumeric characters (e.g.
             // "stick@local", #634) — built via DOM APIs, not innerHTML.
-            selector.replaceChildren(...data.accounts.map(acc => {
+            const placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "Select a local account...";
+            selector.replaceChildren(placeholder, ...data.accounts.map(acc => {
                 const opt = document.createElement("option");
                 opt.value = acc;
                 opt.textContent = acc;
                 return opt;
             }));
-            if (data.accounts.length > 0) {
-                fetchAccountDetails(selector.value);
+            if (previous && data.accounts.includes(previous)) {
+                selector.value = previous;
+                fetchAccountDetails(previous);
             }
         }
     } catch (error) {
@@ -1366,8 +1367,14 @@ async function fetchAccountDetails(accountId) {
 
 async function connectSpotifyToAccount() {
     const selector = document.getElementById("account-selector");
-    const accountId = selector ? selector.value : "default";
+    const accountId = selector ? selector.value : "";
     const statusEl = document.getElementById("spotify-reg-status");
+
+    if (!accountId) {
+        if (statusEl) statusEl.innerText = "Select the local account that should own this Spotify source.";
+        selector?.focus();
+        return;
+    }
 
     if (statusEl) statusEl.innerHTML = "Initializing Spotify authorization...";
 

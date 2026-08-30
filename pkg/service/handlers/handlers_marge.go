@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -247,79 +248,100 @@ func (s *Server) HandleMargePowerOn(w http.ResponseWriter, r *http.Request) {
 	var req models.CustomerSupportRequest
 	if err := xml.Unmarshal(body, &req); err != nil {
 		log.Printf("[Marge] Failed to parse power_on body: %v", err)
-
-		// Fallback to remote address if body parsing fails
-		if host := clientHost(r); host != "" {
-			go s.PrimeDeviceWithSpotify(host)
-		}
-
 		w.WriteHeader(http.StatusOK)
 
 		return
 	}
 
 	deviceID := req.Device.ID
-	deviceIP := req.DiagnosticData.DeviceLandscape.IPAddress
+	bodyIP := req.DiagnosticData.DeviceLandscape.IPAddress
+	peerIP := margePowerOnPeerIP(clientHost(r))
 
-	log.Printf("[Marge] Device %s powered on (IP: %s)", sanitizeLog(deviceID), sanitizeLog(deviceIP))
+	log.Printf("[Marge] Device %s powered on (body IP: %s, peer IP: %s)",
+		sanitizeLog(deviceID), sanitizeLog(bodyIP), sanitizeLog(peerIP))
 
-	// Persist device details provided in the power_on request
-	if deviceID != "" && s.ds != nil {
-		// Use "default" account if not found or if the device is not yet mapped to an account.
-		// In a real scenario, this might be resolved differently if we already have the account info.
-		accountID := "default"
-		if existing := s.findExistingDeviceInfoByDeviceID(deviceID); existing != nil && existing.AccountID != "" {
-			accountID = existing.AccountID
-		}
+	if deviceID == "" || s.ds == nil || peerIP == "" {
+		w.WriteHeader(http.StatusOK)
 
-		macAddress := ""
-		if len(req.DiagnosticData.DeviceLandscape.MacAddresses) > 0 {
-			macAddress = req.DiagnosticData.DeviceLandscape.MacAddresses[0]
-		}
-
-		info := &models.ServiceDeviceInfo{
-			DeviceID:            deviceID,
-			AccountID:           accountID,
-			ProductCode:         req.Device.Product.ProductCode,
-			DeviceSerialNumber:  req.Device.SerialNumber,
-			ProductSerialNumber: req.Device.Product.SerialNumber,
-			FirmwareVersion:     req.Device.FirmwareVersion,
-			IPAddress:           deviceIP,
-			MacAddress:          macAddress,
-			DiscoveryMethod:     "power_on",
-		}
-
-		if err := s.ds.SaveDeviceInfo(accountID, deviceID, info); err != nil {
-			log.Printf("[Marge] Failed to save device info for %s: %s", sanitizeLog(deviceID), sanitizeErr(err))
-		}
+		return
 	}
 
-	// Prefer the TCP source address over the body's self-reported IP for
-	// any outbound credential push. The body field is attacker-controllable
-	// (a malicious LAN-resident speaker can set it to any value), while
-	// clientHost(r) is the actual peer — and if the service runs behind a
-	// trusted reverse proxy, the ClientIP middleware has already populated
-	// the context from X-Forwarded-For. We log when the two
-	// disagree so the discrepancy is investigable but never trust the body.
-	remoteHost := clientHost(r)
+	// Keep ownership validation and persistence in one server-level critical
+	// section. SaveDeviceInfo is atomic on disk, but a separate preflight read
+	// allowed two first-seen peers to both validate and the later write to remap
+	// the same device.
+	s.spotifyPowerOnMu.Lock()
+	existing := s.findExistingDeviceInfoByDeviceID(deviceID)
+	if existing != nil && !sameMargePowerOnIP(existing.IPAddress, peerIP) {
+		s.spotifyPowerOnMu.Unlock()
+		log.Printf("[Marge] Ignoring power_on metadata from peer %s for device %s bound to %s",
+			sanitizeLog(peerIP), sanitizeLog(deviceID), sanitizeLog(existing.IPAddress))
+		w.WriteHeader(http.StatusOK)
 
-	if deviceIP != "" && remoteHost != "" && deviceIP != remoteHost {
-		log.Printf("[Marge] power_on body IP %q differs from TCP source %q for device %s — using TCP source for credential push",
-			sanitizeLog(deviceIP), sanitizeLog(remoteHost), sanitizeLog(deviceID))
+		return
+	}
+	if existing != nil && existing.AccountID == "" {
+		s.spotifyPowerOnMu.Unlock()
+		log.Printf("[Marge] Ignoring power_on metadata for device %s without a canonical account binding",
+			sanitizeLog(deviceID))
+		w.WriteHeader(http.StatusOK)
+
+		return
 	}
 
-	target := remoteHost
-	if target == "" {
-		// RemoteAddr was unparseable (shouldn't happen under net/http) —
-		// fall back to the body so we don't silently skip the push.
-		target = deviceIP
+	accountID := "default"
+	if existing != nil {
+		accountID = existing.AccountID
 	}
 
-	if target != "" {
-		go s.PrimeDeviceWithSpotify(target)
+	macAddress := ""
+	if len(req.DiagnosticData.DeviceLandscape.MacAddresses) > 0 {
+		macAddress = req.DiagnosticData.DeviceLandscape.MacAddresses[0]
+	}
+
+	info := &models.ServiceDeviceInfo{
+		DeviceID:            deviceID,
+		AccountID:           accountID,
+		ProductCode:         req.Device.Product.ProductCode,
+		DeviceSerialNumber:  req.Device.SerialNumber,
+		ProductSerialNumber: req.Device.Product.SerialNumber,
+		FirmwareVersion:     req.Device.FirmwareVersion,
+		IPAddress:           peerIP,
+		MacAddress:          macAddress,
+		DiscoveryMethod:     "power_on",
+	}
+
+	if err := s.ds.SaveDeviceInfo(accountID, deviceID, info); err != nil {
+		s.spotifyPowerOnMu.Unlock()
+		log.Printf("[Marge] Failed to save device info for %s: %s", sanitizeLog(deviceID), sanitizeErr(err))
+		w.WriteHeader(http.StatusOK)
+
+		return
+	}
+	shouldPrime := existing != nil && accountID != "default"
+	s.spotifyPowerOnMu.Unlock()
+
+	if shouldPrime && s.spotifyPowerOnPrimer != nil {
+		s.spotifyPowerOnPrimer(peerIP)
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func margePowerOnPeerIP(clientIP string) string {
+	ip := net.ParseIP(clientIP)
+	if ip == nil {
+		return ""
+	}
+
+	return ip.String()
+}
+
+func sameMargePowerOnIP(storedIP, peerIP string) bool {
+	stored := net.ParseIP(storedIP)
+	peer := net.ParseIP(peerIP)
+
+	return stored != nil && peer != nil && stored.Equal(peer)
 }
 
 // HandleMargeAccountProfile returns the account profile.
@@ -740,7 +762,9 @@ func (s *Server) HandleMargeAddSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.spotifySourceMu.Lock()
 	resp, err := marge.AddSourceToAccount(s.ds, account, body)
+	s.spotifySourceMu.Unlock()
 	if err != nil {
 		log.Printf("[Marge] Failed to add source: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -766,7 +790,10 @@ func (s *Server) HandleMargeDeleteSource(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := marge.RemoveSourceFromAccount(s.ds, account, sourceID); err != nil {
+	s.spotifySourceMu.Lock()
+	err := marge.RemoveSourceFromAccount(s.ds, account, sourceID)
+	s.spotifySourceMu.Unlock()
+	if err != nil {
 		log.Printf("[Marge] Failed to remove source %s: %v", sanitizeLog(sourceID), sanitizeErr(err))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 

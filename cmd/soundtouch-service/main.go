@@ -134,28 +134,36 @@ func initializeDefaultSources(ds *datastore.DataStore) {
 
 func initMusicServices(config serviceConfig, server *handlers.Server) {
 	if config.spotifyClientID != "" {
-		spotifyService := spotify.NewSpotifyService(
-			config.spotifyClientID,
-			config.spotifyClientSecret,
-			config.spotifyRedirectURI,
-			config.dataDir,
-		)
-		if config.spotifyTokenURL != "" || config.spotifyAPIBase != "" {
-			spotifyService.SetEndpoints(config.spotifyTokenURL, config.spotifyAPIBase)
+		redirectURI := config.spotifyRedirectURI
+		if redirectURI == "" {
+			redirectURI = server.EffectiveSpotifyRedirectURI()
 		}
+		if err := handlers.ValidateSpotifyAuthorizationConfig(config.spotifyClientID, config.spotifyClientSecret, redirectURI); err != nil {
+			log.Printf("[Spotify] Integration disabled: %s", sanitizeLog(err.Error()))
+		} else {
+			spotifyService := spotify.NewSpotifyService(
+				config.spotifyClientID,
+				config.spotifyClientSecret,
+				redirectURI,
+				config.dataDir,
+			)
+			if config.spotifyTokenURL != "" || config.spotifyAPIBase != "" {
+				spotifyService.SetEndpoints(config.spotifyTokenURL, config.spotifyAPIBase)
+			}
 
-		if err := spotifyService.Load(); err != nil {
-			log.Printf("[Spotify] Failed to load accounts: %v", err)
+			if err := spotifyService.Load(); err != nil {
+				log.Printf("[Spotify] Failed to load accounts: %v", err)
+			}
+
+			server.SetSpotifyService(spotifyService)
+
+			clientIDPrefix := config.spotifyClientID
+			if len(clientIDPrefix) > 8 {
+				clientIDPrefix = clientIDPrefix[:8]
+			}
+
+			log.Printf("Spotify service initialized (client ID: %s...)", sanitizeLog(clientIDPrefix))
 		}
-
-		server.SetSpotifyService(spotifyService)
-
-		clientIDPrefix := config.spotifyClientID
-		if len(clientIDPrefix) > 8 {
-			clientIDPrefix = clientIDPrefix[:8]
-		}
-
-		log.Printf("Spotify service initialized (client ID: %s...)", sanitizeLog(clientIDPrefix))
 	}
 
 	if config.amazonClientID != "" {
@@ -1823,6 +1831,7 @@ func setupRouter(server *handlers.Server, stockholmHandler *stockholm.Handler, w
 		// user's browser here directly). The authorization code is single-use,
 		// short-lived, and useless without the client_secret. Not aliased under
 		// /api/mgmt (externally-pinned redirect URIs).
+		r.Get("/spotify/start", server.HandleMgmtSpotifyStart)
 		r.Get("/spotify/callback", server.HandleMgmtSpotifyCallback)
 		r.Get("/amazon/callback", server.HandleMgmtAmazonCallback)
 
