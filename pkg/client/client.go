@@ -1429,14 +1429,17 @@ func (c *Client) GetZoneMembers() ([]string, error) {
 // distinguish with (*Group).IsEmpty().
 //
 // ST-10 is the only product that supports stereo pairs. Verified against
-// real hardware: a SoundTouch 20 does not reply to /getGroup at all -- the
-// request hangs until the client's own timeout (30s by default, see
-// DefaultConfig) rather than returning an empty group quickly. Callers on
-// a poll cycle must gate this call behind a stereo-pair-capable model check
-// (see stereoPairCapable in pkg/service/soundtouchweb) instead of relying on
-// a fast, harmless response on unsupported models. The endpoint is named
-// /getGroup on the device (mirroring /getZone), even though some
-// third-party wikis document it as plain /group.
+// real hardware: a SoundTouch 20 does not reply to /getGroup promptly. The
+// device's own firmware ("AllegroWebserver") eventually answers with a
+// plain-text "AllegroWebserver timeout: /getGroup" error body after an
+// internal delay exceeding several seconds, but well within the client's
+// own timeout (30s by default, see DefaultConfig) the request just looks
+// like it never replied at all. Callers on a poll cycle must gate this call
+// behind a stereo-pair-capable model check (see stereoPairCapable in
+// pkg/service/soundtouchweb) instead of relying on a fast, harmless
+// response on unsupported models. The endpoint is named /getGroup on the
+// device (mirroring /getZone), even though some third-party wikis document
+// it as plain /group.
 func (c *Client) GetGroup() (*models.Group, error) {
 	var g models.Group
 
