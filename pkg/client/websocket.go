@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -16,17 +17,33 @@ import (
 
 // WebSocketClient handles WebSocket connections to SoundTouch devices
 type WebSocketClient struct {
-	client     *Client
-	conn       *websocket.Conn
-	handlers   *models.WebSocketEventHandlers
-	mu         sync.RWMutex
-	writeMu    sync.Mutex // serializes all writes; gorilla/websocket allows one concurrent writer
-	connected  bool
-	reconnect  bool
-	ctx        context.Context
-	cancel     context.CancelFunc
-	logger     Logger
-	bufferSize int
+	client      *Client
+	conn        *websocket.Conn
+	connection  *webSocketConnection
+	handlers    *models.WebSocketEventHandlers
+	mu          sync.RWMutex
+	connectMu   sync.Mutex // serializes dial attempts without blocking shutdown
+	writeMu     sync.Mutex // serializes all writes; gorilla/websocket allows one concurrent writer
+	connected   bool
+	reconnect   bool
+	ctx         context.Context
+	cancel      context.CancelFunc
+	logger      Logger
+	bufferSize  int
+	dialContext webSocketDialContext
+
+	transportHandler    func(connected bool, generation uint64)
+	transportGeneration uint64
+}
+
+type webSocketDialContext func(context.Context, string, http.Header) (*websocket.Conn, *http.Response, error)
+
+// webSocketConnection gives each transport generation its own lifecycle so an
+// old read or ping loop cannot start using a replacement connection.
+type webSocketConnection struct {
+	conn   *websocket.Conn
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // Logger interface for WebSocket logging
@@ -159,6 +176,23 @@ func (ws *WebSocketClient) OnBassUpdated(handler models.TypedEventHandler[*model
 	ws.handlers.OnBassUpdated = handler
 }
 
+// OnNameUpdated sets a handler for device name update events.
+func (ws *WebSocketClient) OnNameUpdated(handler models.TypedEventHandler[*models.NameUpdatedEvent]) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	ws.handlers.OnNameUpdated = handler
+}
+
+// OnTransportState observes authoritative connection transitions. Generation
+// numbers let consumers reject callbacks that arrive out of order.
+func (ws *WebSocketClient) OnTransportState(handler func(connected bool, generation uint64)) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	ws.transportHandler = handler
+}
+
 // OnUnknownEvent sets a handler for unknown events
 func (ws *WebSocketClient) OnUnknownEvent(handler models.EventHandler) {
 	ws.mu.Lock()
@@ -198,11 +232,20 @@ func (ws *WebSocketClient) ConnectWithConfig(config *WebSocketConfig) error {
 }
 
 func (ws *WebSocketClient) connectWithConfig(config *WebSocketConfig) error {
-	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	ws.connectMu.Lock()
+	defer ws.connectMu.Unlock()
 
+	ws.mu.RLock()
 	if ws.connected {
+		ws.mu.RUnlock()
 		return fmt.Errorf("already connected")
+	}
+	ctx := ws.ctx
+	dialContext := ws.dialContext
+	ws.mu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("WebSocket client is closed: %w", err)
 	}
 
 	// Build WebSocket URL
@@ -220,16 +263,20 @@ func (ws *WebSocketClient) connectWithConfig(config *WebSocketConfig) error {
 
 	ws.logger.Printf("Connecting to %s", sanitizeLog(wsURL.String()))
 
-	// Create dialer with custom buffer sizes and "gabbo" protocol
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-		ReadBufferSize:   config.ReadBufferSize,
-		WriteBufferSize:  config.WriteBufferSize,
-		Subprotocols:     []string{"gabbo"}, // Required by SoundTouch API
+	if dialContext == nil {
+		// Create dialer with custom buffer sizes and "gabbo" protocol.
+		dialer := websocket.Dialer{
+			HandshakeTimeout: 10 * time.Second,
+			ReadBufferSize:   config.ReadBufferSize,
+			WriteBufferSize:  config.WriteBufferSize,
+			Subprotocols:     []string{"gabbo"}, // Required by SoundTouch API
+		}
+		dialContext = dialer.DialContext
 	}
 
-	// Establish connection
-	conn, resp, err := dialer.DialContext(ws.ctx, wsURL.String(), nil)
+	// Dial without holding the state mutex so shutdown can cancel the context
+	// immediately instead of waiting for the handshake timeout.
+	conn, resp, err := dialContext(ctx, wsURL.String(), nil)
 	if resp != nil && resp.Body != nil {
 		defer func() { _ = resp.Body.Close() }()
 	}
@@ -238,8 +285,50 @@ func (ws *WebSocketClient) connectWithConfig(config *WebSocketConfig) error {
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
 
+	ws.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		ws.mu.Unlock()
+		_ = conn.Close()
+
+		return fmt.Errorf("WebSocket client closed during connect: %w", err)
+	}
+	if ws.connected {
+		ws.mu.Unlock()
+		_ = conn.Close()
+
+		return fmt.Errorf("already connected")
+	}
+	connection, transportHandler, transportGeneration := ws.activateConnectionLocked(conn)
+	ws.mu.Unlock()
+
+	notifyTransportState(transportHandler, true, transportGeneration)
+	go ws.readLoop(config, connection)
+	go ws.pingLoop(config, connection)
+
+	ws.logger.Printf("Connected to %s", sanitizeLog(wsURL.String()))
+
+	return nil
+}
+
+func (ws *WebSocketClient) activateConnectionLocked(
+	conn *websocket.Conn,
+) (*webSocketConnection, func(bool, uint64), uint64) {
+	if ws.connection != nil {
+		ws.connection.cancel()
+		_ = ws.connection.conn.Close()
+	}
+
+	connectionCtx, connectionCancel := context.WithCancel(ws.ctx)
+	connection := &webSocketConnection{
+		conn:   conn,
+		ctx:    connectionCtx,
+		cancel: connectionCancel,
+	}
+
 	ws.conn = conn
+	ws.connection = connection
 	ws.connected = true
+	ws.transportGeneration++
 
 	// Extend the read deadline on every pong so the connection survives
 	// quiet periods between speaker events. Without this, the 60-second
@@ -250,39 +339,88 @@ func (ws *WebSocketClient) connectWithConfig(config *WebSocketConfig) error {
 		return nil
 	})
 
-	// Start background goroutines for connection management
-	go ws.readLoop(config)
-	go ws.pingLoop(config)
-
-	ws.logger.Printf("Connected to %s", sanitizeLog(wsURL.String()))
-
-	return nil
+	return connection, ws.transportHandler, ws.transportGeneration
 }
 
 // Disconnect closes the WebSocket connection
 func (ws *WebSocketClient) Disconnect() error {
+	// Cancel first so an in-progress DialContext wakes without waiting for mu.
+	ws.cancel()
+
 	ws.mu.Lock()
-	defer ws.mu.Unlock()
-
-	if !ws.connected {
-		return fmt.Errorf("not connected")
-	}
-
+	wasConnected := ws.connected
 	ws.reconnect = false
-	ws.cancel() // Cancel context to stop goroutines
+	if ws.connection != nil {
+		ws.connection.cancel()
+		ws.connection = nil
+	}
+	conn := ws.conn
+	ws.conn = nil
+	ws.connected = false
+	var (
+		transportHandler    func(bool, uint64)
+		transportGeneration uint64
+	)
+	if wasConnected {
+		ws.transportGeneration++
+		transportHandler = ws.transportHandler
+		transportGeneration = ws.transportGeneration
+	}
+	ws.mu.Unlock()
 
-	if ws.conn != nil {
-		err := ws.conn.Close()
-		ws.conn = nil
-		ws.connected = false
+	if conn != nil {
+		err := conn.Close()
 		ws.logger.Printf("Disconnected")
+
+		notifyTransportState(transportHandler, false, transportGeneration)
 
 		return err
 	}
-
-	ws.connected = false
+	notifyTransportState(transportHandler, false, transportGeneration)
+	if !wasConnected {
+		return fmt.Errorf("not connected")
+	}
 
 	return nil
+}
+
+// Close permanently stops this client and is idempotent. Device registries use
+// it when removal races an initial dial or an automatic reconnect.
+func (ws *WebSocketClient) Close() error {
+	ws.cancel()
+
+	ws.mu.Lock()
+	wasConnected := ws.connected
+	ws.reconnect = false
+	if ws.connection != nil {
+		ws.connection.cancel()
+		ws.connection = nil
+	}
+	conn := ws.conn
+	ws.conn = nil
+	ws.connected = false
+	var (
+		transportHandler    func(bool, uint64)
+		transportGeneration uint64
+	)
+	if wasConnected {
+		ws.transportGeneration++
+		transportHandler = ws.transportHandler
+		transportGeneration = ws.transportGeneration
+	}
+	ws.mu.Unlock()
+
+	if conn == nil {
+		notifyTransportState(transportHandler, false, transportGeneration)
+
+		return nil
+	}
+
+	err := conn.Close()
+	ws.logger.Printf("Disconnected")
+	notifyTransportState(transportHandler, false, transportGeneration)
+
+	return err
 }
 
 // IsConnected returns true if the WebSocket is connected
@@ -293,45 +431,61 @@ func (ws *WebSocketClient) IsConnected() bool {
 	return ws.connected
 }
 
+func (ws *WebSocketClient) shouldReconnect() bool {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	return ws.reconnect
+}
+
+func notifyTransportState(handler func(bool, uint64), connected bool, generation uint64) {
+	if handler != nil {
+		handler(connected, generation)
+	}
+}
+
 // readLoop continuously reads messages from the WebSocket connection
-func (ws *WebSocketClient) readLoop(config *WebSocketConfig) {
+func (ws *WebSocketClient) readLoop(config *WebSocketConfig, connection *webSocketConnection) {
 	defer func() {
 		ws.mu.Lock()
+		if ws.connection != connection {
+			ws.mu.Unlock()
+			connection.cancel()
+			_ = connection.conn.Close()
 
-		ws.connected = false
-		if ws.conn != nil {
-			_ = ws.conn.Close()
-			ws.conn = nil
+			return
 		}
 
+		connection.cancel()
+		ws.connection = nil
+		ws.conn = nil
+		ws.connected = false
+		ws.transportGeneration++
+		transportHandler := ws.transportHandler
+		transportGeneration := ws.transportGeneration
+		reconnect := ws.reconnect
 		ws.mu.Unlock()
+		_ = connection.conn.Close()
+		notifyTransportState(transportHandler, false, transportGeneration)
 
 		// Attempt reconnection if enabled
-		if ws.reconnect {
+		if reconnect {
 			go ws.attemptReconnect(config)
 		}
 	}()
 
 	for {
 		select {
-		case <-ws.ctx.Done():
+		case <-connection.ctx.Done():
 			return
 		default:
 		}
 
-		ws.mu.RLock()
-		conn := ws.conn
-		ws.mu.RUnlock()
-
-		if conn == nil {
-			return
-		}
-
 		// Set read deadline
-		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		_ = connection.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		// Read message
-		messageType, data, err := conn.ReadMessage()
+		messageType, data, err := connection.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				ws.logger.Printf("WebSocket read error: %v", err)
@@ -351,29 +505,19 @@ func (ws *WebSocketClient) readLoop(config *WebSocketConfig) {
 }
 
 // pingLoop sends periodic ping messages to keep the connection alive
-func (ws *WebSocketClient) pingLoop(config *WebSocketConfig) {
+func (ws *WebSocketClient) pingLoop(config *WebSocketConfig, connection *webSocketConnection) {
 	ticker := time.NewTicker(config.PingInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ws.ctx.Done():
+		case <-connection.ctx.Done():
 			return
 		case <-ticker.C:
-			ws.mu.RLock()
-			conn := ws.conn
-			connected := ws.connected
-			ws.mu.RUnlock()
-
-			if !connected || conn == nil {
+			active, err := ws.writePing(connection)
+			if !active {
 				return
 			}
-
-			// Set write deadline for ping
-			ws.writeMu.Lock()
-			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			err := conn.WriteMessage(websocket.PingMessage, nil)
-			ws.writeMu.Unlock()
 
 			if err != nil {
 				ws.logger.Printf("Failed to send ping: %v", err)
@@ -383,10 +527,26 @@ func (ws *WebSocketClient) pingLoop(config *WebSocketConfig) {
 	}
 }
 
+func (ws *WebSocketClient) writePing(connection *webSocketConnection) (bool, error) {
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
+
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	if connection.ctx.Err() != nil || ws.connection != connection || !ws.connected {
+		return false, nil
+	}
+
+	_ = connection.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
+	return true, connection.conn.WriteMessage(websocket.PingMessage, nil)
+}
+
 // attemptReconnect attempts to reconnect to the WebSocket
 func (ws *WebSocketClient) attemptReconnect(config *WebSocketConfig) {
 	attempt := 0
-	for ws.reconnect && (config.MaxReconnectAttempts == 0 || attempt < config.MaxReconnectAttempts) {
+	for ws.shouldReconnect() && (config.MaxReconnectAttempts == 0 || attempt < config.MaxReconnectAttempts) {
 		select {
 		case <-ws.ctx.Done():
 			return
@@ -529,6 +689,13 @@ func (ws *WebSocketClient) dispatchTypedEventContinued(handlers *models.WebSocke
 	case models.EventTypeBassUpdated:
 		if handlers.OnBassUpdated != nil && event.BassUpdated != nil {
 			handlers.OnBassUpdated(event.BassUpdated)
+		}
+
+		return true
+
+	case models.EventTypeNameUpdated:
+		if handlers.OnNameUpdated != nil && event.NameUpdated != nil {
+			handlers.OnNameUpdated(event.NameUpdated)
 		}
 
 		return true

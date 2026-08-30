@@ -1,45 +1,33 @@
 import { h } from 'preact';
 import { useState } from 'preact/hooks';
 import htm from 'htm';
+import {
+    connectivityLabel,
+    connectivityState,
+    sortDeviceEntries,
+} from '../devicePresentation.js';
 
 const html = htm.bind(h);
 
 const SORT_LS_KEY = 'aftertouch_device_sort';
 
-function sortEntries(entries, mode) {
-    const copy = [...entries];
-    if (mode === 'name') {
-        // Sort by the speaker's display name, falling back to the map key (its IP)
-        // when a device has no name yet.
-        copy.sort(([idA, a], [idB, b]) =>
-            (a?.info?.name || idA).localeCompare(b?.info?.name || idB, undefined, { sensitivity: 'base' }));
-    } else {
-        // Default: by IP (the map key), ordered numerically so .2 precedes .10.
-        copy.sort(([idA], [idB]) =>
-            idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' }));
-    }
-    return copy;
-}
-
-function DeviceCard({ id, device, onSelect, onRemove }) {
+function DeviceCard({ id, device, onSelect }) {
     const { info, status } = device;
     const stereoPair = device.stereoPair;
     const np = status?.nowPlaying;
     const isPlaying = np?.PlayStatus === 'PLAY_STATE';
     const isStandby = !np || np.Source === 'STANDBY';
+    const connectivity = connectivityState(device);
+    const statusLabel = `Connectivity: ${connectivityLabel(device)}`;
 
     return html`
-        <div class="device-card" onClick=${() => onSelect(id)}>
-            <div class="device-header">
+        <button type="button" class="device-card" onClick=${() => onSelect(id)}>
+            <span class="device-header">
                 <span class="device-name" title=${info?.name || id}>${info?.name || id}</span>
-                <span class="device-header-right">
-                    <span class="device-indicator ${status?.isConnected ? 'online' : 'offline'}"></span>
-                    ${!stereoPair ? html`<button class="device-remove" title="Remove this device"
-                            aria-label="Remove this device"
-                            onClick=${(e) => { e.stopPropagation(); onRemove(id); }}>✕</button>` : null}
-                </span>
-            </div>
-            <div class="device-type">
+                <span class="device-indicator ${connectivity}" role="status"
+                      title=${statusLabel} aria-label=${statusLabel}></span>
+            </span>
+            <span class="device-type">
                 ${info?.type || ''}
                 ${info?.ip_address ? html`<span class="device-ip">(${info.ip_address})</span>` : null}
                 ${stereoPair ? html`
@@ -47,20 +35,20 @@ function DeviceCard({ id, device, onSelect, onRemove }) {
                         Stereo pair ${stereoPair.availableMemberCount}/${stereoPair.memberCount}
                     </span>
                 ` : null}
-            </div>
+            </span>
             ${!isStandby ? html`
-                <div class="now-playing-mini" title=${[np.Track || np.StationName || np.Source, np.Artist].filter(Boolean).join(' - ')}>
+                <span class="now-playing-mini" title=${[np.Track || np.StationName || np.Source, np.Artist].filter(Boolean).join(' - ')}>
                     <span class="play-status">${isPlaying ? '▶' : '⏸'}</span>
                     <span class="track-mini">${np.Track || np.StationName || np.Source}</span>
                     ${np.Artist ? html`<span class="artist-mini"> — ${np.Artist}</span>` : null}
-                </div>
+                </span>
             ` : null}
-            ${isStandby ? html`<div class="standby-label">Standby</div>` : null}
-        </div>
+            ${isStandby ? html`<span class="standby-label">Standby</span>` : null}
+        </button>
     `;
 }
 
-export function DeviceList({ devices, isDiscovering, onSelect, onDiscover, onRemove }) {
+export function DeviceList({ devices, isDiscovering, onSelect, onDiscover }) {
     const [sortMode, setSortMode] = useState(() => localStorage.getItem(SORT_LS_KEY) || 'ip');
 
     function changeSort(mode) {
@@ -68,7 +56,7 @@ export function DeviceList({ devices, isDiscovering, onSelect, onDiscover, onRem
         localStorage.setItem(SORT_LS_KEY, mode);
     }
 
-    const entries = sortEntries(Object.entries(devices), sortMode);
+    const entries = sortDeviceEntries(Object.entries(devices), sortMode);
 
     return html`
         <div class="device-list-container">
@@ -91,13 +79,9 @@ export function DeviceList({ devices, isDiscovering, onSelect, onDiscover, onRem
                 </div>
                 <div class="device-grid" key="grid">
                     ${entries.map(([id, device]) => html`
-                        <${DeviceCard} key=${id} id=${id} device=${device} onSelect=${onSelect} onRemove=${onRemove} />
+                        <${DeviceCard} key=${id} id=${id} device=${device} onSelect=${onSelect} />
                     `)}
-                </div>
-                <p class="device-list-note" key="note">
-                    Removing a device clears it here. One that is still online may
-                    reappear after the next discovery scan.
-                </p>`
+                </div>`
         }
         </div>
     `;

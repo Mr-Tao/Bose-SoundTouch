@@ -14,14 +14,18 @@ import (
 )
 
 func projectionDevice(host, deviceID, name string, connected bool, group *models.Group) DeviceEntry {
+	return projectionDeviceAt(host, host, deviceID, name, connected, group)
+}
+
+func projectionDeviceAt(controlID, address, deviceID, name string, connected bool, group *models.Group) DeviceEntry {
 	conn := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
 		DeviceID:  deviceID,
 		Name:      name,
-		IPAddress: host,
+		IPAddress: address,
 	})
 	conn.SetStatus(&webtypes.DeviceStatus{IsConnected: connected, Group: group})
 
-	return DeviceEntry{ID: host, Device: conn, LastSeen: conn.LastSeen}
+	return DeviceEntry{ID: controlID, Device: conn, LastSeen: conn.LastSeen}
 }
 
 func testStereoGroup() *models.Group {
@@ -103,6 +107,46 @@ func TestProjectDeviceEntriesNormalizesMemberRoleAndDeviceID(t *testing.T) {
 		if member.Role != strings.ToUpper(member.Role) {
 			t.Errorf("member Role = %q, want upper-cased", member.Role)
 		}
+	}
+}
+
+func TestProjectDeviceEntriesKeepsHostnameControlIDSeparateFromAddress(t *testing.T) {
+	entry := projectionDeviceAt("kitchen.local", "192.0.2.10", "kitchen-id", "Kitchen", true, nil)
+	got := projectDeviceEntries([]DeviceEntry{entry})
+
+	view, ok := got["kitchen.local"]
+	if !ok || len(got) != 1 {
+		t.Fatalf("hostname-keyed projection = %+v", got)
+	}
+	if view.Info == nil || view.Info.IPAddress != "192.0.2.10" {
+		t.Fatalf("presentation address = %+v, want canonical numeric IP", view.Info)
+	}
+}
+
+func TestProjectDeviceEntriesUsesLatestInfoName(t *testing.T) {
+	entry := projectionDevice("192.0.2.10", "kitchen-id", "Old Kitchen", true, nil)
+	entry.Device.ApplyNameEvent("Kitchen")
+
+	view := projectDeviceEntries([]DeviceEntry{entry})["192.0.2.10"]
+	if view.Info == nil || view.Info.Name != "Kitchen" {
+		t.Fatalf("projected info = %+v, want latest event name", view.Info)
+	}
+}
+
+func TestProjectDeviceEntriesTreatsStaleStereoMemberAsAvailable(t *testing.T) {
+	group := testStereoGroup()
+	left := projectionDevice("192.0.2.10", "left-id", "Living Room", false, group)
+	left.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Connectivity = webtypes.ConnectivityStale
+	})
+	right := projectionDevice("192.0.2.11", "right-id", "Living Room", true, group)
+	right.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.Connectivity = webtypes.ConnectivityOnline
+	})
+
+	pair := projectDeviceEntries([]DeviceEntry{left, right})["192.0.2.10"].StereoPair
+	if pair == nil || pair.AvailableMemberCount != 2 || pair.Degraded {
+		t.Fatalf("stale logical member was treated as offline: %+v", pair)
 	}
 }
 

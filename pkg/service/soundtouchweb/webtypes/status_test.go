@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 )
 
@@ -23,9 +24,267 @@ func TestNewDeviceConnection_InitialStatus(t *testing.T) {
 	if status.IsConnected {
 		t.Error("IsConnected should default to false")
 	}
+	if status.Connectivity != ConnectivityOffline {
+		t.Errorf("Connectivity = %q, want %q", status.Connectivity, ConnectivityOffline)
+	}
 
 	if status.LastActivity.IsZero() {
 		t.Error("LastActivity should be initialised, got zero time")
+	}
+}
+
+func TestDeviceConnectionRejectsWebSocketAfterClose(t *testing.T) {
+	conn := NewDeviceConnection(nil, nil)
+	conn.Close()
+
+	ws := client.NewClientFromHost("192.0.2.10").NewWebSocketClient(nil)
+	if conn.SetWebSocket(ws) {
+		t.Fatal("SetWebSocket() accepted a transport after Close()")
+	}
+	if got := conn.CurrentWebSocket(); got != nil {
+		t.Fatalf("CurrentWebSocket() = %p after Close(), want nil", got)
+	}
+
+	waitDone := make(chan struct{})
+	go func() {
+		ws.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("rejected WebSocket transport was not stopped")
+	}
+}
+
+func TestDeviceConnectionWebSocketAccessConcurrentWithClose(t *testing.T) {
+	conn := NewDeviceConnection(nil, nil)
+	ws := client.NewClientFromHost("192.0.2.10").NewWebSocketClient(nil)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 100 {
+			conn.SetWebSocket(ws)
+			_ = conn.CurrentWebSocket()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		conn.Close()
+	}()
+
+	close(start)
+	wg.Wait()
+
+	if got := conn.CurrentWebSocket(); got != nil {
+		t.Fatalf("CurrentWebSocket() = %p after concurrent Close(), want nil", got)
+	}
+}
+
+func TestDeviceConnectionClearWebSocketPreservesReplacement(t *testing.T) {
+	conn := NewDeviceConnection(nil, nil)
+	soundTouchClient := client.NewClientFromHost("192.0.2.10")
+	original := soundTouchClient.NewWebSocketClient(nil)
+	replacement := soundTouchClient.NewWebSocketClient(nil)
+
+	conn.SetWebSocket(original)
+	conn.SetWebSocket(replacement)
+	if conn.ClearWebSocket(original) {
+		t.Fatal("ClearWebSocket() cleared a replacement transport")
+	}
+	if got := conn.CurrentWebSocket(); got != replacement {
+		t.Fatalf("CurrentWebSocket() = %p, want replacement %p", got, replacement)
+	}
+
+	_ = original.Close()
+	conn.Close()
+}
+
+func TestDeviceConnectionInfoReflectsUpdatedName(t *testing.T) {
+	discovered := &models.DeviceInfo{Name: "Living Room", DeviceID: "DEVICE01"}
+	conn := NewDeviceConnection(nil, discovered)
+
+	conn.ApplyNameEvent("Living Room Left")
+	info := conn.Info()
+
+	if info == nil || info.Name != "Living Room Left" || info.DeviceID != "DEVICE01" {
+		t.Fatalf("Info() = %+v, want updated name with original metadata", info)
+	}
+	if discovered.Name != "Living Room" {
+		t.Fatalf("discovery snapshot was mutated: %+v", discovered)
+	}
+}
+
+func TestNameEventSupersedesInFlightPoll(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "Initial"})
+	generation := conn.BeginNameRefresh()
+
+	conn.ApplyNameEvent("Event Name")
+	if conn.ApplyPolledName(generation, "Stale Poll Name") {
+		t.Fatal("stale name poll was accepted")
+	}
+	if got := conn.Info().Name; got != "Event Name" {
+		t.Fatalf("Info().Name = %q, want newer event name", got)
+	}
+}
+
+func TestConnectivityAggregatesHTTPAndEventStreamEvidence(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	conn.ObserveEventStream(true, started)
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("stream-only success = %+v", status)
+	}
+
+	failure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(failure, false, started.Add(30*time.Second), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("HTTP failure over live stream = %+v", status)
+	}
+
+	conn.ObserveEventStream(false, started.Add(30*time.Second))
+	status = conn.Status()
+	if status.Connectivity != ConnectivityStale || status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("direct-path loss within grace = %+v", status)
+	}
+
+	secondFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(secondFailure, false, started.Add(60*time.Second), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOffline || status.IsConnected {
+		t.Fatalf("sustained direct-path loss = %+v", status)
+	}
+
+	recovery := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(recovery, true, started.Add(61*time.Second), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.HTTPReachable || !status.IsConnected {
+		t.Fatalf("HTTP recovery = %+v", status)
+	}
+}
+
+func TestOlderHTTPFailureCannotDemoteNewerStreamActivity(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	older := conn.BeginHTTPPoll()
+	conn.ObserveEventStream(true, started.Add(61*time.Second))
+	if !conn.CompleteHTTPPoll(older, false, started.Add(62*time.Second), nil) {
+		t.Fatal("latest HTTP-channel observation was unexpectedly rejected")
+	}
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("older HTTP failure demoted newer stream success: %+v", status)
+	}
+}
+
+func TestOlderHTTPPayloadCannotOverwriteNewerSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	poll := conn.BeginHTTPPoll()
+	conn.ApplySpeakerEventAt(started.Add(time.Second), func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 99}
+	})
+	conn.CompleteHTTPPoll(poll, true, started.Add(2*time.Second), func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 42}
+	})
+
+	status := conn.Status()
+	if status.Volume == nil || status.Volume.ActualVolume != 99 {
+		t.Fatalf("speaker event was overwritten by older poll data: %+v", status.Volume)
+	}
+	if status.Connectivity != ConnectivityOnline || !status.HTTPReachable || !status.IsConnected {
+		t.Fatalf("poll health was not retained: %+v", status)
+	}
+}
+
+func TestOlderHTTPPollCannotOverwriteNewerSuccess(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	older := conn.BeginHTTPPoll()
+	newer := conn.BeginHTTPPoll()
+	if !conn.CompleteHTTPPoll(newer, true, started.Add(time.Second), nil) {
+		t.Fatal("newer successful poll was unexpectedly rejected")
+	}
+	if conn.CompleteHTTPPoll(older, false, started.Add(2*time.Second), nil) {
+		t.Fatal("older failed poll was unexpectedly accepted")
+	}
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.HTTPReachable || !status.IsConnected {
+		t.Fatalf("older poll overwrote newer success: %+v", status)
+	}
+}
+
+func TestOlderTransportCallbackCannotOverwriteNewerGeneration(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	if !conn.ObserveEventStreamTransport(3, true, started) {
+		t.Fatal("newer connected transport generation was unexpectedly rejected")
+	}
+	conn.ApplySpeakerEventAt(started.Add(time.Second), func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 42}
+	})
+	if conn.ObserveEventStreamTransport(2, false, started.Add(2*time.Second)) {
+		t.Fatal("older disconnected transport callback was unexpectedly accepted")
+	}
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("older transport callback demoted newer success: %+v", status)
+	}
+	if status.Volume == nil || status.Volume.ActualVolume != 42 {
+		t.Fatalf("speaker event payload was lost: %+v", status.Volume)
+	}
+}
+
+func TestInitialHTTPFailureStaysOfflineWithoutPriorSuccess(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	first := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(first, false, started, nil)
+	if status := conn.Status(); status.Connectivity != ConnectivityOffline || status.IsConnected {
+		t.Fatalf("first initial failure = %+v", status)
+	}
+
+	second := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(second, false, started.Add(time.Second), nil)
+	if status := conn.Status(); status.Connectivity != ConnectivityOffline || status.IsConnected {
+		t.Fatalf("second initial failure = %+v", status)
+	}
+}
+
+func TestWebSocketLoopHasSingleOwner(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+
+	if !conn.TryStartWebSocketLoop() {
+		t.Fatal("first supervisor did not acquire ownership")
+	}
+	if conn.TryStartWebSocketLoop() {
+		t.Fatal("second supervisor acquired duplicate ownership")
+	}
+
+	conn.FinishWebSocketLoop()
+	if !conn.TryStartWebSocketLoop() {
+		t.Fatal("supervisor ownership was not released")
 	}
 }
 

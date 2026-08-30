@@ -117,6 +117,39 @@ func TestHandleAPIDevices(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteDevicePreservesConcurrentReplacement(t *testing.T) {
+	app := NewWebApp()
+	host := "speaker.local"
+	original := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "ORIGINAL"})
+	replacement := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "REPLACEMENT"})
+	app.AddDevice(host, original)
+	app.RemoveDeviceHook = func(deviceID string) error {
+		if deviceID != "ORIGINAL" {
+			t.Fatalf("RemoveDeviceHook deviceID = %q, want ORIGINAL", deviceID)
+		}
+		app.RemoveDevice(host)
+		app.AddDevice(host, replacement)
+
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/control/devices/"+host, nil)
+	req = withChiParams(req, map[string]string{"id": host})
+	w := httptest.NewRecorder()
+
+	app.HandleDeleteDevice(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	got, ok := app.GetDevice(host)
+	if !ok || got != replacement {
+		t.Fatal("concurrent replacement was removed")
+	}
+
+	app.RemoveDevice(host)
+}
+
 func TestHandleAPIDevice(t *testing.T) {
 	app := createTestApp()
 

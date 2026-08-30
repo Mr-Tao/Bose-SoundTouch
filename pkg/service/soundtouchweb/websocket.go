@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
 	"github.com/go-chi/chi/v5"
@@ -482,22 +483,19 @@ func (app *WebApp) HandleAPIDiscover(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ConnectDeviceWebSocket establishes a WebSocket connection to a device
-// and keeps it alive: on disconnect or connect failure, it reconnects
-// with exponential backoff (1 s → 30 s cap, reset after each successful
-// connect). The goroutine runs for the lifetime of the device entry,
-// so status flows from the speaker keep streaming through transient
-// network blips, speaker reboots, and idle timeouts.
-//
-// conn.WebSocket is only updated on a successful (re)connect, never
-// cleared, so the duplicate-spawn guards at the callsites (which check
-// `if device.WebSocket == nil`) stay correct — once this goroutine is
-// running for a device, no second one is needed.
+// ConnectDeviceWebSocket starts the single event-transport supervisor for a
+// device. Initial connection failures are retried here; after the first
+// success WebSocketClient owns transport reconnects and this supervisor
+// observes their state until the device is removed.
 func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.DeviceConnection) {
 	// Skip WebSocket connection if client is not available (e.g., in tests)
 	if conn.Client == nil {
 		return
 	}
+	if !conn.TryStartWebSocketLoop() {
+		return
+	}
+	defer conn.FinishWebSocketLoop()
 
 	const (
 		initialBackoff = 1 * time.Second
@@ -524,6 +522,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		// UpdateStatus so concurrent events and the periodic poller
 		// (UpdateDeviceStatus) cannot lose each other's writes.
 		wsClient.OnNowPlaying(func(event *models.NowPlayingUpdatedEvent) {
+			activity := time.Now()
 			np := &event.NowPlaying
 
 			// A /select returns 200 even when the source is rejected; the
@@ -536,29 +535,77 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			prevSource = np.Source
 
 			app.applyNowPlayingEvent(conn, np)
+			conn.MarkEventStreamActivity(activity)
 		})
 
 		wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
+			activity := time.Now()
 			app.applyVolumeEvent(conn, &event.Volume)
+			conn.MarkEventStreamActivity(activity)
 		})
 
 		wsClient.OnConnectionState(func(event *models.ConnectionStateUpdatedEvent) {
+			if !speakerConnectionEventMatches(conn, event.DeviceID) {
+				log.Printf("Ignoring connection state for mismatched device %s on %s",
+					sanitizeLog(event.DeviceID), sanitizeLog(deviceID))
+
+				return
+			}
+
 			app.applyConnectionStateEvent(conn, event.ConnectionState.IsConnected())
+			conn.ApplySpeakerConnectionEvent(webtypes.SpeakerConnectionState{
+				State:  event.ConnectionState.State,
+				Signal: event.ConnectionState.Signal,
+			}, time.Now())
 		})
 
 		wsClient.OnPresetUpdated(func(event *models.PresetUpdatedEvent) {
+			activity := time.Now()
 			app.applyPresetEvent(conn, &event.Presets)
+			conn.MarkEventStreamActivity(activity)
 		})
 
 		wsClient.OnBassUpdated(func(event *models.BassUpdatedEvent) {
+			activity := time.Now()
 			app.applyBassEvent(conn, &event.Bass)
+			conn.MarkEventStreamActivity(activity)
 		})
 
 		wsClient.OnGroupUpdated(func(event *models.GroupUpdatedEvent) {
 			app.applyGroupUpdatedEvent(conn, event)
 		})
 
-		if err := wsClient.Connect(); err != nil {
+		wsClient.OnNameUpdated(func(event *models.NameUpdatedEvent) {
+			conn.MarkEventStreamActivity(time.Now())
+			conn.ApplyNameEvent(event.Name.Value)
+		})
+
+		wsClient.OnTransportState(func(connected bool, generation uint64) {
+			if !conn.ObserveEventStreamTransport(generation, connected, time.Now()) {
+				return
+			}
+
+			// Drives the same FieldConnectivity fencing the old inline
+			// connect/disconnect sites used to update directly -- ordered by
+			// ObserveEventStreamTransport's own generation check above, so a
+			// reordered transport callback can no longer apply here either.
+			app.applyConnectionStateEvent(conn, connected)
+
+			if connected {
+				if generation > 1 {
+					log.Printf("WebSocket reconnected for device %s", sanitizeLog(deviceID))
+					go app.UpdateDeviceStatus(deviceID, conn)
+				}
+			} else {
+				log.Printf("WebSocket transport disconnected for device %s", sanitizeLog(deviceID))
+			}
+		})
+
+		published, err := publishAndConnectDeviceWebSocket(conn, wsClient, wsClient.Connect)
+		if !published {
+			return
+		}
+		if err != nil {
 			log.Printf("Failed to connect WebSocket for device %s: %v (retrying in %s)", sanitizeLog(deviceID), err, backoff)
 
 			if sleepOrDone(conn, backoff) {
@@ -573,10 +620,6 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 			continue
 		}
 
-		conn.WebSocket = wsClient
-
-		app.applyConnectionStateEvent(conn, true)
-
 		log.Printf("WebSocket connected for device %s", sanitizeLog(deviceID))
 
 		// Fetch current state immediately: speakers do not replay events on
@@ -588,22 +631,43 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		// starts at the lowest cadence again.
 		backoff = initialBackoff
 
-		// Block until the device-side WebSocket disconnects.
-		wsClient.Wait()
+		<-conn.Done()
 
-		app.applyConnectionStateEvent(conn, false)
-
-		log.Printf("WebSocket disconnected for device %s — reconnecting in %s", sanitizeLog(deviceID), backoff)
-
-		if sleepOrDone(conn, backoff) {
-			return
-		}
-
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		return
 	}
+}
+
+func publishAndConnectDeviceWebSocket(
+	conn *webtypes.DeviceConnection,
+	wsClient *client.WebSocketClient,
+	connect func() error,
+) (bool, error) {
+	if !conn.SetWebSocket(wsClient) {
+		return false, nil
+	}
+
+	if err := connect(); err != nil {
+		conn.ClearWebSocket(wsClient)
+		_ = wsClient.Close()
+
+		return true, err
+	}
+
+	return true, nil
+}
+
+func speakerConnectionEventMatches(conn *webtypes.DeviceConnection, eventDeviceID string) bool {
+	eventDeviceID = strings.TrimSpace(eventDeviceID)
+	if eventDeviceID == "" {
+		return true
+	}
+
+	info := conn.Info()
+	if info == nil || strings.TrimSpace(info.DeviceID) == "" {
+		return false
+	}
+
+	return strings.EqualFold(eventDeviceID, strings.TrimSpace(info.DeviceID))
 }
 
 // sleepOrDone waits for d to elapse or for the connection to be closed,
@@ -624,13 +688,17 @@ func sleepOrDone(conn *webtypes.DeviceConnection, d time.Duration) bool {
 // UpdateDeviceStatus fetches current status from the device.
 //
 // Network calls run outside any atomic merge so slow I/O never blocks a
-// concurrent CAS retry. Each field (NowPlaying/Volume/Presets/Sources/Bass,
-// plus derived connectivity) is merged and ordered independently via its own
-// StatusField generation (BeginFieldPoll/CompleteFieldPoll/ApplyFieldEvent in
-// webtypes) -- a real-time push event, or a concurrent poll, for one field
-// can supersede only that field. A slow-but-successful fetch for one field
-// is never discarded merely because a DIFFERENT field's event or poll
-// completion happened to land first.
+// concurrent CAS retry. Each field (NowPlaying/Name/Volume/Presets/Sources/
+// Bass, plus derived connectivity) is merged and ordered independently via
+// its own StatusField generation (BeginFieldPoll/CompleteFieldPoll/
+// ApplyFieldEvent in webtypes) -- a real-time push event, or a concurrent
+// poll, for one field can supersede only that field. A slow-but-successful
+// fetch for one field is never discarded merely because a DIFFERENT field's
+// event or poll completion happened to land first. Independently, the same
+// round also feeds BeginHTTPPoll/CompleteHTTPPoll, which derives HTTP
+// reachability and the Online/Stale/Offline connectivity classification --
+// CompleteHTTPPoll is called with a nil merge func here since field merging
+// is already handled per-field above; it only records health/connectivity.
 func (app *WebApp) UpdateDeviceStatus(deviceID string, conn *webtypes.DeviceConnection) {
 	app.updateDeviceStatus(deviceID, conn, nil)
 }
@@ -658,6 +726,7 @@ func (app *WebApp) updateDeviceStatus(_ string, conn *webtypes.DeviceConnection,
 	sourcesGen := conn.BeginFieldPoll(webtypes.FieldSources)
 	bassGen := conn.BeginFieldPoll(webtypes.FieldBass)
 	connectivityGen := conn.BeginFieldPoll(webtypes.FieldConnectivity)
+	pollGeneration := conn.BeginHTTPPoll()
 
 	// /getGroup must be gated to ST10 models -- see Client.GetGroup's doc
 	// comment (verified against real hardware: a ST20 never replies at all,
@@ -668,11 +737,13 @@ func (app *WebApp) updateDeviceStatus(_ string, conn *webtypes.DeviceConnection,
 	if stereoCapable && groupBaseline == nil {
 		groupGeneration = conn.BeginGroupRefresh()
 	}
+	nameGeneration := conn.BeginNameRefresh()
 
 	// Phase 1: slow network fetches. Local vars only, no shared state
 	// is touched yet. Errors are recorded so the merge below can tell
 	// "field N stayed unchanged" apart from "field N got refreshed".
 	nowPlaying, nowPlayingErr := conn.Client.GetNowPlaying()
+	name, nameErr := conn.Client.GetName()
 	volume, volumeErr := conn.Client.GetVolume()
 	presets, presetsErr := conn.Client.GetPresets()
 	sources, sourcesErr := conn.Client.GetSources()
@@ -737,6 +808,12 @@ func (app *WebApp) updateDeviceStatus(_ string, conn *webtypes.DeviceConnection,
 		})
 	}
 
+	if nameErr == nil {
+		anyFetchSucceeded = true
+
+		conn.ApplyPolledName(nameGeneration, name.Value)
+	}
+
 	// Mark as connected if we successfully got at least one status from
 	// this round. Mirrors prior behaviour: deliberately does NOT fold
 	// groupErr in here. GetGroup is gated to stereo-capable models and
@@ -748,6 +825,15 @@ func (app *WebApp) updateDeviceStatus(_ string, conn *webtypes.DeviceConnection,
 		s.IsConnected = anyFetchSucceeded
 		s.LastActivity = time.Now()
 	})
+
+	// Independently of the per-field merges above, also record this round
+	// against the health/connectivity generation. merge is nil: field data
+	// was already merged field-by-field above, so this call only derives
+	// HTTPReachable/WebSocketConnected/Connectivity (Online/Stale/Offline)
+	// from anyFetchSucceeded -- it must never re-apply payload fields, or a
+	// concurrent speaker event landing between BeginHTTPPoll and here could
+	// cause this call to silently discard part of the merge above.
+	conn.CompleteHTTPPoll(pollGeneration, anyFetchSucceeded, time.Now(), nil)
 
 	if stereoCapable && groupErr == nil {
 		if groupBaseline != nil {
@@ -762,6 +848,8 @@ func (app *WebApp) applyGroupUpdatedEvent(
 	conn *webtypes.DeviceConnection,
 	event *models.GroupUpdatedEvent,
 ) bool {
+	conn.MarkEventStreamActivity(time.Now())
+
 	return app.queueBroadcastIfChanged(conn.ApplyGroupEvent(&event.Group, time.Now()))
 }
 
@@ -797,7 +885,7 @@ func (app *WebApp) HandleDeviceWebSocket(w http.ResponseWriter, r *http.Request)
 			Type:     "device_status",
 			DeviceID: deviceID,
 			Data: map[string]interface{}{
-				"info":   device.DeviceInfo,
+				"info":   device.Info(),
 				"status": device.Status(),
 			},
 		})
@@ -857,14 +945,14 @@ func (app *WebApp) writeDeviceWebSocketUpdate(
 			Type:     "device_status",
 			DeviceID: deviceID,
 			Data: map[string]interface{}{
-				"info":   device.DeviceInfo,
+				"info":   device.Info(),
 				"status": status,
 			},
 		}); err != nil {
 			return err
 		}
 
-		if device.WebSocket == nil || !status.IsConnected {
+		if device.CurrentWebSocket() == nil || !status.IsConnected {
 			return nil
 		}
 
