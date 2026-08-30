@@ -2,7 +2,6 @@
 package webtypes
 
 import (
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -190,7 +189,7 @@ func (c *DeviceConnection) ApplyGroupEvent(group *models.Group, activity time.Ti
 }
 
 func (c *DeviceConnection) replaceGroup(group *models.Group, activity time.Time) bool {
-	changed := !reflect.DeepEqual(c.Status().Group, group)
+	changed := !models.SameGroup(c.Status().Group, group)
 	c.UpdateStatus(func(s *DeviceStatus) {
 		s.Group = group
 		if !activity.IsZero() {
