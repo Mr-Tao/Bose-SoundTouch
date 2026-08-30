@@ -73,16 +73,26 @@ func DeleteMargeGroupGeneration(httpClient *http.Client, ref GenerationRef) erro
 		return err
 	}
 
-	if response.StatusCode == http.StatusInternalServerError && margeWrappedGroupNotFound(body, ref) {
+	return handleMargeGenerationCleanupFailure(httpClient, ref, response.StatusCode, body)
+}
+
+func handleMargeGenerationCleanupFailure(
+	httpClient *http.Client,
+	ref GenerationRef,
+	statusCode int,
+	body []byte,
+) error {
+	if statusCode == http.StatusInternalServerError && margeWrappedGroupNotFound(body, ref) {
 		return verifyMargeGroupGenerationDeleted(httpClient, ref)
 	}
-	if response.StatusCode == http.StatusConflict {
+
+	if statusCode == http.StatusConflict {
 		return fmt.Errorf("%w: delete Marge group generation: HTTP %d: %s",
-			ErrConflict, response.StatusCode, strings.TrimSpace(string(body)))
+			ErrConflict, statusCode, strings.TrimSpace(string(body)))
 	}
 
 	return fmt.Errorf("delete Marge group generation: HTTP %d: %s",
-		response.StatusCode, strings.TrimSpace(string(body)))
+		statusCode, strings.TrimSpace(string(body)))
 }
 
 func readMargeGenerationCleanupResponse(response *http.Response) ([]byte, error) {
