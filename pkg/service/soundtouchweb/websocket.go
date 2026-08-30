@@ -303,7 +303,9 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		return
 	}
 
-	// /getGroup is ST10-only; ST20/ST30 may accept the request but never reply.
+	// /getGroup must be gated to ST10 models -- see Client.GetGroup's doc
+	// comment (verified against real hardware: a ST20 never replies at all,
+	// hanging until the client's timeout instead of returning quickly).
 	stereoCapable := stereoPairCapable(conn.DeviceInfo)
 
 	var groupGeneration uint64
