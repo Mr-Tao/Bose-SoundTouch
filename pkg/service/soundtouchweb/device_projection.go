@@ -204,27 +204,7 @@ func registeredMembersAgree(group *models.Group, byDeviceID map[string][]deviceP
 			continue
 		}
 
-		if entries[0].Status == nil || !sameGroupClaim(group, entries[0].Status.Group) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func sameGroupClaim(left, right *models.Group) bool {
-	if left == nil || right == nil || left.ID != right.ID || left.MasterDeviceID != right.MasterDeviceID ||
-		len(left.Roles.Roles) != len(right.Roles.Roles) {
-		return false
-	}
-
-	rightRoles := make(map[string]string, len(right.Roles.Roles))
-	for _, role := range right.Roles.Roles {
-		rightRoles[strings.TrimSpace(role.DeviceID)] = strings.ToUpper(strings.TrimSpace(role.Role))
-	}
-
-	for _, role := range left.Roles.Roles {
-		if rightRoles[strings.TrimSpace(role.DeviceID)] != strings.ToUpper(strings.TrimSpace(role.Role)) {
+		if entries[0].Status == nil || !models.SameGroup(group, entries[0].Status.Group) {
 			return false
 		}
 	}

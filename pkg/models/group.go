@@ -1,6 +1,9 @@
 package models
 
-import "encoding/xml"
+import (
+	"encoding/xml"
+	"strings"
+)
 
 // Group represents a stereo pair of two ST10 SoundTouch speakers.
 type Group struct {
@@ -31,4 +34,41 @@ type GroupRole struct {
 	DeviceID  string `xml:"deviceId"`
 	Role      string `xml:"role"`
 	IPAddress string `xml:"ipAddress,omitempty"`
+}
+
+// SameGroup reports whether left and right describe the same stereo-pair
+// configuration, comparing role assignments by device ID rather than by
+// slice order. The device's own /getGroup response and its groupUpdated
+// WebSocket event both populate Roles.Roles directly from XML unmarshaling
+// in wire order, so a polled read and a pushed event for the identical pair
+// are not guaranteed to list roles in the same order -- comparing with
+// reflect.DeepEqual (order-sensitive) would then report a spurious change
+// even though nothing about the pair actually changed. Two nil Groups are
+// equal; exactly one nil is not.
+func SameGroup(left, right *Group) bool {
+	if left == nil && right == nil {
+		return true
+	}
+
+	if left == nil || right == nil {
+		return false
+	}
+
+	if left.ID != right.ID || left.MasterDeviceID != right.MasterDeviceID ||
+		len(left.Roles.Roles) != len(right.Roles.Roles) {
+		return false
+	}
+
+	rightRoles := make(map[string]string, len(right.Roles.Roles))
+	for _, role := range right.Roles.Roles {
+		rightRoles[strings.TrimSpace(role.DeviceID)] = strings.ToUpper(strings.TrimSpace(role.Role))
+	}
+
+	for _, role := range left.Roles.Roles {
+		if rightRoles[strings.TrimSpace(role.DeviceID)] != strings.ToUpper(strings.TrimSpace(role.Role)) {
+			return false
+		}
+	}
+
+	return true
 }

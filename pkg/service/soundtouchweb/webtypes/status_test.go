@@ -176,6 +176,39 @@ func TestEmptyGroupClearsCurrentClaim(t *testing.T) {
 	}
 }
 
+// TestApplyGroupEventIgnoresRoleOrder guards replaceGroup's change-detection
+// against a spurious "changed" report when the same pair's roles simply
+// arrive in a different order -- a polled /getGroup response and a pushed
+// groupUpdated event both populate Roles.Roles straight from XML unmarshal
+// in wire order, so nothing guarantees they list LEFT/RIGHT the same way
+// every time for the identical pair.
+func TestApplyGroupEventIgnoresRoleOrder(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+
+	leftFirst := &models.Group{
+		ID:             "pair-1",
+		MasterDeviceID: "master",
+		Roles: models.GroupRoles{Roles: []models.GroupRole{
+			{DeviceID: "master", Role: "LEFT"},
+			{DeviceID: "member", Role: "RIGHT"},
+		}},
+	}
+	conn.SetStatus(&DeviceStatus{Group: leftFirst})
+
+	rightFirst := &models.Group{
+		ID:             "pair-1",
+		MasterDeviceID: "master",
+		Roles: models.GroupRoles{Roles: []models.GroupRole{
+			{DeviceID: "member", Role: "RIGHT"},
+			{DeviceID: "master", Role: "LEFT"},
+		}},
+	}
+
+	if conn.ApplyGroupEvent(rightFirst, time.Now()) {
+		t.Fatal("reordered roles for the same pair must not report a change")
+	}
+}
+
 func TestStatusSnapshotIsolation(t *testing.T) {
 	// A snapshot returned by Status() must NOT change when a later
 	// UpdateStatus replaces a pointer field. This proves the atomic
