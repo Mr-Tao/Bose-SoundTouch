@@ -365,6 +365,36 @@ func (app *WebApp) removeDeviceIfMatch(id string, expected *webtypes.DeviceConne
 	return ok
 }
 
+// removeDeviceIfMatchOrAbsent is the postcondition check for an explicit
+// removal request. The embedded datastore hook can synchronously reseed the
+// registry and remove expected before it returns; absence is therefore already
+// success, while a different current connection remains protected.
+func (app *WebApp) removeDeviceIfMatchOrAbsent(
+	id string,
+	expected *webtypes.DeviceConnection,
+) bool {
+	app.devicesMu.Lock()
+
+	current, ok := app.devices[id]
+	if !ok {
+		app.devicesMu.Unlock()
+
+		return true
+	}
+
+	if current != expected {
+		app.devicesMu.Unlock()
+
+		return false
+	}
+
+	delete(app.devices, id)
+	app.devicesMu.Unlock()
+	expected.Close()
+
+	return true
+}
+
 // HandleAPIDevices returns all devices as JSON
 func (app *WebApp) HandleAPIDevices(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -460,7 +490,7 @@ func (app *WebApp) HandleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !app.removeDeviceIfMatch(host, conn) {
+	if !app.removeDeviceIfMatchOrAbsent(host, conn) {
 		app.sendError(w, "Device changed during removal", http.StatusConflict)
 
 		return
