@@ -23,11 +23,26 @@ export function Library({ devices }) {
     // invalidate the current selection.
     useEffect(() => {
         const entries = Object.entries(devices);
-        if ((!deviceId || !devices[deviceId]) && entries.length > 0) {
-            setDeviceId(entries[0][0]);
-        } else if (deviceId && entries.length === 0) {
-            setDeviceId(null);
+        if (deviceId && devices[deviceId]) return;
+
+        if (entries.length === 0) {
+            if (deviceId) setDeviceId(null);
+            return;
         }
+
+        if (deviceId) {
+            // The selected device vanished from the list -- if that's because
+            // it just became a hidden stereo-pair member (see
+            // device_projection.go), follow it to its pair's master instead
+            // of silently jumping to an unrelated device.
+            const master = entries.find(([, d]) => d.stereoPair?.members?.some(m => m.ipAddress === deviceId));
+            if (master) {
+                setDeviceId(master[0]);
+                return;
+            }
+        }
+
+        setDeviceId(entries[0][0]);
     }, [devices, deviceId]);
 
     // Reload registered servers whenever deviceId changes.
