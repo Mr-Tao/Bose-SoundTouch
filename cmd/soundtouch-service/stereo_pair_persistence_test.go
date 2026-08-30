@@ -75,6 +75,31 @@ func TestEmbeddedStereoPairPersistenceUsesLocalDatastoreAcrossAccounts(t *testin
 	}
 }
 
+func TestEmbeddedStereoPairCleanupMapsAmbiguousGenerationToConflict(t *testing.T) {
+	ds := datastore.NewDataStore(t.TempDir())
+	group := persistenceTestGroup("")
+	groupID, err := ds.AddGroup("ACCOUNT1", group)
+	if err != nil {
+		t.Fatalf("AddGroup: %v", err)
+	}
+	localURL := "https://aftertouch.invalid:18443"
+	cleanup, _, _ := embeddedStereoPairGenerationPersistence(
+		ds,
+		func() []string { return []string{localURL} },
+		&http.Client{Transport: rejectingRoundTripper{}},
+	)
+	wrongTopology := persistenceTestGroup(groupID)
+	wrongTopology.Roles.Roles[1].DeviceID = "SUBSTITUTE-RIGHT-ID"
+
+	err = cleanup(stereopair.GenerationRef{
+		DeviceID: "LEFT-ID", AccountID: "ACCOUNT1", MargeURL: localURL,
+		GroupID: groupID, ExpectedGroup: wrongTopology,
+	})
+	if !errors.Is(err, stereopair.ErrConflict) || errors.Is(err, stereopair.ErrUnavailable) {
+		t.Fatalf("cleanup error = %v, want ErrConflict only", err)
+	}
+}
+
 func TestEmbeddedStereoPairPersistenceUsesExternalMargeBackend(t *testing.T) {
 	active := true
 	deleteCalls := 0

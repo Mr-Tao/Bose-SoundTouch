@@ -2,6 +2,7 @@ package stereopair
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -1299,6 +1300,27 @@ func TestDissolveReportsPersistenceFailureAsDegraded(t *testing.T) {
 	}
 	if !errors.Is(result.PersistenceError, ErrUnavailable) {
 		t.Fatalf("persistence error = %v, want ErrUnavailable", result.PersistenceError)
+	}
+}
+
+func TestDissolvePreservesPersistenceConflict(t *testing.T) {
+	group := configuredGroup("Pair")
+	left := readyClient(leftID, "Left")
+	right := readyClient(rightID, "Right")
+	left.group = cloneGroup(group)
+	right.group = cloneGroup(group)
+	coordinator := NewWithGenerationCleanup(factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}),
+		func(GenerationRef) error { return fmt.Errorf("stale persistence: %w", ErrConflict) })
+
+	result, err := coordinator.Dissolve(DissolveRequest{MemberIPAddress: leftIP, ExpectedGroupID: "PAIR-ID"})
+	if err == nil || result.Status != StatusDegraded || !result.PersistenceAttempted || result.PersistenceComplete {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	if !errors.Is(result.PersistenceError, ErrConflict) || errors.Is(result.PersistenceError, ErrUnavailable) {
+		t.Fatalf("persistence error = %v, want ErrConflict only", result.PersistenceError)
+	}
+	if len(result.Members) != 2 || !result.Members[0].Verified || !result.Members[1].Verified {
+		t.Fatalf("members = %+v, want both physically verified standalone", result.Members)
 	}
 }
 
