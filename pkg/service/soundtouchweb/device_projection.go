@@ -52,6 +52,14 @@ type stereoPairMemberView struct {
 	Available bool   `json:"available"`
 }
 
+// stereoPairCapable reports whether info's model supports stereo pairing
+// (ST-10 only). This must stay a model-name check rather than a runtime
+// capability probe: verified against real hardware, a SoundTouch 20 lists
+// /getGroup (and /addGroup, /removeGroup, /updateGroup) in its own
+// /supportedURLs response even though the device doesn't actually reply to
+// /getGroup -- see Client.GetGroup's doc comment. The device's supportedURLs
+// listing reflects firmware-level route registration, not per-model feature
+// support, so it cannot be used to detect stereo-pair capability either.
 func stereoPairCapable(info *models.DeviceInfo) bool {
 	if info == nil {
 		return false
