@@ -365,11 +365,12 @@ img { display: block; max-width: 100%; }
     box-shadow: var(--shadow);
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 .device-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,.12); transform: translateY(-1px); }
 
 .device-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: .25rem; gap: .5rem; }
-.device-name { font-weight: 600; font-size: .95rem; }
+.device-name { font-weight: 600; font-size: .95rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .device-header-right { display: flex; align-items: center; gap: .5rem; flex-shrink: 0; }
 
 /* Quiet remove affordance: invisible until the card is hovered, then dim,
@@ -429,6 +430,8 @@ img { display: block; max-width: 100%; }
     min-height: 98px; /* Fixed height to avoid jumps between tracks/standby */
     align-items: center;
     position: relative; /* anchor for the ★ fav button */
+    min-width: 0;
+    max-width: 100%;
 }
 .now-playing.standby { color: var(--text-dim); font-size: .9rem; }
 
@@ -484,13 +487,31 @@ img { display: block; max-width: 100%; }
 
 .album-art { width: 64px; height: 64px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }
 
-.track-info { flex: 1; overflow: hidden; }
-.track-title  { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.track-info { flex: 1; min-width: 0; overflow: hidden; }
+.track-title {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    font-weight: 600;
+}
+.track-artist, .track-album {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 .track-artist { font-size: .875rem; color: var(--text-dim); margin-top: .15rem; }
 .track-album  { font-size: .8rem; color: var(--text-dim); }
-.track-meta { display: flex; align-items: center; gap: .5rem; margin-top: .25rem; }
-.track-source { font-size: .75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+.track-meta { display: flex; min-width: 0; align-items: center; gap: .5rem; margin-top: .25rem; }
+.track-source { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: .75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
 .buffering-badge { font-size: .7rem; color: var(--text-dim); background: var(--bg); border-radius: 4px; padding: .1rem .35rem; }
+.track-details { margin-top: .35rem; font-size: .75rem; }
+.track-details summary { color: var(--text-dim); cursor: pointer; }
+.track-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .2rem .5rem; margin: .35rem 0 0; }
+.track-details dt { color: var(--text-dim); }
+.track-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; word-break: break-word; }
 
 /* ── Transport controls ──────────────────────────────────────────────────── */
 .controls {

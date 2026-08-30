@@ -31,7 +31,7 @@ function DeviceCard({ id, device, onSelect, onRemove }) {
     return html`
         <div class="device-card" onClick=${() => onSelect(id)}>
             <div class="device-header">
-                <span class="device-name">${info?.name || id}</span>
+                <span class="device-name" title=${info?.name || id}>${info?.name || id}</span>
                 <span class="device-header-right">
                     <span class="device-indicator ${status?.isConnected ? 'online' : 'offline'}"></span>
                     ${!stereoPair ? html`<button class="device-remove" title="Remove this device"
@@ -49,7 +49,7 @@ function DeviceCard({ id, device, onSelect, onRemove }) {
                 ` : null}
             </div>
             ${!isStandby ? html`
-                <div class="now-playing-mini">
+                <div class="now-playing-mini" title=${[np.Track || np.StationName || np.Source, np.Artist].filter(Boolean).join(' - ')}>
                     <span class="play-status">${isPlaying ? '▶' : '⏸'}</span>
                     <span class="track-mini">${np.Track || np.StationName || np.Source}</span>
                     ${np.Artist ? html`<span class="artist-mini"> — ${np.Artist}</span>` : null}
