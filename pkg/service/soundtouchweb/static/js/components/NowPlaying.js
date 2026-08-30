@@ -101,6 +101,10 @@ export function NowPlaying({ nowPlaying, deviceId, presets }) {
     }
 
     const title = nowPlaying.Track || nowPlaying.StationName || nowPlaying.Source;
+    const longMetadata = [title, nowPlaying.Artist, nowPlaying.Album]
+        .some(value => value && value.length > 80);
+    const isRAOP = nowPlaying.Source === 'AIRPLAY' || nowPlaying.Source === 'RAOP';
+    const showFullMetadata = isRAOP || longMetadata;
     const artURL = nowPlaying.Art?.URL;
     const isBuffering = nowPlaying.PlayStatus === 'BUFFERING_STATE';
     const total = nowPlaying.Time?.Total ?? 0;
@@ -110,13 +114,23 @@ export function NowPlaying({ nowPlaying, deviceId, presets }) {
         <div class="now-playing">
             ${artURL && html`<img class="album-art" src=${artURL} alt="" />`}
             <div class="track-info">
-                <div class="track-title">${title}</div>
-                ${nowPlaying.Artist && html`<div class="track-artist">${nowPlaying.Artist}</div>`}
-                ${nowPlaying.Album && html`<div class="track-album">${nowPlaying.Album}</div>`}
+                <div class="track-title" title=${title}>${title}</div>
+                ${nowPlaying.Artist && html`<div class="track-artist" title=${nowPlaying.Artist}>${nowPlaying.Artist}</div>`}
+                ${nowPlaying.Album && html`<div class="track-album" title=${nowPlaying.Album}>${nowPlaying.Album}</div>`}
                 <div class="track-meta">
                     <span class="track-source">${nowPlaying.Source}</span>
                     ${isBuffering && html`<span class="buffering-badge">Buffering…</span>`}
                 </div>
+                ${showFullMetadata && html`
+                    <details class="track-details">
+                        <summary>Full details</summary>
+                        <dl>
+                            <dt>Title</dt><dd>${title}</dd>
+                            ${nowPlaying.Artist && html`<dt>Artist</dt><dd>${nowPlaying.Artist}</dd>`}
+                            ${nowPlaying.Album && html`<dt>Album</dt><dd>${nowPlaying.Album}</dd>`}
+                        </dl>
+                    </details>
+                `}
                 ${total > 0 && html`
                     <div class="progress-row">
                         <div class="progress-bar">
