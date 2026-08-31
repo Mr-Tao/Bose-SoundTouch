@@ -1423,7 +1423,7 @@ soundtouch-cli --host <device> setup pair --mode=bare --account=1111111 --servic
 ```
 
 `--account` empty generates a fresh 7-digit ID. `--name` sets the speaker
-name during pairing (empty keeps current). `--language` defaults to `2`
+name during pairing (empty keeps current). `--language` defaults to `3`
 (English). `--token` defaults to a built-in placeholder matching the Bose
 app's token shape.
 

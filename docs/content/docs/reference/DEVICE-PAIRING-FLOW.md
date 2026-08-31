@@ -136,7 +136,7 @@ The pairing flow uses a setup state machine on the device. States must be sent i
   </soundTouchConfigurationUpdated>
 </updates>
 
-<!-- 3. Set language (3 = German; adjust as needed) -->
+<!-- 3. Set language (3 = English; adjust as needed) -->
 <msg><header deviceID="{device_id}" url="language" method="POST">
   <request requestID="23"></request>
 </header><body><sysLanguage>3</sysLanguage></body></msg>

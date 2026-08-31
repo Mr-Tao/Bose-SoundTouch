@@ -145,7 +145,7 @@ func TestExecuteInitPlan_FactoryReset_GeneratesAccountAndRunsAllSteps(t *testing
 	wantCalls := []string{
 		"Start",
 		"IdentifyEnter(300000)",
-		"SetLanguage(2)",
+		"SetLanguage(3)",
 		"Enter",
 		"IdentifyLeave",
 		"SetName(Living Room)",
@@ -169,6 +169,24 @@ func TestExecuteInitPlan_FactoryReset_GeneratesAccountAndRunsAllSteps(t *testing
 	// Final verify step must report OK.
 	if !hasEvent(events, StepVerify, StatusOK) {
 		t.Errorf("expected StepVerify OK, got %v", eventSummary(events))
+	}
+}
+
+func TestExecuteInitPlanRejectsInvalidLanguageBeforeAnyStep(t *testing.T) {
+	manager := &Manager{ServerURL: "http://aftertouch.example"}
+	var events []StepEvent
+
+	_, err := manager.ExecuteInitPlan(context.Background(), InitPlan{
+		DeviceIP: "192.0.2.10",
+		Language: 14,
+	}, func(event StepEvent) {
+		events = append(events, event)
+	})
+	if err == nil {
+		t.Fatal("expected invalid language to be rejected")
+	}
+	if len(events) != 0 {
+		t.Fatalf("invalid plan started %d steps: %+v", len(events), events)
 	}
 }
 

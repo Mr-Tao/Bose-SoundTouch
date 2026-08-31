@@ -120,6 +120,10 @@ This drives `setup.Manager.ExecuteInitPlan` with `SkipURLRewrite=true`, which ru
 > `SOUNDTOUCH_NOT_CONFIGURED`, so the preflight passes through unchanged;
 > see `docs/content/docs/reference/DEVICE-PAIRING-FLOW.md`.
 
+The historical capture below sent language code `2`. Stockholm's language
+table identifies that code as German; current English-language setup uses code
+`3`. The original wire value is retained here as experiment evidence.
+
 ```
 SETUP_START
 SETUP_IDENTIFY_DEVICE_ENTER
