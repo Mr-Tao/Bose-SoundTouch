@@ -98,6 +98,57 @@ func TestClockDisplay_UnmarshalXML(t *testing.T) {
 	}
 }
 
+func TestClockDisplay_UnmarshalXML_EnabledPresence(t *testing.T) {
+	tests := []struct {
+		name        string
+		xmlData     string
+		wantEnabled bool
+		wantPresent bool
+	}{
+		{
+			name:        "nested present true",
+			xmlData:     `<clockDisplay><clockConfig userEnable="true"/></clockDisplay>`,
+			wantEnabled: true,
+			wantPresent: true,
+		},
+		{
+			name:        "nested present false",
+			xmlData:     `<clockDisplay><clockConfig userEnable="false"/></clockDisplay>`,
+			wantEnabled: false,
+			wantPresent: true,
+		},
+		{
+			name:        "legacy present",
+			xmlData:     `<clockDisplay enabled="true"></clockDisplay>`,
+			wantEnabled: true,
+			wantPresent: true,
+		},
+		{
+			name:        "omitted",
+			xmlData:     `<clockDisplay><clockConfig brightnessLevel="70"/></clockDisplay>`,
+			wantEnabled: false,
+			wantPresent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got ClockDisplay
+			if err := xml.Unmarshal([]byte(tt.xmlData), &got); err != nil {
+				t.Fatalf("Failed to unmarshal XML: %v", err)
+			}
+
+			if got.Enabled != tt.wantEnabled {
+				t.Errorf("Enabled = %v, want %v", got.Enabled, tt.wantEnabled)
+			}
+
+			if got.HasEnabled() != tt.wantPresent {
+				t.Errorf("HasEnabled() = %v, want %v", got.HasEnabled(), tt.wantPresent)
+			}
+		})
+	}
+}
+
 func TestClockDisplay_IsEnabled(t *testing.T) {
 	tests := []struct {
 		name         string

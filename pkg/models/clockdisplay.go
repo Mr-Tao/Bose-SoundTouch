@@ -31,6 +31,7 @@ type ClockDisplay struct {
 	XMLName    xml.Name `xml:"clockDisplay"`
 	DeviceID   string
 	Enabled    bool
+	enabledSet bool
 	Format     string // public-facing values: "12", "24", "auto"
 	Brightness int
 	AutoDim    bool // not on the device's wire format; preserved for API compat
@@ -76,6 +77,7 @@ func mapFromWireFormat(wire string) string {
 // either because it appears in legacy captures or for forward-compat with
 // firmwares that may revert.
 func (c *ClockDisplay) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	c.enabledSet = false
 	applyClockDisplayOuterAttrs(c, start.Attr)
 
 	for {
@@ -121,6 +123,7 @@ func applyClockDisplayOuterAttrs(c *ClockDisplay, attrs []xml.Attr) {
 			c.DeviceID = attr.Value
 		case "enabled":
 			c.Enabled = attr.Value == "true"
+			c.enabledSet = true
 		case "format":
 			c.Format = attr.Value
 		case "brightness":
@@ -143,6 +146,7 @@ func applyClockConfigAttrs(c *ClockDisplay, attrs []xml.Attr) {
 			c.TimeZone = attr.Value
 		case "userEnable":
 			c.Enabled = attr.Value == "true"
+			c.enabledSet = true
 		case "timeFormat":
 			if mapped := mapFromWireFormat(attr.Value); mapped != "" {
 				c.Format = mapped
@@ -168,6 +172,11 @@ const (
 // IsEnabled returns true if the clock display is enabled
 func (c *ClockDisplay) IsEnabled() bool {
 	return c.Enabled
+}
+
+// HasEnabled reports whether the enabled value was present in the XML response.
+func (c *ClockDisplay) HasEnabled() bool {
+	return c.enabledSet
 }
 
 // GetFormat returns the clock display format (12/24 hour)
