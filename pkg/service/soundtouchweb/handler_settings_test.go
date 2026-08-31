@@ -787,6 +787,47 @@ func TestHandleEnterBluetoothPairingPollsWithoutMutationReplay(t *testing.T) {
 	}
 }
 
+func TestHandleEnterBluetoothPairingFencesOlderStatusPoll(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	app := settingsTestApp(fixture)
+	device, ok := app.GetDevice("speaker")
+	if !ok {
+		t.Fatal("settings test device is missing")
+	}
+
+	stalePollRevision := device.NextFieldRevision()
+	recorder := httptest.NewRecorder()
+	request := withBluetoothPairingPoll(settingsRequest(http.MethodPost,
+		"/api/control/devices/speaker/settings/bluetooth/pair", ""), 1)
+
+	app.HandleEnterBluetoothPairing(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	confirmed := device.Status()
+	if confirmed.NowPlaying == nil || confirmed.NowPlaying.Source != "BLUETOOTH" ||
+		confirmed.NowPlaying.ConnectionStatusInfo.Status != "DISCOVERABLE" {
+		t.Fatalf("confirmed pairing state = %+v, want BLUETOOTH/DISCOVERABLE", confirmed.NowPlaying)
+	}
+	if confirmed.NowPlayingRevision <= stalePollRevision {
+		t.Fatalf("pairing revision = %d, want newer than stale poll revision %d",
+			confirmed.NowPlayingRevision, stalePollRevision)
+	}
+
+	staleApplied := false
+	device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		staleApplied = status.MergeNowPlaying(&models.NowPlaying{Source: "SPOTIFY"}, stalePollRevision)
+	})
+	if staleApplied {
+		t.Fatal("stale status poll replaced confirmed Bluetooth pairing state")
+	}
+	if got := device.Status().NowPlaying; got == nil || got.Source != "BLUETOOTH" ||
+		got.ConnectionStatusInfo.Status != "DISCOVERABLE" {
+		t.Fatalf("state after stale poll = %+v, want BLUETOOTH/DISCOVERABLE", got)
+	}
+}
+
 func TestHandleEnterBluetoothPairingRejectsDiscoverableWrongSource(t *testing.T) {
 	fixture := newSettingsSpeakerFixture(t, true)
 	fixture.nowPlayingSource = "AUX"

@@ -951,7 +951,10 @@ func (app *WebApp) HandleEnterBluetoothPairing(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	device.UpdateStatus(func(status *webtypes.DeviceStatus) { status.NowPlaying = nowPlaying })
+	fieldRevision := device.NextFieldRevision()
+	device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+		status.MergeNowPlaying(nowPlaying, fieldRevision)
+	})
 
 	snapshot, err := app.readDeviceSettings(device)
 	if err != nil {
