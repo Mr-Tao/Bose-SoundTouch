@@ -43,7 +43,14 @@ function IconRepeat({ one = false }) {
     </svg>`;
 }
 
-export function Controls({ deviceId, status }) {
+export function Controls({
+    deviceId,
+    status,
+    command,
+    commandBusy = false,
+    commandStatus = '',
+    onTogglePlayback,
+}) {
     const np = status?.nowPlaying;
     const isPlaying = np?.PlayStatus === 'PLAY_STATE';
     const actualVolume = status?.volume?.ActualVolume ?? 0;
@@ -60,6 +67,8 @@ export function Controls({ deviceId, status }) {
     useEffect(() => { setLocalBass(actualBass); }, [actualBass]);
 
     const send = (key) => api.key(deviceId, key);
+    const transportCommand = command?.action === 'play' || command?.action === 'pause'
+        ? command : null;
 
     function onVolumeChange(e) {
         const val = parseInt(e.target.value, 10);
@@ -87,7 +96,13 @@ export function Controls({ deviceId, status }) {
         <div class="controls">
             <div class="transport">
                 <button class="ctrl-btn" onClick=${() => send('PREV_TRACK')} title="Previous">⏮</button>
-                <button class="ctrl-btn play-btn" onClick=${() => send(isPlaying ? 'PAUSE' : 'PLAY')}>
+                <button
+                    class="ctrl-btn play-btn command-btn ${transportCommand?.outcome || ''}"
+                    onClick=${onTogglePlayback || (() => send(isPlaying ? 'PAUSE' : 'PLAY'))}
+                    disabled=${commandBusy || !np?.PlayStatus}
+                    aria-busy=${transportCommand && commandBusy ? 'true' : null}
+                    title=${transportCommand ? commandStatus : (isPlaying ? 'Pause' : 'Play')}
+                >
                     ${isPlaying ? '⏸' : '▶'}
                 </button>
                 <button class="ctrl-btn" onClick=${() => send('NEXT_TRACK')} title="Next">⏭</button>
@@ -100,6 +115,9 @@ export function Controls({ deviceId, status }) {
                 <button class="ctrl-btn ${repeat !== 'REPEAT_OFF' ? 'active' : ''}" onClick=${cycleRepeat} title=${repeat === 'REPEAT_ONE' ? 'Repeat one' : repeat === 'REPEAT_ALL' ? 'Repeat all' : 'Repeat'}>
                     ${IconRepeat({ one: repeat === 'REPEAT_ONE' })}
                 </button>
+            </div>
+            <div class="discrete-command-status" role="status" aria-live="polite">
+                ${commandStatus}
             </div>
             <div class="volume-row">
                 <span class="volume-icon">${IconVolume({ size: 16 })}</span>
