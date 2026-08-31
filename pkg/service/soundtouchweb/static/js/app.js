@@ -14,6 +14,8 @@ import { Library } from './components/Library.js';
 import { PlayURL } from './components/PlayURL.js';
 import { TTS } from './components/TTS.js';
 import { Announcements } from './components/Announcements.js';
+import { Settings } from './components/Settings.js';
+import { deviceSettingsTarget } from './settingsPresentation.mjs';
 import { api } from './api.js';
 
 const html = htm.bind(h);
@@ -29,6 +31,8 @@ function DeviceDetail({ deviceId, devices, onBack }) {
             <p>Device not found.</p>
         `;
     }
+
+    const settingsTarget = deviceSettingsTarget(deviceId, device);
 
     return html`
         <div class="device-detail">
@@ -47,6 +51,14 @@ function DeviceDetail({ deviceId, devices, onBack }) {
             <${Sources} deviceId=${deviceId} status=${device.status} />
             <${Zone} deviceId=${deviceId} devices=${devices} />
             <${Recents} deviceId=${deviceId} />
+            ${settingsTarget ? html`
+                <${Settings}
+                    key=${`settings:${settingsTarget.controlId}`}
+                    deviceId=${settingsTarget.controlId}
+                    targetName=${settingsTarget.name}
+                    targetRole=${settingsTarget.role}
+                />
+            ` : null}
         </div>
     `;
 }
