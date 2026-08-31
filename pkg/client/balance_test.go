@@ -136,33 +136,33 @@ func TestClient_SetBalance(t *testing.T) {
 			wantError: false,
 		},
 		{
-			name:      "Valid balance level +50",
-			level:     50,
+			name:      "Valid balance level +7",
+			level:     7,
 			wantError: false,
 		},
 		{
-			name:      "Valid balance level -50",
-			level:     -50,
+			name:      "Valid balance level -7",
+			level:     -7,
 			wantError: false,
 		},
 		{
-			name:      "Valid balance level +25",
-			level:     25,
+			name:      "Valid balance level +3",
+			level:     3,
 			wantError: false,
 		},
 		{
-			name:      "Valid balance level -25",
-			level:     -25,
+			name:      "Valid balance level -3",
+			level:     -3,
 			wantError: false,
 		},
 		{
-			name:      "Invalid balance level +51",
-			level:     51,
+			name:      "Invalid balance level +8",
+			level:     8,
 			wantError: true,
 		},
 		{
-			name:      "Invalid balance level -51",
-			level:     -51,
+			name:      "Invalid balance level -8",
+			level:     -8,
 			wantError: true,
 		},
 		{
@@ -250,18 +250,18 @@ func TestClient_SetBalanceSafe(t *testing.T) {
 	}{
 		{
 			name:          "Valid level unchanged",
-			level:         25,
-			expectedLevel: 25,
+			level:         3,
+			expectedLevel: 3,
 		},
 		{
 			name:          "Too high clamped",
 			level:         75,
-			expectedLevel: 50,
+			expectedLevel: 7,
 		},
 		{
 			name:          "Too low clamped",
 			level:         -75,
-			expectedLevel: -50,
+			expectedLevel: -7,
 		},
 	}
 
@@ -313,20 +313,20 @@ func TestClient_IncreaseBalance(t *testing.T) {
 		{
 			name:               "Normal increase",
 			currentBalance:     0,
-			amount:             15,
-			expectedNewBalance: 15,
+			amount:             3,
+			expectedNewBalance: 3,
 		},
 		{
 			name:               "Increase with clamping",
-			currentBalance:     40,
-			amount:             15,
-			expectedNewBalance: 50,
+			currentBalance:     5,
+			amount:             4,
+			expectedNewBalance: 7,
 		},
 		{
 			name:               "Increase from negative",
-			currentBalance:     -15,
-			amount:             10,
-			expectedNewBalance: -5,
+			currentBalance:     -5,
+			amount:             2,
+			expectedNewBalance: -3,
 		},
 	}
 
@@ -404,21 +404,21 @@ func TestClient_DecreaseBalance(t *testing.T) {
 	}{
 		{
 			name:               "Normal decrease",
-			currentBalance:     15,
-			amount:             10,
-			expectedNewBalance: 5,
+			currentBalance:     3,
+			amount:             2,
+			expectedNewBalance: 1,
 		},
 		{
 			name:               "Decrease with clamping",
-			currentBalance:     -35,
-			amount:             20,
-			expectedNewBalance: -50,
+			currentBalance:     -5,
+			amount:             4,
+			expectedNewBalance: -7,
 		},
 		{
 			name:               "Decrease to negative",
-			currentBalance:     10,
-			amount:             20,
-			expectedNewBalance: -10,
+			currentBalance:     4,
+			amount:             6,
+			expectedNewBalance: -2,
 		},
 	}
 
@@ -487,6 +487,98 @@ func TestClient_DecreaseBalance(t *testing.T) {
 	}
 }
 
+func TestClient_BalanceAdjustmentUsesAdvertisedRange(t *testing.T) {
+	tests := []struct {
+		name     string
+		current  int
+		amount   int
+		expected int
+		adjust   func(*Client, int) (*models.Balance, error)
+	}{
+		{
+			name:     "increase clamps to advertised maximum",
+			current:  8,
+			amount:   4,
+			expected: 9,
+			adjust:   (*Client).IncreaseBalance,
+		},
+		{
+			name:     "decrease clamps to advertised minimum",
+			current:  -10,
+			amount:   5,
+			expected: -12,
+			adjust:   (*Client).DecreaseBalance,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getCalls := 0
+			postedLevels := []int{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/balance":
+					getCalls++
+					level := tt.current
+					if getCalls > 1 {
+						level = tt.expected
+					}
+					_, _ = fmt.Fprintf(w, `<balance deviceID="LEFT"><balanceAvailable>true</balanceAvailable><balanceMin>-12</balanceMin><balanceMax>9</balanceMax><balanceDefault>0</balanceDefault><targetBalance>%d</targetBalance><actualBalance>%d</actualBalance></balance>`, level, level)
+				case r.Method == http.MethodPost && r.URL.Path == "/balance":
+					var request models.BalanceRequest
+					if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Errorf("decode balance request: %v", err)
+						return
+					}
+					postedLevels = append(postedLevels, request.Level)
+					w.WriteHeader(http.StatusOK)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			client := NewClient(&Config{Host: server.URL[7:], Port: 80, Timeout: testTimeout, UserAgent: testUserAgent})
+			client.baseURL = server.URL
+			balance, err := tt.adjust(client, tt.amount)
+			if err != nil {
+				t.Fatalf("adjust balance: %v", err)
+			}
+			if balance.ActualBalance != tt.expected {
+				t.Fatalf("actual balance = %d, want %d", balance.ActualBalance, tt.expected)
+			}
+			if fmt.Sprint(postedLevels) != fmt.Sprintf("[%d]", tt.expected) {
+				t.Fatalf("posted levels = %v, want [%d]", postedLevels, tt.expected)
+			}
+			if getCalls != 2 {
+				t.Fatalf("GET calls = %d, want 2", getCalls)
+			}
+		})
+	}
+}
+
+func TestClient_BalanceAdjustmentDoesNotFallbackWhenUnavailable(t *testing.T) {
+	postCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postCalls++
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_, _ = w.Write([]byte(`<balance deviceID="LEFT"><balanceAvailable>false</balanceAvailable><balanceMin>-7</balanceMin><balanceMax>7</balanceMax><balanceDefault>0</balanceDefault><targetBalance>0</targetBalance><actualBalance>0</actualBalance></balance>`))
+	}))
+	defer server.Close()
+
+	client := NewClient(&Config{Host: server.URL[7:], Port: 80, Timeout: testTimeout, UserAgent: testUserAgent})
+	client.baseURL = server.URL
+	if _, err := client.IncreaseBalance(1); err == nil || !containsSubstring(err.Error(), "balance is unavailable") {
+		t.Fatalf("IncreaseBalance() error = %v, want unavailable", err)
+	}
+	if postCalls != 0 {
+		t.Fatalf("unavailable balance sent %d POST requests", postCalls)
+	}
+}
+
 func TestClient_Balance_ErrorHandling(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -515,7 +607,7 @@ func TestClient_Balance_ErrorHandling(t *testing.T) {
 				_, _ = w.Write([]byte("Internal Server Error"))
 			},
 			method: func(c *Client) error {
-				return c.SetBalance(15)
+				return c.SetBalance(5)
 			},
 			wantError:     true,
 			errorContains: "API request failed with status 500",
@@ -579,7 +671,7 @@ func TestClient_Balance_RequestFormat(t *testing.T) {
 		}
 
 		// Validate XML structure
-		expectedLevel := 25
+		expectedLevel := 6
 		if balanceReq.Level != expectedLevel {
 			t.Errorf("Expected balance level %d, got %d", expectedLevel, balanceReq.Level)
 		}
@@ -591,7 +683,7 @@ func TestClient_Balance_RequestFormat(t *testing.T) {
 			return
 		}
 
-		expectedXML := "<balance>25</balance>"
+		expectedXML := "<balance><targetBalance>6</targetBalance></balance>"
 		if string(actualXML) != expectedXML {
 			t.Errorf("Expected XML '%s', got '%s'", expectedXML, string(actualXML))
 		}
@@ -609,7 +701,7 @@ func TestClient_Balance_RequestFormat(t *testing.T) {
 	client := NewClient(config)
 	client.baseURL = server.URL
 
-	err := client.SetBalance(25)
+	err := client.SetBalance(6)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}

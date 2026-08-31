@@ -257,7 +257,15 @@ func demonstrateBasicControls(soundtouchClient *client.Client) {
 	if err != nil {
 		log.Printf("   Balance: Not available on this device")
 	} else {
-		fmt.Printf("   Balance: %d (range: -50 to +50)\n", balance.TargetBalance)
+		available, minLevel, maxLevel, _, capabilityKnown := balance.Capability()
+		switch {
+		case !capabilityKnown:
+			fmt.Printf("   Balance: %d (capability range unknown)\n", balance.TargetBalance)
+		case !available:
+			fmt.Println("   Balance: Not available on this device")
+		default:
+			fmt.Printf("   Balance: %d (range: %d to %+d)\n", balance.TargetBalance, minLevel, maxLevel)
+		}
 	}
 }
 
@@ -335,4 +343,4 @@ func printNotes() {
 // These complement the existing basic audio controls:
 // - GET/POST /bass - Basic bass control (-9 to +9)
 // - GET/POST /volume - Volume and mute control
-// - GET/POST /balance - Stereo balance control (-50 to +50)
+// - GET/POST /balance - Stereo balance control (device-advertised range)

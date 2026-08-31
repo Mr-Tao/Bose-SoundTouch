@@ -60,6 +60,47 @@ jobs:
           name: codecov-umbrella
           fail_ci_if_error: false
 
+  frontend-browser:
+    name: Frontend and Browser Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Download Go dependencies
+        run: go mod download
+
+      - name: Run frontend module tests
+        run: make test-frontend
+
+      - name: Run browser contract tests
+        env:
+          BROWSER_TEST_ARTIFACTS_DIR: /tmp/player-browser-contract-artifacts
+          GOCACHE: /tmp/go-build-browser-contract
+        run: |
+          BROWSER_BIN="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)"
+          test -n "$BROWSER_BIN"
+          BROWSER_BIN="$BROWSER_BIN" make test-browser
+
+      - name: Upload browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: player-browser-contract-failure
+          path: /tmp/player-browser-contract-artifacts/
+          if-no-files-found: warn
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -428,7 +469,7 @@ jobs:
   notify:
     name: Notify Status
     runs-on: ubuntu-latest
-    needs: [test, lint, build, security, docs, docker]
+    needs: [test, frontend-browser, lint, build, security, docs, docker]
     if: always()
     permissions:
       statuses: write
@@ -438,6 +479,7 @@ jobs:
       - name: Check overall status
         run: |
           if [[ "${{ needs.test.result }}" == "success" && \
+                "${{ needs.frontend-browser.result }}" == "success" && \
                 "${{ needs.lint.result }}" == "success" && \
                 "${{ needs.build.result }}" == "success" && \
                 "${{ needs.security.result }}" == "success" && \
@@ -448,6 +490,7 @@ jobs:
           else
             echo "❌ Some CI checks failed"
             echo "Test: ${{ needs.test.result }}"
+            echo "Frontend and browser: ${{ needs.frontend-browser.result }}"
             echo "Lint: ${{ needs.lint.result }}"
             echo "Build: ${{ needs.build.result }}"
             echo "Security: ${{ needs.security.result }}"

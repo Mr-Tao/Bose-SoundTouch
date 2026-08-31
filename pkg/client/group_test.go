@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gesellix/bose-soundtouch/pkg/models"
@@ -230,5 +231,76 @@ func TestClient_RemoveGroup(t *testing.T) {
 
 	if err := createTestClient(server.URL).RemoveGroup(); err != nil {
 		t.Fatalf("RemoveGroup: %v", err)
+	}
+}
+
+func TestClientRemoveGroupDoesNotReplayDroppedResponse(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/getGroup" {
+			_, _ = w.Write([]byte(`<group />`))
+			return
+		}
+
+		if r.URL.Path != "/removeGroup" {
+			http.NotFound(w, r)
+			return
+		}
+
+		calls.Add(1)
+		connection, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack response: %v", err)
+			return
+		}
+
+		_ = connection.Close()
+	}))
+	defer server.Close()
+
+	client := createTestClient(server.URL)
+	if _, err := client.GetGroup(); err != nil {
+		t.Fatalf("prime ordinary client connection: %v", err)
+	}
+
+	err := client.RemoveGroup()
+	if err == nil {
+		t.Fatal("RemoveGroup succeeded after the response was dropped")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("/removeGroup requests = %d, want exactly 1", got)
+	}
+}
+
+func TestClientRemoveGroupDoesNotFollowRedirect(t *testing.T) {
+	var calls atomic.Int32
+	var redirectedCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+
+		switch r.URL.Path {
+		case "/removeGroup":
+			http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
+		case "/redirected":
+			redirectedCalls.Add(1)
+			_, _ = w.Write([]byte(`<group />`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	err := createTestClient(server.URL).RemoveGroup()
+	if err == nil {
+		t.Fatal("RemoveGroup followed a redirect")
+	}
+	if !strings.Contains(err.Error(), "status 307") {
+		t.Fatalf("RemoveGroup error = %q, want redirect status", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("HTTP requests = %d, want exactly 1", got)
+	}
+	if got := redirectedCalls.Load(); got != 0 {
+		t.Fatalf("redirect target requests = %d, want 0", got)
 	}
 }

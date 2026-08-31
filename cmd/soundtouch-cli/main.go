@@ -1308,7 +1308,7 @@ func main() {
 							&cli.IntFlag{
 								Name:     "level",
 								Aliases:  []string{"l"},
-								Usage:    "Balance level (-50 to 50, negative=left, positive=right)",
+								Usage:    "Balance level (device-advertised range; -7 to 7 fallback, negative=left, positive=right)",
 								Required: true,
 							},
 						},

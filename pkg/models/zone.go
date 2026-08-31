@@ -125,7 +125,13 @@ func (zr *ZoneRequest) Validate() error {
 
 // IsStandalone returns true if this is a standalone (single device) configuration
 func (zi *ZoneInfo) IsStandalone() bool {
-	return len(zi.Members) == 0
+	for _, member := range zi.Members {
+		if member.DeviceID != zi.Master {
+			return false
+		}
+	}
+
+	return true
 }
 
 // IsMaster returns true if the given device ID is the zone master
@@ -135,6 +141,10 @@ func (zi *ZoneInfo) IsMaster(deviceID string) bool {
 
 // IsMember returns true if the given device ID is a zone member (not master)
 func (zi *ZoneInfo) IsMember(deviceID string) bool {
+	if deviceID == zi.Master {
+		return false
+	}
+
 	for _, member := range zi.Members {
 		if member.DeviceID == deviceID {
 			return true
@@ -174,7 +184,12 @@ func (zi *ZoneInfo) GetMemberByIP(ipAddress string) (*Member, bool) {
 // GetAllDeviceIDs returns all device IDs in the zone (master + members)
 func (zi *ZoneInfo) GetAllDeviceIDs() []string {
 	devices := []string{zi.Master}
+
 	for _, member := range zi.Members {
+		if member.DeviceID == zi.Master {
+			continue
+		}
+
 		devices = append(devices, member.DeviceID)
 	}
 
@@ -183,7 +198,15 @@ func (zi *ZoneInfo) GetAllDeviceIDs() []string {
 
 // GetTotalDeviceCount returns the total number of devices in the zone
 func (zi *ZoneInfo) GetTotalDeviceCount() int {
-	return 1 + len(zi.Members) // Master + members
+	count := 1
+
+	for _, member := range zi.Members {
+		if member.DeviceID != zi.Master {
+			count++
+		}
+	}
+
+	return count
 }
 
 // GetZoneStatus returns the zone status for a given device ID
@@ -210,7 +233,12 @@ func (zi *ZoneInfo) String() string {
 	}
 
 	var memberIDs []string
+
 	for _, member := range zi.Members {
+		if member.DeviceID == zi.Master {
+			continue
+		}
+
 		memberIDs = append(memberIDs, member.DeviceID)
 	}
 
@@ -222,6 +250,10 @@ func (zi *ZoneInfo) String() string {
 func (zi *ZoneInfo) ToZoneRequest() *ZoneRequest {
 	request := NewZoneRequest(zi.Master)
 	for _, member := range zi.Members {
+		if member.DeviceID == zi.Master {
+			continue
+		}
+
 		request.AddMember(member.DeviceID, member.IP)
 	}
 

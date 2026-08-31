@@ -163,12 +163,15 @@ func main() {
 
 			discoveryService := soundtouchweb.NewDiscoveryService(ifaceName, manualHosts...)
 
+			// Reserve status ordering before the asynchronous discovery starts.
+			discoveryGeneration := webApp.BeginDiscovery()
+
 			// Discover devices on startup
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 
-				webApp.BroadcastDiscoveryStatus("starting", webApp.DeviceCount())
+				webApp.BroadcastDiscoveryStatusFor(discoveryGeneration, "starting", webApp.DeviceCount())
 
 				// Register configured devices immediately rather than waiting for
 				// the full mDNS/UPnP sweep below (bounded by cfg.DiscoveryTimeout,
@@ -176,12 +179,17 @@ func main() {
 				// discoveryService's PreferredDevices so a host that's offline
 				// right now still gets retried on every subsequent discovery pass.
 				for _, host := range manualHosts {
-					webApp.AddDeviceByHost(host, 8090, "manual")
+					webApp.AddDeviceByHostContext(ctx, host, 8090, "manual")
 				}
 
-				webApp.DiscoverDevices(ctx, discoveryService)
+				err := webApp.DiscoverDevicesWithResult(ctx, discoveryService)
 
-				webApp.BroadcastDiscoveryStatus("completed", webApp.DeviceCount())
+				status := "completed"
+				if err != nil {
+					status = "failed"
+				}
+
+				webApp.BroadcastDiscoveryStatusFor(discoveryGeneration, status, webApp.DeviceCount())
 				webApp.BroadcastDeviceList()
 			}()
 

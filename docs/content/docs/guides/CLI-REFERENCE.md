@@ -709,8 +709,8 @@ Balance control commands.
 # Get current balance
 soundtouch-cli --host <device> balance get
 
-# Set balance (-50 to 50, negative=left, positive=right)
-soundtouch-cli --host <device> balance set --level <-50 to 50>
+# Set balance (validated against the device-advertised range; -7 to 7 fallback)
+soundtouch-cli --host <device> balance set --level <integer>
 
 # Shift balance left
 soundtouch-cli --host <device> balance left [--amount <1-10>]
@@ -727,7 +727,7 @@ soundtouch-cli --host <device> balance center
 # Get balance
 soundtouch-cli --host 192.0.2.10 balance get
 
-# Set balance 10 units to the right
+# Set balance 10 units to the right on a device advertising that range
 soundtouch-cli --host 192.0.2.10 balance set --level 10
 
 # Shift left by 5 units (default)
@@ -854,6 +854,55 @@ soundtouch-cli --host 192.0.2.10 zone remove --member 192.0.2.12
 # Dissolve the zone (make all speakers independent)
 soundtouch-cli --host 192.0.2.10 zone dissolve
 ```
+
+### Stereo Pair Management
+
+Create and manage a persistent LEFT/RIGHT pair of two SoundTouch 10 speakers.
+This is distinct from a temporary multi-room zone. Both speakers must be
+online, stereo-capable, and outside any existing stereo group. Pair creation
+accepts either two standalone speakers or two speakers whose fresh zone views
+agree on the same temporary zone and include both device IDs; the speaker
+firmware performs the zone-to-stereo transition without a CLI-side zone
+remove/re-add. Pair creation also requires both speakers to use the same Marge
+account and backend. Rename and remove still require both members to be outside
+any temporary zone. Run lifecycle commands from the site containing both
+speakers; site-relative Marge names such as `unifi` do not identify a remote
+site when resolved by the CLI host.
+
+```bash
+# Inspect a standalone speaker or either member of a pair
+soundtouch-cli --host 192.0.2.10 group status
+
+# Create a pair; the LEFT speaker becomes the master
+soundtouch-cli group create \
+  --left 192.0.2.10 \
+  --right 192.0.2.11 \
+  --name "Living Room"
+
+# Rename through either member
+soundtouch-cli --host 192.0.2.10 group rename --name "Living Room Pair"
+
+# Dissolve the pair without removing either speaker from AfterTouch
+soundtouch-cli --host 192.0.2.10 group remove
+```
+
+Create, rename, and remove verify fresh state on both speakers. Rename and
+remove first inspect the current group and carry its ID as a generation guard;
+if the pair changes before mutation, the operation fails without touching the
+newer pair. A partial transition is reported as degraded with per-speaker
+details rather than as a successful operation. A remove attempt carries the
+last exact L/R topology, freshly verifies both speakers, and retires
+persistence only if the stored generation still matches it. Before create,
+the CLI verifies both speakers' empty physical group state and compatible zone
+topology, queries their current Marge backend for stale group records, then
+repeats the physical and zone checks before mutation. It refuses to mutate
+either speaker while any stale group record remains or if the zone views drift.
+After create, fresh group reads remain authoritative; a failed or differing
+zone readback is reported as degraded without tearing down an otherwise
+verified stereo pair. After verified physical cleanup, the CLI removes the
+exact group ID through the Marge URL and account freshly read from the speaker.
+A backend cleanup failure is therefore visible as a degraded result instead of
+leaving an apparently successful stale generation.
 
 ### Browse and Navigation
 
@@ -1357,16 +1406,36 @@ soundtouch-cli --host <device> setup migrate --method telnet \
 
 #### `setup revert`
 
-Undoes a migration — the CLI equivalent of the web UI's "Revert to
-Defaults" button. Restores `SoundTouchSdkPrivateCfg.xml`, `/etc/hosts`, and
-`/etc/resolv.conf` from their `.original` backups, removes the AfterTouch
-DNS-hook artifacts, and strips just the AfterTouch-labeled certificate out
-of the trust bundle. No `--service-url` needed — everything it touches
-already lives on the speaker.
+Undoes a migration. The default `--method ssh` is the CLI equivalent of the
+web UI's **Revert to Defaults** button: it restores
+`SoundTouchSdkPrivateCfg.xml`, `/etc/hosts`, and `/etc/resolv.conf` from their
+`.original` backups, removes the AfterTouch DNS-hook artifacts, and strips
+just the AfterTouch-labeled certificate out of the trust bundle.
 
 ```bash
 soundtouch-cli --host <device> setup revert
 ```
+
+For a telnet-only migration, `--method telnet` restores the four canonical
+Bose service URLs without requiring SSH or an XML backup:
+
+```bash
+soundtouch-cli --host <device> setup revert --method telnet
+```
+
+This only changes `margeServerUrl`, `statsServerUrl`, `swUpdateUrl`, and
+`bmxRegistryUrl`. It does not restore filesystem, DNS, CA, SSH, or account
+state. Reboot the speaker afterwards and verify all four persisted values.
+The `--marge-url`, `--stats-url`, `--sw-update-url`, and `--bmx-url` flags can
+override the canonical defaults for firmware- or region-specific values.
+These flags require `--method telnet`; using them with the default SSH method
+is an error. Each value must be an absolute HTTP or HTTPS service URL without
+userinfo, query parameters, fragments, whitespace, control characters, or
+shell metacharacters.
+Telnet writes are sequential rather than transactional. If the command reports
+an error, read back and reconcile all four fields before retrying or rebooting;
+the error distinguishes a partial runtime update from an uncertain persistence
+outcome after `envswitch`.
 
 **Out of scope for this command** (matches the web UI button): SSH /
 `remote_services` persistence (use `setup remote-services --remove`) and

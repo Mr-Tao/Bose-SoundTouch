@@ -195,6 +195,42 @@ func TestZoneInfo_IsStandalone(t *testing.T) {
 	}
 }
 
+func TestZoneInfo_NormalizesMasterRepeatedAsMember(t *testing.T) {
+	zi := &ZoneInfo{
+		Master: "MASTER123",
+		Members: []Member{
+			{DeviceID: "MASTER123", IP: "192.0.2.10"},
+		},
+	}
+
+	if !zi.IsStandalone() {
+		t.Fatal("master-only member list should be standalone")
+	}
+	if zi.IsMember("MASTER123") {
+		t.Fatal("master must not also be classified as a member")
+	}
+	if got := zi.GetAllDeviceIDs(); len(got) != 1 || got[0] != "MASTER123" {
+		t.Fatalf("GetAllDeviceIDs() = %v, want [MASTER123]", got)
+	}
+	if got := zi.GetTotalDeviceCount(); got != 1 {
+		t.Fatalf("GetTotalDeviceCount() = %d, want 1", got)
+	}
+	if got := zi.ToZoneRequest(); len(got.Members) != 0 {
+		t.Fatalf("ToZoneRequest() members = %v, want none", got.Members)
+	}
+
+	zi.Members = append(zi.Members, Member{DeviceID: "SLAVE456", IP: "192.0.2.11"})
+	if zi.IsStandalone() {
+		t.Fatal("non-master member should make the zone non-standalone")
+	}
+	if got := zi.GetTotalDeviceCount(); got != 2 {
+		t.Fatalf("GetTotalDeviceCount() = %d, want 2", got)
+	}
+	if got := zi.ToZoneRequest(); len(got.Members) != 1 || got.Members[0].DeviceID != "SLAVE456" {
+		t.Fatalf("ToZoneRequest() members = %v, want only SLAVE456", got.Members)
+	}
+}
+
 func TestZoneInfo_IsMaster(t *testing.T) {
 	zi := &ZoneInfo{
 		Master: "MASTER123",

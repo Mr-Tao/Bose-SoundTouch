@@ -1,12 +1,11 @@
-import { h, render } from 'preact';
-import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
-import htm from 'htm';
+import { h, htm, render, useCallback, useEffect, useRef, useState } from './dependencies.js';
 import { DeviceList } from './components/DeviceList.js';
 import { NowPlaying } from './components/NowPlaying.js';
 import { Controls } from './components/Controls.js';
 import { Presets } from './components/Presets.js';
 import { Sources } from './components/Sources.js';
 import { Zone } from './components/Zone.js';
+import { StereoPair } from './components/StereoPair.js';
 import { Recents } from './components/Recents.js';
 import { TuneInBrowser } from './components/TuneInBrowser.js';
 import { RadioBrowser } from './components/RadioBrowser.js';
@@ -15,6 +14,8 @@ import { PlayURL } from './components/PlayURL.js';
 import { TTS } from './components/TTS.js';
 import { Announcements } from './components/Announcements.js';
 import { ContentPlaybackCommand } from './components/ContentPlaybackCommand.js';
+import { Settings } from './components/Settings.js';
+import { SoundSettings } from './components/SoundSettings.js';
 import { api } from './api.js';
 import {
     DISCRETE_COMMAND_READBACK_DELAYS_MS,
@@ -22,6 +23,13 @@ import {
     playbackIdentity,
     useDiscreteCommand,
 } from './discreteCommand.js';
+import {
+    mergeZoneVolumeReadback,
+    maxZoneVolume,
+    previewZoneVolume,
+    sameZoneMemberVolumes,
+    zoneMemberVolumes,
+} from './zoneVolumePreview.mjs';
 
 const html = htm.bind(h);
 
@@ -86,15 +94,30 @@ export function mergeStatusUpdate(previous, deviceId, status) {
     });
 }
 
+function zoneTopologyKey(deviceId, zone) {
+    if (!zone) return `${deviceId}:standalone`;
+
+    const members = (zone.members || []).map(member => {
+        const physical = (member.physicalMembers || []).map(item => item.deviceId).join('+');
+        return `${member.controlId || ''}:${physical}`;
+    });
+    return `${deviceId}:${zone.masterControlId || ''}:${members.join(',')}`;
+}
+
 export function DeviceDetail({
     deviceId,
     devices,
     onBack,
     onStatusReadback,
+    onDevicesChanged,
+    notify,
+    onRemove,
     commandReadbackDelays = DISCRETE_COMMAND_READBACK_DELAYS_MS,
 }) {
     const device = devices[deviceId];
     const status = device?.status;
+    const [zoneVolumePreview, setZoneVolumePreview] = useState(null);
+    const previewExpiryRef = useRef(null);
     const {
         command,
         busy: commandBusy,
@@ -108,6 +131,29 @@ export function DeviceDetail({
     });
     const source = status?.nowPlaying?.Source;
     const playStatus = status?.nowPlaying?.PlayStatus;
+
+    function clearPreviewExpiry() {
+        if (previewExpiryRef.current !== null) {
+            clearTimeout(previewExpiryRef.current);
+            previewExpiryRef.current = null;
+        }
+    }
+
+    useEffect(() => {
+        clearPreviewExpiry();
+        setZoneVolumePreview(null);
+    }, [deviceId]);
+    useEffect(() => () => clearPreviewExpiry(), []);
+
+    const authoritativeZoneVolumes = zoneMemberVolumes(device?.zone);
+
+    useEffect(() => {
+        if (zoneVolumePreview?.phase !== 'reconciling') return;
+        if (!sameZoneMemberVolumes(zoneVolumePreview.volumes, authoritativeZoneVolumes)) return;
+
+        clearPreviewExpiry();
+        setZoneVolumePreview(null);
+    }, [device?.zone, zoneVolumePreview]);
 
     function togglePower() {
         if (!source) return;
@@ -191,6 +237,79 @@ export function DeviceDetail({
         `;
     }
 
+    const controlsMode = device.zone && !device.zone.isStandalone &&
+        device.zone.masterControlId === deviceId ? 'zone' : 'device';
+
+    function beginGroupVolume(level, generation) {
+        clearPreviewExpiry();
+        setZoneVolumePreview(current => {
+            const startingVolumes = current?.controlId === deviceId
+                ? current.volumes
+                : zoneMemberVolumes(device.zone);
+
+            return {
+                controlId: deviceId,
+                generation,
+                phase: 'active',
+                startingLevel: level,
+                startingVolumes,
+                volumes: startingVolumes,
+            };
+        });
+    }
+
+    function previewGroupVolume(level, generation) {
+        clearPreviewExpiry();
+        setZoneVolumePreview(current => {
+            const continuing = current?.controlId === deviceId &&
+                current.generation === generation && current.phase === 'active';
+            const startingVolumes = continuing
+                ? current.startingVolumes
+                : zoneMemberVolumes(device.zone);
+            const startingLevel = continuing
+                ? current.startingLevel
+                : maxZoneVolume(startingVolumes);
+
+            return {
+                controlId: deviceId,
+                generation,
+                phase: 'active',
+                startingLevel,
+                startingVolumes,
+                volumes: previewZoneVolume(startingVolumes, startingLevel, level),
+            };
+        });
+    }
+
+    function reconcileGroupVolume(data, generation) {
+        clearPreviewExpiry();
+        setZoneVolumePreview(current => {
+            if (current?.controlId !== deviceId || current.generation !== generation) return current;
+
+            return {
+                ...current,
+                phase: 'reconciling',
+                volumes: mergeZoneVolumeReadback(current.volumes, data),
+            };
+        });
+        previewExpiryRef.current = setTimeout(() => {
+            previewExpiryRef.current = null;
+            setZoneVolumePreview(current =>
+                current?.controlId === deviceId && current.generation === generation &&
+                    current.phase === 'reconciling'
+                    ? null
+                    : current);
+        }, 1200);
+    }
+
+    function rejectGroupVolumePreview(generation) {
+        clearPreviewExpiry();
+        setZoneVolumePreview(current =>
+            current?.controlId === deviceId && current.generation === generation
+                ? null
+                : current);
+    }
+
     return html`
         <div class="device-detail">
             <div class="page-header">
@@ -210,8 +329,9 @@ export function DeviceDetail({
             </div>
             <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} />
             <${Controls}
+                key=${`${deviceId}:${controlsMode}`}
                 deviceId=${deviceId}
-                status=${device.status}
+                device=${device}
                 command=${command}
                 commandBusy=${commandBusy}
                 commandStatus=${commandStatus}
@@ -221,6 +341,10 @@ export function DeviceDetail({
                 onCycleRepeat=${cycleRepeat}
                 onPreviousTrack=${previousTrack}
                 onNextTrack=${nextTrack}
+                onZoneVolumeStart=${beginGroupVolume}
+                onZoneVolumePreview=${previewGroupVolume}
+                onZoneVolumeReadback=${reconcileGroupVolume}
+                onZoneVolumeFailure=${rejectGroupVolumePreview}
             />
             <${Presets}
                 deviceId=${deviceId}
@@ -234,13 +358,48 @@ export function DeviceDetail({
                 status=${device.status}
                 onStatusReadback=${status => onStatusReadback(deviceId, status)}
             />
-            <${Zone} deviceId=${deviceId} devices=${devices} />
+            <${StereoPair}
+                deviceId=${deviceId}
+                device=${device}
+                devices=${devices}
+                onChanged=${onDevicesChanged}
+                notify=${notify}
+            />
+            <${Zone} key=${zoneTopologyKey(deviceId, device.zone)} deviceId=${deviceId} devices=${devices}
+                volumePreview=${zoneVolumePreview?.controlId === deviceId
+                    ? zoneVolumePreview.volumes
+                    : null} />
             <${Recents}
                 deviceId=${deviceId}
                 command=${command}
                 commandBusy=${commandBusy}
                 onPlay=${playRecent}
             />
+            ${!device.zone ? html`
+                <${SoundSettings} controlId=${deviceId} device=${device} />
+                <${Settings}
+                    deviceId=${device.deviceSettingsTarget?.controlId || deviceId}
+                    targetName=${device.deviceSettingsTarget?.name || device.info?.name || deviceId}
+                />
+            ` : null}
+            ${!device.stereoPair ? html`
+                <div class="device-management-section">
+                    <div class="section-title">Device management</div>
+                    <button class="btn-secondary device-remove-action"
+                            onClick=${() => onRemove(deviceId)}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                             stroke-linejoin="round" aria-hidden="true">
+                            <path d="M3 6h18" />
+                            <path d="M8 6V4h8v2" />
+                            <path d="M19 6l-1 14H6L5 6" />
+                            <path d="M10 11v5" />
+                            <path d="M14 11v5" />
+                        </svg>
+                        <span>Remove from AfterTouch</span>
+                    </button>
+                </div>
+            ` : null}
         </div>
     `;
 }
@@ -291,12 +450,18 @@ function App() {
             .catch(err => console.error('Failed to fetch version:', err));
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${protocol}//${location.host}/api/control/ws`);
-        let reconnectTimer;
+        const websocketURL = `${protocol}//${location.host}/api/control/ws`;
+        let ws = null;
+        let reconnectTimer = null;
+        let reconnectDelay = 1000;
+        let refreshInFlight = false;
+        let projectionGeneration = 0;
+        let stopped = false;
 
-        ws.onmessage = (event) => {
+        function handleMessage(event) {
             const msg = JSON.parse(event.data);
             if (msg.type === 'devices') {
+                projectionGeneration++;
                 setDevices(previous => mergeDevicesSnapshot(previous, msg.data));
             } else if (msg.type === 'discovery_status') {
                 if (msg.data?.isDiscovering !== undefined) {
@@ -311,17 +476,90 @@ function App() {
                     showToast(`Found ${msg.data.deviceCount} device(s)`);
                 }
             } else if (msg.type === 'status_update' && msg.deviceId) {
+                projectionGeneration++;
                 setDevices(previous => mergeStatusUpdate(previous, msg.deviceId, msg.data));
             }
-        };
+        }
 
-        ws.onclose = () => {
-            reconnectTimer = setTimeout(() => location.reload(), 5000);
-        };
+        async function refreshVisibleDevices() {
+            if (stopped || refreshInFlight) return;
+
+            refreshInFlight = true;
+            const generation = projectionGeneration;
+            try {
+                const resp = await api.devices();
+                if (!stopped && resp?.success && generation === projectionGeneration) {
+                    projectionGeneration++;
+                    setDevices(previous => mergeDevicesSnapshot(previous, resp.data));
+                }
+            } catch (err) {
+                if (!stopped) console.error('Failed to refresh devices:', err);
+            } finally {
+                refreshInFlight = false;
+            }
+        }
+
+        function scheduleReconnect() {
+            if (stopped || reconnectTimer !== null) return;
+
+            const delay = reconnectDelay;
+            reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connectWebSocket();
+            }, delay);
+        }
+
+        function connectWebSocket() {
+            if (stopped || ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) return;
+
+            const socket = new WebSocket(websocketURL);
+            ws = socket;
+            socket.onopen = () => {
+                if (ws === socket) reconnectDelay = 1000;
+            };
+            socket.onmessage = event => {
+                if (ws === socket) handleMessage(event);
+            };
+            socket.onclose = () => {
+                if (ws !== socket) return;
+                ws = null;
+                scheduleReconnect();
+            };
+        }
+
+        function resumeLiveUpdates() {
+            if (document.visibilityState === 'hidden') return;
+
+            refreshVisibleDevices();
+            if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+                if (reconnectTimer !== null) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+                connectWebSocket();
+            }
+        }
+
+        function handleVisibilityChange() {
+            if (!document.hidden) resumeLiveUpdates();
+        }
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('pageshow', resumeLiveUpdates);
+        window.addEventListener('online', resumeLiveUpdates);
+        connectWebSocket();
 
         return () => {
+            stopped = true;
             clearTimeout(reconnectTimer);
-            ws.close();
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            window.removeEventListener('pageshow', resumeLiveUpdates);
+            window.removeEventListener('online', resumeLiveUpdates);
+            if (ws) {
+                ws.onclose = null;
+                ws.close();
+            }
         };
     }, []);
 
@@ -387,20 +625,31 @@ function App() {
         setContentPlaybackRequest(null);
     }
 
+    async function refreshDevices() {
+        const resp = await api.devices();
+        if (resp?.success) {
+            setDevices(previous => mergeDevicesSnapshot(previous, resp.data));
+        }
+    }
+
     async function removeDevice(id) {
         const name = devices[id]?.info?.name || id;
-        if (!confirm(`Remove "${name}"?\n\nThis clears it from AfterTouch. A device still online may reappear after the next discovery scan.`)) {
+        if (!confirm(`Remove "${name}" from AfterTouch?\n\nThis does not reset the speaker. A device still online may reappear after the next discovery scan.`)) {
             return;
         }
-        // Optimistically drop it; the server's devices broadcast reconciles.
-        setDevices(prev => {
-            const next = { ...prev };
-            delete next[id];
-            return next;
-        });
         try {
             const resp = await api.removeDevice(id);
-            showToast(resp?.success ? `Removed "${name}"` : (resp?.error || 'Failed to remove device'));
+            if (!resp?.success) {
+                showToast(resp?.error || 'Failed to remove device');
+                return;
+            }
+            setDevices(prev => {
+                const next = { ...prev };
+                delete next[id];
+                return next;
+            });
+            navigate('devices');
+            showToast(`Removed "${name}"`);
         } catch (err) {
             showToast('Failed to remove device');
         }
@@ -490,7 +739,6 @@ function App() {
                         isDiscovering=${isDiscovering}
                         onSelect=${(id) => navigate('device', id)}
                         onDiscover=${discover}
-                        onRemove=${removeDevice}
                     />
                 ` : page === 'device' ? html`
                     <${DeviceDetail}
@@ -499,6 +747,9 @@ function App() {
                         devices=${devices}
                         onBack=${() => navigate('devices')}
                         onStatusReadback=${mergeDeviceReadback}
+                        onDevicesChanged=${refreshDevices}
+                        notify=${showToast}
+                        onRemove=${removeDevice}
                     />
                 ` : page === 'tunein' ? html`
                     <${TuneInBrowser}

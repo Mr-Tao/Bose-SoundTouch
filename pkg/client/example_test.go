@@ -147,8 +147,8 @@ func ExampleClient_SetBalance() {
 	config := &client.Config{Host: "192.0.2.100"}
 	c := client.NewClient(config)
 
-	// Set balance slightly to the right (range: -50 to +50)
-	err := c.SetBalance(10)
+	// Set balance slightly to the right using the conservative fallback range.
+	err := c.SetBalance(7)
 	if err != nil {
 		log.Fatal(err)
 	}

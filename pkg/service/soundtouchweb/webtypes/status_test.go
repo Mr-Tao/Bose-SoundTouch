@@ -4,13 +4,32 @@ package webtypes
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	soundtouchclient "github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 )
+
+func TestDeviceConnectionWebSocketCompatibilityField(t *testing.T) {
+	apiClient := soundtouchclient.NewClientFromHost("192.0.2.10")
+	webSocket := apiClient.NewWebSocketClient(nil)
+	conn := &DeviceConnection{WebSocket: webSocket}
+
+	if got := conn.CurrentWebSocket(); got != webSocket {
+		t.Fatalf("CurrentWebSocket() = %p, want compatibility field value %p", got, webSocket)
+	}
+
+	conn.SetWebSocket(nil)
+	if conn.WebSocket != nil || conn.CurrentWebSocket() != nil {
+		t.Fatal("SetWebSocket(nil) did not clear the compatibility field")
+	}
+}
 
 func TestNewDeviceConnection_InitialStatus(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
@@ -24,8 +43,565 @@ func TestNewDeviceConnection_InitialStatus(t *testing.T) {
 		t.Error("IsConnected should default to false")
 	}
 
+	if status.Connectivity != ConnectivityOffline {
+		t.Errorf("Connectivity = %q, want %q", status.Connectivity, ConnectivityOffline)
+	}
+
 	if status.LastActivity.IsZero() {
 		t.Error("LastActivity should be initialised, got zero time")
+	}
+}
+
+func TestHTTPPollConnectivityTransitions(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.IsConnected {
+		t.Fatalf("after success: connectivity=%q isConnected=%v", status.Connectivity, status.IsConnected)
+	}
+
+	firstFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(firstFailure, false, started.Add(30*time.Second), nil)
+
+	status = conn.Status()
+	if status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("after first failure: connectivity=%q isConnected=%v", status.Connectivity, status.IsConnected)
+	}
+
+	if !status.LastActivity.Equal(started) {
+		t.Fatalf("failed poll changed LastActivity: got %v, want %v", status.LastActivity, started)
+	}
+
+	secondFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(secondFailure, false, started.Add(60*time.Second), nil)
+
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOffline || status.IsConnected {
+		t.Fatalf("after sustained failure: connectivity=%q isConnected=%v", status.Connectivity, status.IsConnected)
+	}
+}
+
+func TestHTTPPollStaysStaleBeforeGracePeriod(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	firstFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(firstFailure, false, started.Add(30*time.Second), nil)
+	secondFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(secondFailure, false, started.Add(60*time.Second-time.Nanosecond), nil)
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("connectivity=%q isConnected=%v before grace period", status.Connectivity, status.IsConnected)
+	}
+
+	recovery := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(recovery, true, started.Add(61*time.Second), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.HTTPReachable || !status.IsConnected {
+		t.Fatalf("after recovery: connectivity=%q httpReachable=%v isConnected=%v",
+			status.Connectivity, status.HTTPReachable, status.IsConnected)
+	}
+}
+
+func TestConnectivityAggregatesIndependentDirectInputs(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	conn.ObserveEventStream(true, started)
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("stream-only success = %+v", status)
+	}
+
+	firstFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(firstFailure, false, started.Add(30*time.Second), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("HTTP failure over live stream = %+v", status)
+	}
+
+	conn.ObserveEventStream(false, started.Add(30*time.Second))
+	status = conn.Status()
+	if status.Connectivity != ConnectivityStale || status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("first direct-path loss = %+v", status)
+	}
+
+	secondFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(secondFailure, false, started.Add(60*time.Second-time.Nanosecond), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("state before grace boundary = %+v", status)
+	}
+
+	thirdFailure := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(thirdFailure, false, started.Add(60*time.Second), nil)
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOffline || status.IsConnected {
+		t.Fatalf("state at grace boundary = %+v", status)
+	}
+
+	conn.ObserveEventStream(true, started.Add(61*time.Second))
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("immediate stream recovery = %+v", status)
+	}
+}
+
+func TestOlderHTTPFailureCannotDemoteNewerStreamActivity(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	older := conn.BeginHTTPPoll()
+	conn.ObserveEventStream(true, started.Add(61*time.Second))
+	if !conn.CompleteHTTPPoll(older, false, started.Add(62*time.Second), nil) {
+		t.Fatal("latest HTTP-channel observation was unexpectedly rejected")
+	}
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("older HTTP failure demoted newer stream success: %+v", status)
+	}
+}
+
+func TestOlderStreamSampleCannotOverwriteNewerSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	older := conn.BeginEventStreamObservation()
+	conn.ApplySpeakerEventAt(started.Add(time.Second), func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 42}
+	})
+	if conn.CompleteEventStreamObservation(older, false, started.Add(2*time.Second)) {
+		t.Fatal("older sampled disconnect was unexpectedly accepted")
+	}
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("older sampled disconnect demoted event success: %+v", status)
+	}
+	if status.Volume == nil || status.Volume.ActualVolume != 42 {
+		t.Fatalf("speaker event payload was lost: %+v", status.Volume)
+	}
+}
+
+func TestCompleteEventStreamObservationReportsProjectionChange(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
+	conn.ObserveEventStream(true, started)
+
+	observation := conn.BeginEventStreamObservation()
+	accepted, changed := conn.CompleteEventStreamObservationChanged(
+		observation,
+		false,
+		started.Add(time.Second),
+	)
+	if !accepted || !changed {
+		t.Fatalf("accepted=%v changed=%v, want accepted connectivity change", accepted, changed)
+	}
+	if status := conn.Status(); status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("sampled disconnect projection = %+v", status)
+	}
+}
+
+func TestSpeakerConnectionReportCannotOverrideDirectSuccess(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	conn.ApplySpeakerConnectionEvent(SpeakerConnectionState{
+		State: string(models.ConnectionStateDisconnected), Signal: "POOR",
+	}, started.Add(time.Second))
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.HTTPReachable ||
+		!status.WebSocketConnected || !status.IsConnected {
+		t.Fatalf("speaker report overrode direct success: %+v", status)
+	}
+	if status.SpeakerConnectionState == nil ||
+		status.SpeakerConnectionState.State != string(models.ConnectionStateDisconnected) {
+		t.Fatalf("speaker diagnostic was not retained: %+v", status.SpeakerConnectionState)
+	}
+
+	conn.ApplySpeakerConnectionEvent(SpeakerConnectionState{State: "UNKNOWN"}, started.Add(2*time.Second))
+	status = conn.Status()
+	if status.Connectivity != ConnectivityOnline || status.SpeakerConnectionState == nil ||
+		status.SpeakerConnectionState.State != "UNKNOWN" {
+		t.Fatalf("unknown diagnostic changed direct connectivity: %+v", status)
+	}
+}
+
+func TestInitialHTTPFailuresCanReachOffline(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+
+	first := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(first, false, started, nil)
+	if status := conn.Status(); status.Connectivity != ConnectivityStale || !status.IsConnected {
+		t.Fatalf("first initial failure = %+v", status)
+	}
+
+	second := conn.BeginHTTPPoll()
+	conn.CompleteHTTPPoll(second, false, started.Add(time.Second), nil)
+	if status := conn.Status(); status.Connectivity != ConnectivityOffline || status.IsConnected {
+		t.Fatalf("second initial failure = %+v", status)
+	}
+}
+
+func TestHTTPPollOlderFailureCannotOverwriteNewerSuccess(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	older := conn.BeginHTTPPoll()
+	newer := conn.BeginHTTPPoll()
+	accepted := conn.CompleteHTTPPoll(newer, true, started.Add(time.Second), func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 42}
+	})
+	if !accepted {
+		t.Fatal("newer successful poll was unexpectedly discarded")
+	}
+
+	accepted = conn.CompleteHTTPPoll(older, false, started.Add(2*time.Second), nil)
+	if accepted {
+		t.Fatal("older failed poll was unexpectedly accepted")
+	}
+
+	status := conn.Status()
+	if status.Connectivity != ConnectivityOnline || !status.IsConnected {
+		t.Fatalf("connectivity=%q isConnected=%v, want online", status.Connectivity, status.IsConnected)
+	}
+
+	if status.Volume == nil || status.Volume.ActualVolume != 42 {
+		t.Fatalf("newer status payload was lost: %+v", status.Volume)
+	}
+
+	if conn.CompleteHTTPPoll(newer, false, started.Add(3*time.Second), nil) {
+		t.Fatal("duplicate poll completion was unexpectedly accepted")
+	}
+}
+
+func TestHTTPPollCannotOverwriteNewerSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	started := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	conn.MarkHTTPSuccess(started)
+
+	poll := conn.BeginHTTPPoll()
+	conn.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 99}
+	})
+	conn.CompleteHTTPPoll(poll, true, started.Add(time.Second), func(status *DeviceStatus) {
+		status.Volume = &models.Volume{ActualVolume: 42}
+	})
+
+	status := conn.Status()
+	if status.Volume == nil || status.Volume.ActualVolume != 99 {
+		t.Fatalf("speaker event was overwritten by older poll data: %+v", status.Volume)
+	}
+
+	if status.Connectivity != ConnectivityOnline || !status.IsConnected {
+		t.Fatalf("poll health was not applied: connectivity=%q isConnected=%v",
+			status.Connectivity, status.IsConnected)
+	}
+}
+
+func TestZoneCacheRequiresAuthoritativeMaster(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	refresh := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(refresh, "MASTER", zone) {
+		t.Fatal("master-confirmed zone was not stored")
+	}
+	topology, current := conn.SnapshotZoneTopology()
+	if !current || topology.Zone == nil || topology.Zone.Master != "MASTER" ||
+		!conn.ZoneTopologyCurrent(topology) {
+		t.Fatalf("confirmed zone snapshot = %+v, current=%v", topology, current)
+	}
+
+	memberRefresh := conn.BeginZoneRefresh()
+	if _, current := conn.SnapshotZoneTopology(); current {
+		t.Fatal("in-flight zone refresh remained writable")
+	}
+	if conn.ApplyPolledZone(memberRefresh, "MEMBER", zone) {
+		t.Fatal("member response was accepted as authoritative")
+	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("rejected member response confirmed stale zone: %+v, current=%v", snapshot, current)
+	}
+	if conn.ZoneTopologyCurrent(topology) {
+		t.Fatal("older confirmed zone remained current after rejected refresh")
+	}
+	if conn.Status().Zone == nil || conn.Status().Zone.Master != "MASTER" {
+		t.Fatalf("member response cleared cached topology: %+v", conn.Status().Zone)
+	}
+
+	recovery := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(recovery, "MASTER", zone) {
+		t.Fatal("authoritative recovery zone was not stored")
+	}
+	if recovered, current := conn.SnapshotZoneTopology(); !current || recovered.Zone == nil ||
+		recovered.Zone.Master != "MASTER" || !conn.ZoneTopologyCurrent(recovered) {
+		t.Fatalf("recovered zone snapshot = %+v, current=%v", recovered, current)
+	}
+}
+
+func TestZoneCacheRejectsStaleRefreshAndClearsOnEmptyStandalone(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	stale := conn.BeginZoneRefresh()
+	standalone := conn.BeginZoneRefresh()
+	if conn.ApplyPolledZone(stale, "MASTER", &models.ZoneInfo{Master: " \t "}) {
+		t.Fatal("stale standalone response was accepted")
+	}
+	if conn.Status().Zone == nil {
+		t.Fatal("stale response cleared cached topology")
+	}
+
+	if !conn.ApplyPolledZone(standalone, "MASTER", &models.ZoneInfo{}) {
+		t.Fatal("empty standalone response did not clear the zone")
+	}
+	if conn.Status().Zone != nil {
+		t.Fatalf("standalone topology remained cached: %+v", conn.Status().Zone)
+	}
+}
+
+func TestZoneCacheRejectsMalformedMasterlessResponse(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	malformed := conn.BeginZoneProjectionRefresh()
+	if conn.ApplyPolledZone(malformed, "MASTER", &models.ZoneInfo{
+		Members: []models.Member{{DeviceID: "MEMBER", IP: "192.0.2.20"}},
+	}) {
+		t.Fatal("masterless response with members was accepted")
+	}
+	if conn.Status().Zone == nil || conn.Status().Zone.Master != "MASTER" {
+		t.Fatalf("malformed response cleared cached topology: %+v", conn.Status().Zone)
+	}
+	if status, pending := conn.StatusForProjection(); pending ||
+		status.Zone == nil || status.Zone.Master != "MASTER" {
+		t.Fatalf("malformed response hid retained projection: status=%+v pending=%v",
+			status, pending)
+	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("malformed response confirmed an unsafe topology: %+v current=%v",
+			snapshot, current)
+	}
+}
+
+func TestAbandonedZoneRefreshRevealsCacheButKeepsWritesUnsafe(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	failed := conn.BeginZoneProjectionRefresh()
+	if _, pending := conn.StatusForProjection(); !pending {
+		t.Fatal("in-flight refresh did not hide the retained projection")
+	}
+	if !conn.AbandonZoneRefresh(failed) {
+		t.Fatal("current failed refresh was not retired")
+	}
+	if status, pending := conn.StatusForProjection(); pending ||
+		status.Zone == nil || status.Zone.Master != "MASTER" {
+		t.Fatalf("abandoned refresh did not reveal retained projection: status=%+v pending=%v",
+			status, pending)
+	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("abandoned refresh left zone-owned writes enabled: %+v current=%v",
+			snapshot, current)
+	}
+}
+
+func TestRoutineZoneRefreshKeepsConfirmedProjectionVisible(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	routine := conn.BeginZoneRefresh()
+	if status, pending := conn.StatusForProjection(); pending ||
+		status.Zone == nil || status.Zone.Master != "MASTER" {
+		t.Fatalf("routine poll hid healthy projection: status=%+v pending=%v", status, pending)
+	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("routine poll left zone-owned writes enabled: %+v current=%v", snapshot, current)
+	}
+	if !conn.ApplyPolledZone(routine, "MASTER", zone) {
+		t.Fatal("routine refresh result was not accepted")
+	}
+}
+
+func TestRoutineZoneRefreshInheritsActiveProjectionBarrier(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "master"})
+	zone := &models.ZoneInfo{
+		Master: "MASTER",
+		Members: []models.Member{
+			{DeviceID: "MASTER", IP: "192.0.2.10"},
+			{DeviceID: "MEMBER", IP: "192.0.2.20"},
+		},
+	}
+
+	initial := conn.BeginZoneRefresh()
+	if !conn.ApplyPolledZone(initial, "MASTER", zone) {
+		t.Fatal("initial zone was not stored")
+	}
+
+	conn.BeginZoneProjectionRefresh()
+	routine := conn.BeginZoneRefresh()
+	if _, pending := conn.StatusForProjection(); !pending {
+		t.Fatal("superseding routine poll dropped the active projection barrier")
+	}
+	if !conn.AbandonZoneRefresh(routine) {
+		t.Fatal("superseding routine poll did not own the projection barrier")
+	}
+	if status, pending := conn.StatusForProjection(); pending ||
+		status.Zone == nil || status.Zone.Master != "MASTER" {
+		t.Fatalf("failed superseding poll did not restore retained projection: status=%+v pending=%v",
+			status, pending)
+	}
+	if snapshot, current := conn.SnapshotZoneTopology(); current || snapshot.Zone != nil {
+		t.Fatalf("failed superseding poll left zone-owned writes enabled: %+v current=%v",
+			snapshot, current)
+	}
+}
+
+func TestConnectivityJSONCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		connectivity Connectivity
+		connected    bool
+	}{
+		{connectivity: ConnectivityOnline, connected: true},
+		{connectivity: ConnectivityStale, connected: true},
+		{connectivity: ConnectivityOffline, connected: false},
+	} {
+		payload, err := json.Marshal(DeviceStatus{
+			Connectivity: test.connectivity,
+			IsConnected:  test.connected,
+		})
+		if err != nil {
+			t.Fatalf("marshal %q: %v", test.connectivity, err)
+		}
+
+		var decoded map[string]interface{}
+		if err := json.Unmarshal(payload, &decoded); err != nil {
+			t.Fatalf("unmarshal %q: %v", test.connectivity, err)
+		}
+
+		if decoded["connectivity"] != string(test.connectivity) {
+			t.Errorf("connectivity = %v, want %q", decoded["connectivity"], test.connectivity)
+		}
+
+		if decoded["isConnected"] != test.connected {
+			t.Errorf("isConnected = %v, want %v", decoded["isConnected"], test.connected)
+		}
+	}
+}
+
+func TestWebSocketLoopHasSingleOwner(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+
+	const contenders = 64
+
+	var owners int
+
+	var mu sync.Mutex
+
+	var wg sync.WaitGroup
+	wg.Add(contenders)
+
+	for range contenders {
+		go func() {
+			defer wg.Done()
+			if !conn.TryStartWebSocketLoop() {
+				return
+			}
+
+			mu.Lock()
+			owners++
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	if owners != 1 {
+		t.Fatalf("WebSocket loop owners = %d, want 1", owners)
+	}
+
+	conn.FinishWebSocketLoop()
+	if !conn.TryStartWebSocketLoop() {
+		t.Fatal("loop ownership was not released")
+	}
+}
+
+func TestDeviceConnectionInfoReflectsUpdatedName(t *testing.T) {
+	discovered := &models.DeviceInfo{Name: "Living Room", DeviceID: "DEVICE01"}
+	conn := NewDeviceConnection(nil, discovered)
+
+	conn.ApplyNameEvent("Living Room Left")
+	info := conn.Info()
+
+	if info == nil || info.Name != "Living Room Left" || info.DeviceID != "DEVICE01" {
+		t.Fatalf("Info() = %+v, want updated name with original metadata", info)
+	}
+
+	if discovered.Name != "Living Room" {
+		t.Fatalf("discovery snapshot was mutated: %+v", discovered)
 	}
 }
 
@@ -75,8 +651,11 @@ func TestUpdateStatus_AppliesMutator(t *testing.T) {
 func TestUpdateStatus_PreservesUnchangedFields(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
 	conn.SetStatus(&DeviceStatus{
-		Volume:      &models.Volume{ActualVolume: 10},
-		Bass:        &models.Bass{ActualBass: 3},
+		Volume: &models.Volume{ActualVolume: 10},
+		Bass:   &models.Bass{ActualBass: 3},
+		BassCapabilities: &models.BassCapabilities{
+			BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+		},
 		Group:       &models.Group{ID: "pair-1", Name: "Living Room"},
 		IsConnected: true,
 	})
@@ -95,12 +674,380 @@ func TestUpdateStatus_PreservesUnchangedFields(t *testing.T) {
 		t.Errorf("Bass not preserved: %+v", got.Bass)
 	}
 
+	if got.BassCapabilities == nil || got.BassCapabilities.BassMax != 0 {
+		t.Errorf("BassCapabilities not preserved: %+v", got.BassCapabilities)
+	}
+
 	if got.Group == nil || got.Group.ID != "pair-1" {
 		t.Errorf("Group not preserved: %+v", got.Group)
 	}
 
 	if !got.IsConnected {
 		t.Error("IsConnected not preserved")
+	}
+}
+
+func TestSpeakerEventChangeReporting(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "Original"})
+	at := time.Date(2026, time.August, 29, 12, 0, 0, 0, time.UTC)
+
+	volume := &models.Volume{ActualVolume: 25, TargetVolume: 25}
+	if !conn.ApplyVolumeEventChanged(volume, at) ||
+		conn.ApplyVolumeEventChanged(volume, at.Add(time.Second)) {
+		t.Fatal("volume event change reporting did not distinguish a duplicate")
+	}
+
+	presets := &models.Presets{Preset: []models.Preset{{ID: 1}}}
+	if !conn.ApplyPresetEvent(presets, at) || conn.ApplyPresetEvent(presets, at.Add(time.Second)) {
+		t.Fatal("preset event change reporting did not distinguish a duplicate")
+	}
+
+	nowPlaying := &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO", Track: "Station"}
+	if _, changed := conn.ApplyNowPlayingEventChanged(nowPlaying, at); !changed {
+		t.Fatal("new now-playing event was not reported as changed")
+	}
+	if _, changed := conn.ApplyNowPlayingEventChanged(nowPlaying, at.Add(time.Second)); changed {
+		t.Fatal("duplicate now-playing event was reported as changed")
+	}
+
+	connection := SpeakerConnectionState{State: string(models.ConnectionStateConnected), Signal: "GOOD_SIGNAL"}
+	if !conn.ApplySpeakerConnectionEventChanged(connection, at) ||
+		conn.ApplySpeakerConnectionEventChanged(connection, at.Add(time.Second)) {
+		t.Fatal("connection event change reporting did not distinguish a duplicate")
+	}
+
+	if !conn.ApplyNameEventChanged("Renamed") || conn.ApplyNameEventChanged("Renamed") {
+		t.Fatal("name event change reporting did not distinguish a duplicate")
+	}
+}
+
+func TestEnsureBassCapabilitiesSharesSuccessfulFetch(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	capabilities := &models.BassCapabilities{
+		BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+	}
+
+	var fetches atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fetch := func() (*models.BassCapabilities, error) {
+		if fetches.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return capabilities, nil
+	}
+
+	const callers = 8
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			outcome, err := conn.EnsureBassCapabilities(fetch)
+			if err != nil {
+				t.Errorf("EnsureBassCapabilities: %v", err)
+			}
+			if outcome != BassCapabilitiesFetched && outcome != BassCapabilitiesCacheHit {
+				t.Errorf("EnsureBassCapabilities outcome = %v", outcome)
+			}
+		}()
+	}
+
+	<-started
+	close(release)
+	wg.Wait()
+
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("capability fetches = %d, want 1", got)
+	}
+	if got := conn.Status().BassCapabilities; got != capabilities {
+		t.Fatalf("stored capabilities = %p, want %p", got, capabilities)
+	}
+}
+
+func TestEnsureBassCapabilitiesFailedFlightSurvivesNextRetryOvertake(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	type result struct {
+		outcome BassCapabilitiesFetchOutcome
+		err     error
+	}
+
+	const (
+		rounds  = 50
+		waiters = 8
+	)
+	for round := range rounds {
+		conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+		fetchErr := fmt.Errorf("first flight failed: %d", round)
+		waiterResults := make(chan result, waiters)
+		var waiterFetches atomic.Int32
+		ownerOutcome, ownerErr := conn.EnsureBassCapabilities(func() (*models.BassCapabilities, error) {
+			for range waiters {
+				waiterStarted := make(chan struct{})
+				go func() {
+					close(waiterStarted)
+					outcome, err := conn.EnsureBassCapabilities(func() (*models.BassCapabilities, error) {
+						waiterFetches.Add(1)
+						return nil, errors.New("waiter incorrectly started a fetch")
+					})
+					waiterResults <- result{outcome: outcome, err: err}
+				}()
+				<-waiterStarted
+				for range 4 {
+					runtime.Gosched()
+				}
+			}
+
+			return nil, fetchErr
+		})
+		if ownerOutcome != BassCapabilitiesFetchFailed || !errors.Is(ownerErr, fetchErr) {
+			t.Fatalf("round %d owner result = (%v, %v), want first-flight failure", round, ownerOutcome, ownerErr)
+		}
+		if conn.Status().BassCapabilities != nil {
+			t.Fatalf("round %d failed flight cached capabilities", round)
+		}
+
+		capabilities := &models.BassCapabilities{
+			BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+		}
+		retryOutcome, retryErr := conn.EnsureBassCapabilities(func() (*models.BassCapabilities, error) {
+			return capabilities, nil
+		})
+		if retryErr != nil || retryOutcome != BassCapabilitiesFetched {
+			t.Fatalf("round %d retry = (%v, %v), want fetched success", round, retryOutcome, retryErr)
+		}
+
+		for range waiters {
+			waiter := <-waiterResults
+			if waiter.outcome != BassCapabilitiesFetchFailed || !errors.Is(waiter.err, fetchErr) {
+				t.Fatalf("round %d waiter result = (%v, %v), want immutable first-flight failure",
+					round, waiter.outcome, waiter.err)
+			}
+		}
+		if got := waiterFetches.Load(); got != 0 {
+			t.Fatalf("round %d waiter fetches = %d, want 0", round, got)
+		}
+		if got := conn.Status().BassCapabilities; got != capabilities {
+			t.Fatalf("round %d cached capabilities = %p, want retry result %p", round, got, capabilities)
+		}
+	}
+}
+
+func TestApplyPolledVolumeSurvivesUnrelatedSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{
+		Volume:     &models.Volume{ActualVolume: 10},
+		NowPlaying: &models.NowPlaying{Source: "INITIAL"},
+	})
+
+	generation := conn.BeginVolumeRefresh()
+	conn.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.NowPlaying = &models.NowPlaying{Source: "RADIO"}
+	})
+
+	if !conn.ApplyPolledVolume(generation, &models.Volume{ActualVolume: 40}) {
+		t.Fatal("unrelated speaker event invalidated volume readback")
+	}
+	if got := conn.Status(); got.Volume == nil || got.Volume.ActualVolume != 40 ||
+		got.NowPlaying == nil || got.NowPlaying.Source != "RADIO" {
+		t.Fatalf("status = %+v, want volume readback and speaker event", got)
+	}
+}
+
+func TestApplyVolumeEventSupersedesPolledVolume(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	generation := conn.BeginVolumeRefresh()
+	conn.ApplyVolumeEvent(&models.Volume{ActualVolume: 55}, time.Now())
+
+	if conn.ApplyPolledVolume(generation, &models.Volume{ActualVolume: 40}) {
+		t.Fatal("older volume readback superseded volume event")
+	}
+	if got := conn.Status().Volume; got == nil || got.ActualVolume != 55 {
+		t.Fatalf("volume = %+v, want event value 55", got)
+	}
+}
+
+func TestApplyBassEventSupersedesPolledBass(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{BassRevision: 4})
+	generation := conn.BeginBassRefresh()
+	conn.ApplyBassEvent(&models.Bass{TargetBass: -2, ActualBass: -2}, time.Now())
+
+	if conn.ApplyPolledBass(generation, &models.Bass{TargetBass: -5, ActualBass: -5}) {
+		t.Fatal("older bass poll overwrote newer event")
+	}
+	if got := conn.Status(); got.Bass == nil || got.Bass.ActualBass != -2 || got.BassRevision != 5 {
+		t.Fatalf("bass event was not retained with one revision: %+v", got)
+	}
+}
+
+func TestSameValueBassReadbackAdvancesConfirmedRevision(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{
+		Bass:         &models.Bass{TargetBass: -3, ActualBass: -3},
+		BassRevision: 8,
+	})
+
+	generation := conn.BeginBassRefresh()
+	revision, applied := conn.ApplyPolledBassWithRevision(
+		generation,
+		&models.Bass{TargetBass: -3, ActualBass: -3},
+	)
+	if !applied || revision != 9 || conn.Status().BassRevision != 9 {
+		t.Fatalf("same-value bass readback applied=%v revision=%d status=%+v", applied, revision, conn.Status())
+	}
+}
+
+func TestApplyPolledBassSurvivesUnrelatedSpeakerEvent(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	generation := conn.BeginBassRefresh()
+	conn.ApplySpeakerEvent(func(status *DeviceStatus) {
+		status.Presets = &models.Presets{}
+	})
+
+	if !conn.ApplyPolledBass(generation, &models.Bass{TargetBass: -4, ActualBass: -4}) {
+		t.Fatal("unrelated event invalidated bass readback")
+	}
+	if got := conn.Status().Bass; got == nil || got.ActualBass != -4 {
+		t.Fatalf("bass readback was not stored: %+v", got)
+	}
+}
+
+func TestNewerBalanceReadbackSupersedesOlderPoll(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{Group: &models.Group{ID: "pair-1"}})
+	staleRefresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("initial balance refresh was rejected")
+	}
+	newRefresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("new balance refresh was rejected")
+	}
+
+	if !conn.ApplyBalanceReadback(newRefresh, &models.Balance{TargetBalance: 6, ActualBalance: 6}) {
+		t.Fatal("newest balance readback was rejected")
+	}
+	if conn.ApplyBalanceReadback(staleRefresh, &models.Balance{TargetBalance: -6, ActualBalance: -6}) {
+		t.Fatal("stale balance readback replaced a newer result")
+	}
+	if got := conn.Status().Balance; got == nil || got.ActualBalance != 6 {
+		t.Fatalf("balance = %+v, want newest readback 6", got)
+	}
+}
+
+func TestSameValueBalanceReadbackAdvancesConfirmedRevision(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{
+		Group:           &models.Group{ID: "pair-1"},
+		Balance:         &models.Balance{TargetBalance: 2, ActualBalance: 2},
+		BalanceRevision: 12,
+	})
+
+	refresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("balance refresh was rejected")
+	}
+	revision, applied := conn.ApplyBalanceReadbackWithRevision(
+		refresh,
+		&models.Balance{TargetBalance: 2, ActualBalance: 2},
+	)
+	if !applied || revision != 13 || conn.Status().BalanceRevision != 13 {
+		t.Fatalf("same-value balance readback applied=%v revision=%d status=%+v", applied, revision, conn.Status())
+	}
+}
+
+func TestBalanceReadbackRejectedAcrossTeardownAndRepair(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	conn.SetStatus(&DeviceStatus{
+		Group:           &models.Group{ID: "pair-1", MasterDeviceID: "left"},
+		Balance:         &models.Balance{TargetBalance: 2, ActualBalance: 2},
+		BalanceRevision: 20,
+	})
+
+	staleRefresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("initial balance refresh was rejected")
+	}
+	conn.ApplyGroupEvent(&models.Group{}, time.Now())
+	conn.ApplyGroupEvent(&models.Group{ID: "pair-2", MasterDeviceID: "left"}, time.Now())
+
+	if conn.ApplyBalanceReadback(staleRefresh, &models.Balance{TargetBalance: 5, ActualBalance: 5}) {
+		t.Fatal("pre-teardown readback was applied to a replacement pair")
+	}
+	if got := conn.Status().Balance; got != nil {
+		t.Fatalf("balance = %+v, want unknown after re-pair", got)
+	}
+	if got := conn.Status().BalanceRevision; got != 22 {
+		t.Fatalf("balance revision = %d, want two accepted topology invalidations", got)
+	}
+
+	freshRefresh, ok := conn.BeginBalanceRefresh()
+	if !ok {
+		t.Fatal("replacement pair balance refresh was rejected")
+	}
+	if !conn.ApplyBalanceReadback(freshRefresh, &models.Balance{TargetBalance: -3, ActualBalance: -3}) {
+		t.Fatal("replacement pair readback was rejected")
+	}
+	if got := conn.Status().BalanceRevision; got != 23 {
+		t.Fatalf("balance revision = %d, want confirmed replacement readback revision 23", got)
+	}
+}
+
+func TestDeviceStatusBalanceJSON(t *testing.T) {
+	status := DeviceStatus{
+		Balance: &models.Balance{
+			BalanceAvailable: true,
+			BalanceMin:       -12,
+			BalanceMax:       9,
+			BalanceDefault:   1,
+			TargetBalance:    8,
+			ActualBalance:    7,
+			CapabilityKnown:  true,
+		},
+		BalanceRevision: 14,
+		BassRevision:    9,
+	}
+
+	payload, err := json.Marshal(status)
+	if err != nil {
+		t.Fatalf("Marshal DeviceStatus: %v", err)
+	}
+
+	var decoded struct {
+		Balance         *models.Balance `json:"balance"`
+		BalanceRevision uint64          `json:"balanceRevision"`
+		BassRevision    uint64          `json:"bassRevision"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("Unmarshal DeviceStatus: %v", err)
+	}
+	if decoded.Balance == nil || !decoded.Balance.CapabilityKnown || !decoded.Balance.BalanceAvailable ||
+		decoded.Balance.BalanceMin != -12 || decoded.Balance.BalanceMax != 9 ||
+		decoded.Balance.BalanceDefault != 1 || decoded.Balance.TargetBalance != 8 ||
+		decoded.Balance.ActualBalance != 7 || decoded.BalanceRevision != 14 || decoded.BassRevision != 9 {
+		t.Fatalf("balance did not round-trip in status JSON: %+v", decoded.Balance)
+	}
+
+	emptyPayload, err := json.Marshal(DeviceStatus{})
+	if err != nil {
+		t.Fatalf("Marshal empty DeviceStatus: %v", err)
+	}
+	var emptyDecoded map[string]json.RawMessage
+	if err := json.Unmarshal(emptyPayload, &emptyDecoded); err != nil {
+		t.Fatalf("Unmarshal empty DeviceStatus: %v", err)
+	}
+	if _, ok := emptyDecoded["balance"]; ok {
+		t.Errorf("nil balance should be omitted, JSON = %s", emptyPayload)
+	}
+	if _, ok := emptyDecoded["balanceRevision"]; !ok {
+		t.Errorf("zero balance revision should remain explicit, JSON = %s", emptyPayload)
+	}
+	if _, ok := emptyDecoded["bassRevision"]; !ok {
+		t.Errorf("zero bass revision should remain explicit, JSON = %s", emptyPayload)
 	}
 }
 
@@ -176,15 +1123,8 @@ func TestEmptyGroupClearsCurrentClaim(t *testing.T) {
 	}
 }
 
-// TestApplyGroupEventIgnoresRoleOrder guards replaceGroup's change-detection
-// against a spurious "changed" report when the same pair's roles simply
-// arrive in a different order -- a polled /getGroup response and a pushed
-// groupUpdated event both populate Roles.Roles straight from XML unmarshal
-// in wire order, so nothing guarantees they list LEFT/RIGHT the same way
-// every time for the identical pair.
 func TestApplyGroupEventIgnoresRoleOrder(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
-
 	leftFirst := &models.Group{
 		ID:             "pair-1",
 		MasterDeviceID: "master",

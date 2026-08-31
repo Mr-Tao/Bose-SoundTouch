@@ -25,8 +25,42 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/service/constants"
 )
 
-// ErrGroupNotFound is returned when no group is found for a given device.
-var ErrGroupNotFound = errors.New("group not found")
+var (
+	// ErrGroupNotFound is returned when no group is found for a given device.
+	ErrGroupNotFound = errors.New("group not found")
+	// ErrGroupMembershipConflict is returned when a device already belongs to
+	// another stored group.
+	ErrGroupMembershipConflict = errors.New("group membership conflict")
+	// ErrGroupDeleteAmbiguous is returned when a deletion cannot identify
+	// exactly one group generation without risking unrelated group state.
+	ErrGroupDeleteAmbiguous = errors.New("group deletion is ambiguous")
+)
+
+// GroupGeneration identifies one active stored group generation.
+type GroupGeneration struct {
+	Account string
+	ID      string
+}
+
+// GroupMembershipConflictError reports the exact active generations which
+// contain devices that callers have freshly verified as standalone.
+type GroupMembershipConflictError struct {
+	Generations []GroupGeneration
+}
+
+func (err *GroupMembershipConflictError) Error() string {
+	generations := make([]string, 0, len(err.Generations))
+	for _, generation := range err.Generations {
+		generations = append(generations, generation.Account+"/"+generation.ID)
+	}
+
+	return fmt.Sprintf("%s: active group generations %s", ErrGroupMembershipConflict, strings.Join(generations, ", "))
+}
+
+// Unwrap allows errors.Is to classify this as ErrGroupMembershipConflict.
+func (err *GroupMembershipConflictError) Unwrap() error {
+	return ErrGroupMembershipConflict
+}
 
 func exists(path string) bool {
 	_, err := os.Stat(path)
@@ -562,6 +596,22 @@ func (ds *DataStore) GetDeviceInfo(account, device string) (*models.ServiceDevic
 	return ds.getDeviceInfoNoLock(account, device)
 }
 
+// GetExactDeviceInfo retrieves DeviceInfo.xml from the literal account/device
+// directory, without applying legacy device-ID mappings.
+func (ds *DataStore) GetExactDeviceInfo(account, device string) (*models.ServiceDeviceInfo, error) {
+	ds.fileMutex.RLock()
+	defer ds.fileMutex.RUnlock()
+
+	path := ds.safeJoin("accounts", account, constants.DevicesDir, device, constants.DeviceInfoFile)
+
+	data, err := ds.rootReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeDeviceInfo(data, account)
+}
+
 func (ds *DataStore) getDeviceInfoNoLock(account, device string) (*models.ServiceDeviceInfo, error) {
 	path := ds.AccountDeviceDir(account, device)
 	deviceInfoPath := filepath.Join(path, constants.DeviceInfoFile)
@@ -571,6 +621,10 @@ func (ds *DataStore) getDeviceInfoNoLock(account, device string) (*models.Servic
 		return nil, err
 	}
 
+	return decodeDeviceInfo(data, account)
+}
+
+func decodeDeviceInfo(data []byte, account string) (*models.ServiceDeviceInfo, error) {
 	var info struct {
 		XMLName    xml.Name `xml:"info"`
 		DeviceID   string   `xml:"deviceID,attr"`
@@ -948,6 +1002,70 @@ func (ds *DataStore) parseDeviceInfoFile(path string) (*models.ServiceDeviceInfo
 	return deviceInfo, nil
 }
 
+// PresetSnapshotState describes whether Presets.xml is a usable persisted
+// snapshot. GetPresets intentionally treats the non-valid states as empty for
+// serving compatibility; migration readiness needs to distinguish them.
+type PresetSnapshotState string
+
+// PresetSnapshotValid and related constants describe persisted preset snapshot states.
+const (
+	PresetSnapshotValid     PresetSnapshotState = "valid"
+	PresetSnapshotMissing   PresetSnapshotState = "missing"
+	PresetSnapshotEmpty     PresetSnapshotState = "empty"
+	PresetSnapshotMalformed PresetSnapshotState = "malformed"
+)
+
+// PresetSnapshot is a read-only view of the exact account/device Presets.xml.
+type PresetSnapshot struct {
+	State        PresetSnapshotState
+	Presets      []models.ServicePreset
+	NeedsRewrite bool
+}
+
+// ReadPresetSnapshot reads the literal account/device Presets.xml without
+// rewriting legacy XML or collapsing missing/corrupt files into a valid empty
+// snapshot.
+func (ds *DataStore) ReadPresetSnapshot(account, device string) (PresetSnapshot, error) {
+	ds.fileMutex.RLock()
+	defer ds.fileMutex.RUnlock()
+
+	path := ds.safeJoin("accounts", account, constants.DevicesDir, device, constants.PresetsFile)
+
+	data, err := ds.rootReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return PresetSnapshot{State: PresetSnapshotMissing}, nil
+		}
+
+		return PresetSnapshot{}, err
+	}
+
+	if len(bytes.TrimSpace(data)) == 0 {
+		return PresetSnapshot{State: PresetSnapshotEmpty}, nil
+	}
+
+	normalized := bytes.ReplaceAll(data, []byte("<ContentItem"), []byte("<contentItem"))
+	normalized = bytes.ReplaceAll(normalized, []byte("</ContentItem>"), []byte("</contentItem>"))
+
+	var root struct {
+		XMLName xml.Name `xml:"presets"`
+	}
+	if unmarshalErr := xml.Unmarshal(normalized, &root); unmarshalErr != nil {
+		return PresetSnapshot{State: PresetSnapshotMalformed}, nil
+	}
+
+	presets, _, err := ds.readPresetsNoLock(account, device)
+	if err != nil {
+		return PresetSnapshot{}, err
+	}
+
+	return PresetSnapshot{
+		State:        PresetSnapshotValid,
+		Presets:      presets,
+		NeedsRewrite: !bytes.Equal(normalized, data),
+	}, nil
+}
+
 // GetPresets retrieves all presets for the specified account and device.
 func (ds *DataStore) GetPresets(account, device string) ([]models.ServicePreset, error) {
 	ds.fileMutex.RLock()
@@ -967,6 +1085,18 @@ func (ds *DataStore) GetPresets(account, device string) ([]models.ServicePreset,
 	}
 
 	return presets, nil
+}
+
+// GetPresetsReadOnly retrieves presets without canonicalizing legacy XML on
+// disk. It is intended for preflight paths which must not mutate datastore
+// state while rendering the response they are about to validate.
+func (ds *DataStore) GetPresetsReadOnly(account, device string) ([]models.ServicePreset, error) {
+	ds.fileMutex.RLock()
+	defer ds.fileMutex.RUnlock()
+
+	presets, _, err := ds.readPresetsNoLock(account, device)
+
+	return presets, err
 }
 
 // MutatePresets atomically reads the current preset list, transforms it via
@@ -3153,14 +3283,310 @@ func (ds *DataStore) groupFilePath(account, groupID string) string {
 	return filepath.Join(ds.AccountDevicesDir(account), "Group_"+groupID+".xml")
 }
 
-// generateGroupID returns a unique 7-digit group ID that has no existing file.
-func (ds *DataStore) generateGroupID(account string) string {
-	for {
-		id := fmt.Sprintf("%07d", rand.Int63n(10_000_000)) //nolint:gosec
-		if !ds.rootExists(ds.groupFilePath(account, id)) {
-			return id
+func (ds *DataStore) retiredGroupFilePath(account, groupID string) string {
+	return filepath.Join(ds.AccountDevicesDir(account), "Group_"+groupID+".retired")
+}
+
+type groupFileLocation struct {
+	account string
+	path    string
+}
+
+type groupGenerationLocations struct {
+	active  []groupFileLocation
+	retired []groupFileLocation
+}
+
+func groupIDFromFilename(name, suffix string) (string, bool) {
+	if !strings.HasPrefix(name, "Group_") || !strings.HasSuffix(name, suffix) {
+		return "", false
+	}
+
+	id := strings.TrimSuffix(strings.TrimPrefix(name, "Group_"), suffix)
+
+	return id, id != ""
+}
+
+func (ds *DataStore) accountNamesNoLock() ([]string, error) {
+	entries, err := ds.rootReadDir(filepath.Join(ds.baseDir, "accounts"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	accounts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			accounts = append(accounts, entry.Name())
 		}
 	}
+
+	return accounts, nil
+}
+
+func (ds *DataStore) loadGroupGenerationLocationsNoLock() (map[string]groupGenerationLocations, error) {
+	accounts, err := ds.accountNamesNoLock()
+	if err != nil {
+		return nil, err
+	}
+
+	locations := make(map[string]groupGenerationLocations)
+
+	for _, account := range accounts {
+		dir := ds.AccountDevicesDir(account)
+
+		entries, readErr := ds.rootReadDir(dir)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				continue
+			}
+
+			return nil, readErr
+		}
+
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+
+			name := entry.Name()
+			location := groupFileLocation{account: account, path: filepath.Join(dir, name)}
+
+			if id, ok := groupIDFromFilename(name, ".xml"); ok {
+				generation := locations[id]
+				generation.active = append(generation.active, location)
+				locations[id] = generation
+			} else if id, ok := groupIDFromFilename(name, ".retired"); ok {
+				generation := locations[id]
+				generation.retired = append(generation.retired, location)
+				locations[id] = generation
+			}
+		}
+	}
+
+	return locations, nil
+}
+
+// generateGroupID returns a globally unique 7-digit group ID. Active and
+// retired generations reserve their IDs across every account.
+func (ds *DataStore) generateGroupID() (string, error) {
+	locations, err := ds.loadGroupGenerationLocationsNoLock()
+	if err != nil {
+		return "", err
+	}
+
+	for attempts := 0; attempts < 128; attempts++ {
+		id := fmt.Sprintf("%07d", rand.Int63n(10_000_000)) //nolint:gosec
+		if _, reserved := locations[id]; !reserved {
+			return id, nil
+		}
+	}
+
+	// Near exhaustion, random selection may repeatedly collide. A deterministic
+	// fallback guarantees progress whenever any ID remains available.
+	for candidate := 0; candidate < 10_000_000; candidate++ {
+		id := fmt.Sprintf("%07d", candidate)
+		if _, reserved := locations[id]; !reserved {
+			return id, nil
+		}
+	}
+
+	return "", errors.New("all stereo group generation IDs are reserved")
+}
+
+type storedGroup struct {
+	account string
+	id      string
+	path    string
+	group   models.Group
+}
+
+func (ds *DataStore) loadStoredGroupsNoLock(account string) ([]storedGroup, error) {
+	dir := ds.AccountDevicesDir(account)
+
+	entries, err := ds.rootReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	groups := make([]storedGroup, 0)
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "Group_") || !strings.HasSuffix(name, ".xml") {
+			continue
+		}
+
+		path := filepath.Join(dir, name)
+
+		data, readErr := ds.rootReadFile(path)
+		if readErr != nil {
+			return nil, fmt.Errorf("read stored group %s: %w", name, readErr)
+		}
+
+		var group models.Group
+		if unmarshalErr := xml.Unmarshal(data, &group); unmarshalErr != nil {
+			return nil, fmt.Errorf("parse stored group %s: %w", name, unmarshalErr)
+		}
+
+		groups = append(groups, storedGroup{
+			account: account,
+			id:      strings.TrimSuffix(strings.TrimPrefix(name, "Group_"), ".xml"),
+			path:    path,
+			group:   group,
+		})
+	}
+
+	return groups, nil
+}
+
+func (ds *DataStore) loadAllStoredGroupsNoLock() ([]storedGroup, error) {
+	accounts, err := ds.accountNamesNoLock()
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make([]storedGroup, 0)
+
+	for _, account := range accounts {
+		accountGroups, loadErr := ds.loadStoredGroupsNoLock(account)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+
+		groups = append(groups, accountGroups...)
+	}
+
+	return groups, nil
+}
+
+func uniqueStoredGroupForGeneration(groups []storedGroup, groupID string) (*storedGroup, error) {
+	matches := make([]storedGroup, 0, 1)
+
+	for i := range groups {
+		if groups[i].id == groupID {
+			matches = append(matches, groups[i])
+		}
+	}
+
+	if len(matches) != 1 {
+		return nil, fmt.Errorf("%w: generation %s has %d matches",
+			ErrGroupDeleteAmbiguous, groupID, len(matches))
+	}
+
+	return &matches[0], nil
+}
+
+func validateExpectedGroupGeneration(expected *models.Group, groupID, deviceID string) error {
+	if expected == nil || expected.ID != groupID || expected.MasterDeviceID != deviceID {
+		return fmt.Errorf("%w: generation %s has no exact expected topology", ErrGroupDeleteAmbiguous, groupID)
+	}
+
+	if _, containsDevice := groupDeviceIDs(expected)[deviceID]; !containsDevice {
+		return fmt.Errorf("%w: generation %s expected topology does not contain device %s",
+			ErrGroupDeleteAmbiguous, groupID, deviceID)
+	}
+
+	return nil
+}
+
+func stereoRoleDevices(group *models.Group) (left, right string, ok bool) {
+	for _, role := range group.Roles.Roles {
+		switch role.Role {
+		case "LEFT":
+			if left != "" || role.DeviceID == "" {
+				return "", "", false
+			}
+
+			left = role.DeviceID
+		case "RIGHT":
+			if right != "" || role.DeviceID == "" {
+				return "", "", false
+			}
+
+			right = role.DeviceID
+		}
+	}
+
+	return left, right, left != "" && right != ""
+}
+
+func sameStereoPair(a, b *models.Group) bool {
+	if len(a.Roles.Roles) != 2 || len(b.Roles.Roles) != 2 || a.MasterDeviceID != b.MasterDeviceID {
+		return false
+	}
+
+	aLeft, aRight, aOK := stereoRoleDevices(a)
+	bLeft, bRight, bOK := stereoRoleDevices(b)
+
+	return aOK && bOK && aLeft == bLeft && aRight == bRight
+}
+
+func sameGroupGenerationTopology(a, b *models.Group) bool {
+	if a == nil || b == nil || a.ID != b.ID ||
+		a.MasterDeviceID != b.MasterDeviceID || len(a.Roles.Roles) != len(b.Roles.Roles) {
+		return false
+	}
+
+	roles := make(map[string]models.GroupRole, len(a.Roles.Roles))
+	for i := range a.Roles.Roles {
+		role := a.Roles.Roles[i]
+		if _, duplicate := roles[role.Role]; duplicate {
+			return false
+		}
+
+		roles[role.Role] = role
+	}
+
+	seen := make(map[string]struct{}, len(b.Roles.Roles))
+	for i := range b.Roles.Roles {
+		role := b.Roles.Roles[i]
+		if _, duplicate := seen[role.Role]; duplicate {
+			return false
+		}
+
+		seen[role.Role] = struct{}{}
+
+		other, found := roles[role.Role]
+		if !found || other.DeviceID != role.DeviceID || other.IPAddress != role.IPAddress {
+			return false
+		}
+	}
+
+	return true
+}
+
+func groupDeviceIDs(group *models.Group) map[string]struct{} {
+	deviceIDs := make(map[string]struct{}, len(group.Roles.Roles)+1)
+	if group.MasterDeviceID != "" {
+		deviceIDs[group.MasterDeviceID] = struct{}{}
+	}
+
+	for _, role := range group.Roles.Roles {
+		if role.DeviceID != "" {
+			deviceIDs[role.DeviceID] = struct{}{}
+		}
+	}
+
+	return deviceIDs
+}
+
+func groupsShareDevice(a, b *models.Group) bool {
+	aDevices := groupDeviceIDs(a)
+	for deviceID := range groupDeviceIDs(b) {
+		if _, found := aDevices[deviceID]; found {
+			return true
+		}
+	}
+
+	return false
 }
 
 // GetGroupForDevice returns the group containing the given device, or nil if ungrouped.
@@ -3168,43 +3594,37 @@ func (ds *DataStore) GetGroupForDevice(account, deviceID string) (*models.Group,
 	ds.fileMutex.RLock()
 	defer ds.fileMutex.RUnlock()
 
-	dir := ds.AccountDevicesDir(account)
-
-	entries, err := ds.rootReadDir(dir)
+	groups, err := ds.loadStoredGroupsNoLock(account)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrGroupNotFound
-		}
-
 		return nil, err
 	}
 
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasPrefix(e.Name(), "Group_") || !strings.HasSuffix(e.Name(), ".xml") {
+	var match *models.Group
+
+	for i := range groups {
+		if _, found := groupDeviceIDs(&groups[i].group)[deviceID]; !found {
 			continue
 		}
 
-		data, readErr := ds.rootReadFile(filepath.Join(dir, e.Name()))
-		if readErr != nil {
-			continue
+		if match != nil {
+			return nil, fmt.Errorf("%w: device %s belongs to multiple active groups",
+				ErrGroupMembershipConflict, deviceID)
 		}
 
-		var g models.Group
-		if unmarshalErr := xml.Unmarshal(data, &g); unmarshalErr != nil {
-			continue
-		}
+		match = &groups[i].group
+	}
 
-		for _, role := range g.Roles.Roles {
-			if role.DeviceID == deviceID {
-				return &g, nil
-			}
-		}
+	if match != nil {
+		return match, nil
 	}
 
 	return nil, ErrGroupNotFound
 }
 
-// AddGroup saves a new group to disk and returns its generated ID.
+// AddGroup saves a new group to disk and returns its generated ID. If the same
+// master and LEFT/RIGHT assignments are already stored in the requested
+// account, it returns that group unchanged. A device assigned to any other
+// stored group in any account is a conflict.
 func (ds *DataStore) AddGroup(account string, group *models.Group) (string, error) {
 	ds.fileMutex.Lock()
 	defer ds.fileMutex.Unlock()
@@ -3214,7 +3634,42 @@ func (ds *DataStore) AddGroup(account string, group *models.Group) (string, erro
 		return "", err
 	}
 
-	id := ds.generateGroupID(account)
+	storedGroups, err := ds.loadAllStoredGroupsNoLock()
+	if err != nil {
+		return "", err
+	}
+
+	var existing *storedGroup
+
+	for i := range storedGroups {
+		stored := &storedGroups[i]
+		if stored.account == account && sameStereoPair(group, &stored.group) {
+			if existing != nil {
+				return "", fmt.Errorf("%w: stereo pair is stored more than once", ErrGroupMembershipConflict)
+			}
+
+			existing = stored
+
+			continue
+		}
+
+		if groupsShareDevice(group, &stored.group) {
+			return "", fmt.Errorf("%w: a requested device belongs to group %s in account %s",
+				ErrGroupMembershipConflict, stored.id, stored.account)
+		}
+	}
+
+	if existing != nil {
+		*group = existing.group
+
+		return existing.id, nil
+	}
+
+	id, err := ds.generateGroupID()
+	if err != nil {
+		return "", err
+	}
+
 	group.ID = id
 
 	data, err := xml.MarshalIndent(group, "", "    ")
@@ -3260,24 +3715,293 @@ func (ds *DataStore) ModifyGroup(account, groupID, newName string) (*models.Grou
 	return &g, nil
 }
 
-// DeleteGroup removes a group from disk.
+// DeleteGroup retires a group generation. The renamed XML tombstone prevents a
+// stale client request from ever matching a later physical generation with the
+// same seven-digit ID.
 func (ds *DataStore) DeleteGroup(account, groupID string) error {
 	ds.fileMutex.Lock()
 	defer ds.fileMutex.Unlock()
 
-	err := ds.rootRemove(ds.groupFilePath(account, groupID))
-	if os.IsNotExist(err) {
-		return fmt.Errorf("group %s not found", groupID)
+	locations, err := ds.loadGroupGenerationLocationsNoLock()
+	if err != nil {
+		return err
 	}
 
-	return err
+	generation, found := locations[groupID]
+	if !found {
+		return fmt.Errorf("%w: group %s", ErrGroupNotFound, groupID)
+	}
+
+	if len(generation.active) > 0 && len(generation.retired) > 0 {
+		return fmt.Errorf("%w: generation %s is both active and retired", ErrGroupDeleteAmbiguous, groupID)
+	}
+
+	if len(generation.active) == 0 {
+		return nil
+	}
+
+	if len(generation.active) != 1 || generation.active[0].account != account {
+		return fmt.Errorf("%w: generation %s is not uniquely active in account %s",
+			ErrGroupDeleteAmbiguous, groupID, account)
+	}
+
+	return ds.retireGroupNoLock(account, groupID, generation.active[0].path)
 }
 
-// DeleteAllGroupsForAccount removes every Group_*.xml file stored under
-// account. Speakers send DELETE /streaming/account/{id}/group/ (no group
-// ID) during stereo-pair teardown; since master and slave may live in
-// different accounts each speaker deletes its own copy. Returns nil if no
-// group files are found — idempotent by design.
+// DeleteGroupGenerationForDevice retires exactly one stored group generation
+// containing deviceID, regardless of which account currently owns that device.
+// The active XML must match expected before the atomic rename. A missing or
+// already-retired generation is an idempotent success; every ambiguity fails
+// closed.
+func (ds *DataStore) DeleteGroupGenerationForDevice(
+	deviceID string,
+	groupID string,
+	expected *models.Group,
+) error {
+	ds.fileMutex.Lock()
+	defer ds.fileMutex.Unlock()
+
+	if deviceID == "" || groupID == "" {
+		return fmt.Errorf("%w: device ID and group ID are required", ErrGroupDeleteAmbiguous)
+	}
+
+	locations, err := ds.loadGroupGenerationLocationsNoLock()
+	if err != nil {
+		return err
+	}
+
+	generation, found := locations[groupID]
+	if !found {
+		return nil
+	}
+
+	if len(generation.active) > 0 && len(generation.retired) > 0 {
+		return fmt.Errorf("%w: generation %s is both active and retired", ErrGroupDeleteAmbiguous, groupID)
+	}
+
+	if len(generation.active) == 0 {
+		return nil
+	}
+
+	if len(generation.active) != 1 {
+		return fmt.Errorf("%w: generation %s has %d active files",
+			ErrGroupDeleteAmbiguous, groupID, len(generation.active))
+	}
+
+	if expected == nil || expected.ID != groupID {
+		return fmt.Errorf("%w: generation %s has no exact expected topology", ErrGroupDeleteAmbiguous, groupID)
+	}
+
+	if _, expectedContainsDevice := groupDeviceIDs(expected)[deviceID]; !expectedContainsDevice {
+		return fmt.Errorf("%w: generation %s expected topology does not contain device %s",
+			ErrGroupDeleteAmbiguous, groupID, deviceID)
+	}
+
+	groups, err := ds.loadAllStoredGroupsNoLock()
+	if err != nil {
+		return err
+	}
+
+	matches := make([]storedGroup, 0, 1)
+
+	for i := range groups {
+		if groups[i].id == groupID {
+			matches = append(matches, groups[i])
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return fmt.Errorf("%w: active generation %s has no readable group", ErrGroupDeleteAmbiguous, groupID)
+	case 1:
+		if matches[0].path != generation.active[0].path {
+			return fmt.Errorf("%w: active generation %s path does not match", ErrGroupDeleteAmbiguous, groupID)
+		}
+
+		if _, containsDevice := groupDeviceIDs(&matches[0].group)[deviceID]; !containsDevice {
+			return fmt.Errorf("%w: generation %s does not contain device %s",
+				ErrGroupDeleteAmbiguous, groupID, deviceID)
+		}
+
+		if !sameGroupGenerationTopology(&matches[0].group, expected) {
+			return fmt.Errorf("%w: generation %s topology does not match",
+				ErrGroupDeleteAmbiguous, groupID)
+		}
+
+		return ds.retireGroupNoLock(matches[0].account, groupID, matches[0].path)
+	default:
+		return fmt.Errorf("%w: generation %s has %d matches",
+			ErrGroupDeleteAmbiguous, groupID, len(matches))
+	}
+}
+
+// RenameGroupGenerationForDevice renames exactly one active stored group
+// generation mastered by deviceID, regardless of which account currently owns
+// that device. The active XML topology must match expected, but its current
+// name may differ so retries can repair name drift.
+func (ds *DataStore) RenameGroupGenerationForDevice(
+	deviceID string,
+	groupID string,
+	expected *models.Group,
+	newName string,
+) (*models.Group, error) {
+	ds.fileMutex.Lock()
+	defer ds.fileMutex.Unlock()
+
+	newName = strings.TrimSpace(newName)
+	if deviceID == "" || groupID == "" || newName == "" {
+		return nil, fmt.Errorf("%w: device ID, group ID, and new name are required", ErrGroupDeleteAmbiguous)
+	}
+
+	locations, err := ds.loadGroupGenerationLocationsNoLock()
+	if err != nil {
+		return nil, err
+	}
+
+	generation, found := locations[groupID]
+	if !found || len(generation.active) == 0 {
+		return nil, fmt.Errorf("%w: group %s", ErrGroupNotFound, groupID)
+	}
+
+	if len(generation.active) > 0 && len(generation.retired) > 0 {
+		return nil, fmt.Errorf("%w: generation %s is both active and retired", ErrGroupDeleteAmbiguous, groupID)
+	}
+
+	if len(generation.active) != 1 {
+		return nil, fmt.Errorf("%w: generation %s has %d active files",
+			ErrGroupDeleteAmbiguous, groupID, len(generation.active))
+	}
+
+	if validationErr := validateExpectedGroupGeneration(expected, groupID, deviceID); validationErr != nil {
+		return nil, validationErr
+	}
+
+	groups, err := ds.loadAllStoredGroupsNoLock()
+	if err != nil {
+		return nil, err
+	}
+
+	match, err := uniqueStoredGroupForGeneration(groups, groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	if match.path != generation.active[0].path {
+		return nil, fmt.Errorf("%w: active generation %s path does not match", ErrGroupDeleteAmbiguous, groupID)
+	}
+
+	if match.group.MasterDeviceID != deviceID {
+		return nil, fmt.Errorf("%w: generation %s is not mastered by device %s",
+			ErrGroupDeleteAmbiguous, groupID, deviceID)
+	}
+
+	if !sameGroupGenerationTopology(&match.group, expected) {
+		return nil, fmt.Errorf("%w: generation %s topology does not match",
+			ErrGroupDeleteAmbiguous, groupID)
+	}
+
+	match.group.Name = newName
+
+	updated, err := xml.MarshalIndent(&match.group, "", "    ")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := ds.atomicWriteFile(match.path, append([]byte(xml.Header), updated...)); err != nil {
+		return nil, err
+	}
+
+	return &match.group, nil
+}
+
+// EnsureNoGroupsForDevices verifies that no active stored group contains any
+// supplied device ID across all accounts. Callers must supply only device IDs
+// freshly verified as physically standalone. This check never mutates storage.
+func (ds *DataStore) EnsureNoGroupsForDevices(deviceIDs []string) error {
+	ds.fileMutex.RLock()
+	defer ds.fileMutex.RUnlock()
+
+	verified := make(map[string]struct{}, len(deviceIDs))
+	for _, deviceID := range deviceIDs {
+		if deviceID == "" {
+			return fmt.Errorf("%w: verified device IDs must not be empty", ErrGroupDeleteAmbiguous)
+		}
+
+		verified[deviceID] = struct{}{}
+	}
+
+	if len(verified) == 0 {
+		return fmt.Errorf("%w: at least one verified device ID is required", ErrGroupDeleteAmbiguous)
+	}
+
+	locations, err := ds.loadGroupGenerationLocationsNoLock()
+	if err != nil {
+		return err
+	}
+
+	for id, generation := range locations {
+		if len(generation.active) > 1 || len(generation.active) > 0 && len(generation.retired) > 0 {
+			return fmt.Errorf("%w: generation %s has %d active and %d retired files",
+				ErrGroupDeleteAmbiguous, id, len(generation.active), len(generation.retired))
+		}
+	}
+
+	groups, err := ds.loadAllStoredGroupsNoLock()
+	if err != nil {
+		return err
+	}
+
+	generations := make([]GroupGeneration, 0)
+
+	for i := range groups {
+		for deviceID := range groupDeviceIDs(&groups[i].group) {
+			if _, found := verified[deviceID]; found {
+				generations = append(generations, GroupGeneration{
+					Account: groups[i].account,
+					ID:      groups[i].id,
+				})
+
+				break
+			}
+		}
+	}
+
+	if len(generations) == 0 {
+		return nil
+	}
+
+	sort.Slice(generations, func(i, j int) bool {
+		if generations[i].Account == generations[j].Account {
+			return generations[i].ID < generations[j].ID
+		}
+
+		return generations[i].Account < generations[j].Account
+	})
+
+	return &GroupMembershipConflictError{Generations: generations}
+}
+
+func (ds *DataStore) retireGroupNoLock(account, groupID, activePath string) error {
+	retiredPath := ds.retiredGroupFilePath(account, groupID)
+	if _, err := ds.rootStat(retiredPath); err == nil {
+		return fmt.Errorf("%w: generation %s is already retired", ErrGroupDeleteAmbiguous, groupID)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	if err := ds.rootRename(activePath, retiredPath); err != nil {
+		return fmt.Errorf("retire group %s: %w", groupID, err)
+	}
+
+	ds.rootSyncDir(filepath.Dir(activePath))
+
+	return nil
+}
+
+// DeleteAllGroupsForAccount removes every Group_*.xml file stored under the
+// account. It is reserved for explicit internal or factory-reset workflows,
+// not speaker teardown requests without a group ID. Returns nil if no group
+// files are found.
 func (ds *DataStore) DeleteAllGroupsForAccount(account string) error {
 	ds.fileMutex.Lock()
 	defer ds.fileMutex.Unlock()

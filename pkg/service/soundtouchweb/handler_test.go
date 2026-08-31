@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,6 +64,23 @@ func TestNewWebApp(t *testing.T) {
 
 	if count := app.DeviceCount(); count != 0 {
 		t.Errorf("Expected empty device registry, got %d devices", count)
+	}
+}
+
+func TestStereoPairPersistenceClientHasBoundedLifecycleTimeout(t *testing.T) {
+	app := NewWebApp()
+	transport := &http.Transport{}
+	app.ServiceClient = &http.Client{Transport: transport, Timeout: 10 * time.Second}
+
+	configured := app.stereoPairPersistenceClient()
+	if configured.Timeout != 45*time.Second {
+		t.Fatalf("timeout = %s, want 45s", configured.Timeout)
+	}
+	if configured.Transport != transport {
+		t.Fatal("custom service transport was not preserved")
+	}
+	if app.ServiceClient.Timeout != 10*time.Second {
+		t.Fatalf("source client timeout was mutated to %s", app.ServiceClient.Timeout)
 	}
 }
 
@@ -296,6 +316,123 @@ func TestHandleAPIControl_VolumeValidation(t *testing.T) {
 	}
 }
 
+func TestHandleDirectVolumeControlRequiresMatchingAuthoritativeReadback(t *testing.T) {
+	t.Run("matching readback updates confirmed cache", func(t *testing.T) {
+		speaker := newVolumeSpeaker(t, 35, "")
+		app := NewWebApp()
+		addVolumeDevice(app, "192.0.2.10", "STANDALONE", "Kitchen", speaker, 35, nil)
+
+		request := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/volume/40", nil)
+		request = withChiParams(request, map[string]string{"id": "192.0.2.10", "volume": "40"})
+		response := httptest.NewRecorder()
+		app.HandleDirectVolumeControl(response, request)
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+		}
+		var payload webtypes.APIResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if !payload.Success {
+			t.Fatalf("matching readback failed: %+v", payload)
+		}
+		conn, _ := app.GetDevice("192.0.2.10")
+		if got := conn.Status().Volume; got == nil || got.ActualVolume != 40 || got.TargetVolume != 40 {
+			t.Fatalf("confirmed cache = %+v, want 40", got)
+		}
+		if volume, posts := speaker.values(); volume != 40 || fmt.Sprint(posts) != "[40]" || speaker.getCount() != 1 {
+			t.Fatalf("speaker operations = volume %d, posts %v, gets %d", volume, posts, speaker.getCount())
+		}
+	})
+
+	t.Run("mismatched readback cannot succeed", func(t *testing.T) {
+		speaker := newVolumeSpeaker(t, 35, "")
+		speaker.setIgnoreWrites(true)
+		app := NewWebApp()
+		addVolumeDevice(app, "192.0.2.10", "STANDALONE", "Kitchen", speaker, 35, nil)
+
+		request := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/volume/40", nil)
+		request = withChiParams(request, map[string]string{"id": "192.0.2.10", "volume": "40"})
+		response := httptest.NewRecorder()
+		app.HandleDirectVolumeControl(response, request)
+
+		if response.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: %s", response.Code, response.Body.String())
+		}
+		var payload webtypes.APIResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if payload.Success || !strings.Contains(payload.Error, "does not both match requested") {
+			t.Fatalf("mismatch response = %+v", payload)
+		}
+		conn, _ := app.GetDevice("192.0.2.10")
+		if got := conn.Status().Volume; got == nil || got.ActualVolume != 35 {
+			t.Fatalf("mismatch cache = %+v, want authoritative 35", got)
+		}
+		if _, posts := speaker.values(); fmt.Sprint(posts) != "[40]" ||
+			speaker.getCount() != zoneVolumeReadbackAttempts {
+			t.Fatalf("bounded mismatch operations: posts=%v gets=%d", posts, speaker.getCount())
+		}
+	})
+
+	t.Run("matching actual with different target cannot succeed", func(t *testing.T) {
+		speaker := newVolumeSpeaker(t, 40, "")
+		speaker.setIgnoreWrites(true)
+		speaker.setReportedTarget(50)
+		app := NewWebApp()
+		addVolumeDevice(app, "192.0.2.10", "STANDALONE", "Kitchen", speaker, 40, nil)
+
+		request := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/volume/40", nil)
+		request = withChiParams(request, map[string]string{"id": "192.0.2.10", "volume": "40"})
+		response := httptest.NewRecorder()
+		app.HandleDirectVolumeControl(response, request)
+
+		if response.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: %s", response.Code, response.Body.String())
+		}
+		var payload webtypes.APIResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if payload.Success || !strings.Contains(payload.Error, "target 50 actual 40") {
+			t.Fatalf("different speaker target was confirmed: %+v", payload)
+		}
+		conn, _ := app.GetDevice("192.0.2.10")
+		if got := conn.Status().Volume; got == nil || got.TargetVolume != 50 || got.ActualVolume != 40 {
+			t.Fatalf("authoritative mismatched readback not retained: %+v", got)
+		}
+	})
+
+	t.Run("missing readback cannot succeed", func(t *testing.T) {
+		speaker := newVolumeSpeaker(t, 35, "")
+		speaker.setVolumeError(true)
+		app := NewWebApp()
+		addVolumeDevice(app, "192.0.2.10", "STANDALONE", "Kitchen", speaker, 35, nil)
+
+		request := httptest.NewRequest(http.MethodPost, "/api/control/devices/192.0.2.10/volume/40", nil)
+		request = withChiParams(request, map[string]string{"id": "192.0.2.10", "volume": "40"})
+		response := httptest.NewRecorder()
+		app.HandleDirectVolumeControl(response, request)
+
+		if response.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502: %s", response.Code, response.Body.String())
+		}
+		var payload webtypes.APIResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if payload.Success || !strings.Contains(payload.Error, "readback volume") {
+			t.Fatalf("missing readback response = %+v", payload)
+		}
+		conn, _ := app.GetDevice("192.0.2.10")
+		if got := conn.Status().Volume; got == nil || got.ActualVolume != 35 {
+			t.Fatalf("failed readback changed cache: %+v", got)
+		}
+	})
+}
+
 func TestHandleAPIControl_BassValidation(t *testing.T) {
 	app := createTestApp()
 
@@ -317,6 +454,13 @@ func TestHandleAPIControl_BassValidation(t *testing.T) {
 			name:           "bass too high",
 			method:         "POST",
 			body:           `{"level": 10}`,
+			expectedStatus: http.StatusBadRequest,
+			expectSuccess:  false,
+		},
+		{
+			name:           "fallback rejects positive bass",
+			method:         "POST",
+			body:           `{"level": 1}`,
 			expectedStatus: http.StatusBadRequest,
 			expectSuccess:  false,
 		},
@@ -342,6 +486,248 @@ func TestHandleAPIControl_BassValidation(t *testing.T) {
 
 			if response.Success != tt.expectSuccess {
 				t.Errorf("Expected success=%v, got %v", tt.expectSuccess, response.Success)
+			}
+		})
+	}
+}
+
+func TestHandleAPIControl_BassCapabilities(t *testing.T) {
+	tests := []struct {
+		name         string
+		capabilities *models.BassCapabilities
+		level        int
+		wantStatus   int
+		wantPost     bool
+	}{
+		{
+			name: "reported SoundTouch range accepts zero",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+			},
+			level: 0, wantStatus: http.StatusOK, wantPost: true,
+		},
+		{
+			name: "reported SoundTouch range rejects positive",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+			},
+			level: 1, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "different reported range accepts its maximum",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: true, BassMin: -4, BassMax: 12, BassDefault: 1,
+			},
+			level: 12, wantStatus: http.StatusOK, wantPost: true,
+		},
+		{
+			name: "different reported range rejects above maximum",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: true, BassMin: -4, BassMax: 12, BassDefault: 1,
+			},
+			level: 13, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "reported unavailable capability rejects write",
+			capabilities: &models.BassCapabilities{
+				BassAvailable: false, BassMin: 0, BassMax: 0, BassDefault: 0,
+			},
+			level: 0, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "unknown capability uses conservative fallback",
+			level:      -9,
+			wantStatus: http.StatusOK,
+			wantPost:   true,
+		},
+		{
+			name:       "unknown capability fallback rejects positive",
+			level:      1,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var posts atomic.Int32
+			speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/bass" {
+					t.Errorf("speaker path = %s, want /bass", r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+
+				switch r.Method {
+				case http.MethodPost:
+					posts.Add(1)
+					var request models.BassRequest
+					if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Errorf("decode bass request: %v", err)
+						http.Error(w, "invalid bass request", http.StatusBadRequest)
+						return
+					}
+					if request.Level != tt.level {
+						t.Errorf("posted bass = %d, want %d", request.Level, tt.level)
+					}
+				case http.MethodGet:
+					_, _ = fmt.Fprintf(w,
+						`<bass><targetbass>%d</targetbass><actualbass>%d</actualbass></bass>`,
+						tt.level, tt.level)
+				default:
+					t.Errorf("speaker method = %s, want GET or POST", r.Method)
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				}
+			}))
+			defer speaker.Close()
+
+			app := NewWebApp()
+			device := webtypes.NewDeviceConnection(
+				client.NewClientFromHost(speaker.URL),
+				&models.DeviceInfo{Name: "Test Speaker"},
+			)
+			device.SetStatus(&webtypes.DeviceStatus{
+				Bass:             &models.Bass{TargetBass: 0, ActualBass: 0},
+				BassCapabilities: tt.capabilities,
+				IsConnected:      true,
+			})
+			app.AddDevice("test-device", device)
+
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/api/control/devices/test-device/action/bass",
+				strings.NewReader(fmt.Sprintf(`{"level":%d}`, tt.level)),
+			)
+			request = withChiParams(request, map[string]string{"id": "test-device", "action": "bass"})
+			response := httptest.NewRecorder()
+
+			app.HandleAPIControl(response, request)
+
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", response.Code, tt.wantStatus, response.Body.String())
+			}
+			if got := posts.Load() > 0; got != tt.wantPost {
+				t.Fatalf("speaker POST = %v, want %v", got, tt.wantPost)
+			}
+		})
+	}
+}
+
+func TestHandleAPIControl_BassReadback(t *testing.T) {
+	tests := []struct {
+		name          string
+		writeStatus   int
+		readStatus    int
+		target        int
+		actual        int
+		wantStatus    int
+		wantSuccess   bool
+		wantAtTarget  bool
+		wantCached    int
+		wantCacheKept bool
+		wantRevision  uint64
+		wantAccepted  bool
+	}{
+		{
+			name: "matching readback confirms write", writeStatus: http.StatusOK,
+			readStatus: http.StatusOK, target: -3, actual: -3,
+			wantStatus: http.StatusOK, wantSuccess: true, wantAtTarget: true, wantCached: -3,
+			wantRevision: 11, wantAccepted: true,
+		},
+		{
+			name: "matching readback confirms transport error", writeStatus: http.StatusInternalServerError,
+			readStatus: http.StatusOK, target: -3, actual: -3,
+			wantStatus: http.StatusOK, wantSuccess: true, wantAtTarget: true, wantCached: -3,
+			wantRevision: 11, wantAccepted: true,
+		},
+		{
+			name: "mismatch is authoritative", writeStatus: http.StatusOK,
+			readStatus: http.StatusOK, target: -3, actual: -2,
+			wantStatus: http.StatusOK, wantSuccess: true, wantAtTarget: false, wantCached: -2,
+			wantRevision: 11, wantAccepted: true,
+		},
+		{
+			name: "failed readback keeps previous value", writeStatus: http.StatusOK,
+			readStatus: http.StatusInternalServerError,
+			wantStatus: http.StatusBadGateway, wantSuccess: false, wantCached: 0, wantCacheKept: true,
+			wantRevision: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodPost:
+					w.WriteHeader(tt.writeStatus)
+				case http.MethodGet:
+					if tt.readStatus != http.StatusOK {
+						http.Error(w, "readback failed", tt.readStatus)
+						return
+					}
+					_, _ = fmt.Fprintf(w,
+						`<bass><targetbass>%d</targetbass><actualbass>%d</actualbass></bass>`,
+						tt.target, tt.actual)
+				default:
+					http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				}
+			}))
+			defer speaker.Close()
+
+			app := NewWebApp()
+			device := webtypes.NewDeviceConnection(
+				client.NewClientFromHost(speaker.URL),
+				&models.DeviceInfo{Name: "Test Speaker"},
+			)
+			device.SetStatus(&webtypes.DeviceStatus{
+				Bass:         &models.Bass{TargetBass: 0, ActualBass: 0},
+				BassRevision: 10,
+				BassCapabilities: &models.BassCapabilities{
+					BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+				},
+				IsConnected: true,
+			})
+			app.AddDevice("test-device", device)
+
+			request := httptest.NewRequest(http.MethodPost,
+				"/api/control/devices/test-device/action/bass", strings.NewReader(`{"level":-3}`))
+			request = withChiParams(request, map[string]string{"id": "test-device", "action": "bass"})
+			response := httptest.NewRecorder()
+			app.HandleAPIControl(response, request)
+
+			var payload struct {
+				Success bool   `json:"success"`
+				Error   string `json:"error"`
+				Data    struct {
+					Requested int     `json:"requested"`
+					Target    *int    `json:"target"`
+					Actual    *int    `json:"actual"`
+					AtTarget  bool    `json:"atTarget"`
+					Revision  *uint64 `json:"revision"`
+				} `json:"data"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.Code != tt.wantStatus || payload.Success != tt.wantSuccess ||
+				payload.Data.AtTarget != tt.wantAtTarget {
+				t.Fatalf("response status=%d success=%v atTarget=%v error=%q",
+					response.Code, payload.Success, payload.Data.AtTarget, payload.Error)
+			}
+			if got := device.Status().Bass; got == nil || got.ActualBass != tt.wantCached {
+				t.Fatalf("cached bass = %+v, want actual %d", got, tt.wantCached)
+			}
+			if got := device.Status().BassRevision; got != tt.wantRevision {
+				t.Fatalf("cached bass revision = %d, want %d", got, tt.wantRevision)
+			}
+			if tt.wantAccepted {
+				if payload.Data.Revision == nil || *payload.Data.Revision != tt.wantRevision {
+					t.Fatalf("response revision = %v, want %d", payload.Data.Revision, tt.wantRevision)
+				}
+			} else if payload.Data.Revision != nil {
+				t.Fatalf("failed readback invented response revision %d", *payload.Data.Revision)
+			}
+			if tt.wantCacheKept && payload.Data.Target != nil {
+				t.Fatalf("unverified readback returned confirmed target: %+v", payload.Data)
 			}
 		})
 	}
@@ -763,8 +1149,8 @@ func TestHandlePlayURLReturnsSelectedContentIdentity(t *testing.T) {
 }
 
 // TestHandleSourceControl_LegacyGETForwardsAccount verifies that the temporary
-// GET compatibility route still forwards sourceAccount while clearly marking
-// the response deprecated.
+// GET compatibility route still forwards sourceAccount and marks the response
+// deprecated.
 func TestHandleSourceControl_LegacyGETForwardsAccount(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -835,8 +1221,8 @@ func TestHandleSourceControl_CanonicalPOSTForwardsExactBody(t *testing.T) {
 	var capturedBody string
 	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/select" {
-			b, _ := io.ReadAll(r.Body)
-			capturedBody = string(b)
+			body, _ := io.ReadAll(r.Body)
+			capturedBody = string(body)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -847,15 +1233,12 @@ func TestHandleSourceControl_CanonicalPOSTForwardsExactBody(t *testing.T) {
 		client.NewClient(&client.Config{Host: speaker.URL}),
 		&models.DeviceInfo{Name: "Test Speaker"},
 	)
-	conn.SetStatus(&webtypes.DeviceStatus{IsConnected: true, LastActivity: time.Now()})
 	app.AddDevice("source-device", conn)
 
 	body := strings.NewReader(`{"source":"AUX","account":"AUX1"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/source-device/action/source", body)
-	req.Header.Set("Content-Type", "application/json")
 	req = withChiParams(req, map[string]string{"id": "source-device", "action": "source"})
 	w := httptest.NewRecorder()
-
 	app.HandleAPIControl(w, req)
 
 	if w.Code != http.StatusOK {
@@ -873,18 +1256,295 @@ func TestHandleSourceControl_CanonicalPOSTForwardsExactBody(t *testing.T) {
 
 func TestHandleSourceControl_CanonicalPOSTRejectsUnknownFields(t *testing.T) {
 	app := NewWebApp()
-	conn := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{Name: "Test Speaker"})
-	app.AddDevice("source-device", conn)
+	app.AddDevice("source-device", webtypes.NewDeviceConnection(nil, &models.DeviceInfo{Name: "Test Speaker"}))
 
 	body := strings.NewReader(`{"source":"AUX","account":"AUX1","name":"legacy"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/control/devices/source-device/action/source", body)
 	req = withChiParams(req, map[string]string{"id": "source-device", "action": "source"})
 	w := httptest.NewRecorder()
-
 	app.HandleAPIControl(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleZoneAddRejectsSelf(t *testing.T) {
+	app := NewWebApp()
+	req := httptest.NewRequest("POST", "/api/control/devices/192.0.2.10/zone/add/192.0.2.10", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "slaveId": "192.0.2.10"})
+	w := httptest.NewRecorder()
+
+	app.HandleZoneAdd(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "cannot be added to its own zone") {
+		t.Fatalf("unexpected response: %s", w.Body.String())
+	}
+}
+
+func TestHandleGetZoneDoesNotProjectMasterAsMember(t *testing.T) {
+	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/getZone" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`<zone master="MASTERHW01"><member ipaddress="192.0.2.10">MASTERHW01</member><member ipaddress="192.0.2.20">SLAVEHW02</member></zone>`))
+	}))
+	defer speaker.Close()
+
+	app := NewWebApp()
+	app.AddDevice("192.0.2.10", webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: speaker.URL}),
+		&models.DeviceInfo{Name: "Master", DeviceID: "MASTERHW01"},
+	))
+	app.AddDevice("192.0.2.20", webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Slave", DeviceID: "SLAVEHW02"}))
+
+	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.10/zone", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10"})
+	w := httptest.NewRecorder()
+	app.HandleGetZone(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			IsMaster bool `json:"isMaster"`
+			IsSlave  bool `json:"isSlave"`
+			Members  []struct {
+				HwID string `json:"hwId"`
+			} `json:"members"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.Success || !response.Data.IsMaster || response.Data.IsSlave {
+		t.Fatalf("unexpected role projection: %+v", response.Data)
+	}
+	if len(response.Data.Members) != 1 || response.Data.Members[0].HwID != "SLAVEHW02" {
+		t.Fatalf("members = %+v, want only SLAVEHW02", response.Data.Members)
+	}
+}
+
+func TestHandleGetZoneProjectsStereoMasterAsLogicalMember(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master: "zone-master",
+		Members: []models.Member{
+			{DeviceID: "zone-master", IP: "192.0.2.5"},
+			{DeviceID: "left-id", IP: "192.0.2.10"},
+		},
+	}
+	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/getZone" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`<zone master="zone-master"><member ipaddress="192.0.2.5">zone-master</member><member ipaddress="192.0.2.10">left-id</member></zone>`))
+	}))
+	defer speaker.Close()
+
+	group := testStereoGroup()
+	group.Name = "Living Room"
+	group.Roles.Roles[0].IPAddress = "192.0.2.10"
+	group.Roles.Roles[1].IPAddress = "192.0.2.11"
+
+	app := NewWebApp()
+	master := webtypes.NewDeviceConnection(client.NewClient(&client.Config{Host: speaker.URL}),
+		&models.DeviceInfo{Name: "Kitchen", DeviceID: "zone-master", IPAddress: "192.0.2.5"})
+	master.SetStatus(&webtypes.DeviceStatus{
+		Zone: zone, Volume: &models.Volume{ActualVolume: 25},
+		Connectivity: webtypes.ConnectivityOnline, IsConnected: true,
+	})
+	left := webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Living Room Left", DeviceID: "left-id", IPAddress: "192.0.2.10"})
+	left.SetStatus(&webtypes.DeviceStatus{
+		Group: group, Volume: &models.Volume{ActualVolume: 12},
+		Connectivity: webtypes.ConnectivityStale, IsConnected: true,
+	})
+	right := webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Living Room Right", DeviceID: "right-id", IPAddress: "192.0.2.11"})
+	right.SetStatus(&webtypes.DeviceStatus{
+		Group: group, Volume: &models.Volume{ActualVolume: 18},
+		Connectivity: webtypes.ConnectivityOnline, IsConnected: true,
+	})
+	app.AddDevice("192.0.2.5", master)
+	app.AddDevice("192.0.2.10", left)
+	app.AddDevice("192.0.2.11", right)
+
+	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.5/zone", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.5"})
+	w := httptest.NewRecorder()
+	app.HandleGetZone(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Data struct {
+			Members []struct {
+				ControlID    string                `json:"controlId"`
+				IP           string                `json:"ip"`
+				HwID         string                `json:"hwId"`
+				Name         string                `json:"name"`
+				DeviceIDs    []string              `json:"deviceIds"`
+				Connectivity webtypes.Connectivity `json:"connectivity"`
+				ActualVolume *int                  `json:"actualVolume"`
+			} `json:"members"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Data.Members) != 1 {
+		t.Fatalf("zone members = %+v, want one logical stereo member", response.Data.Members)
+	}
+	member := response.Data.Members[0]
+	if member.Name != "Living Room" || member.ControlID != "192.0.2.10" ||
+		member.IP != "192.0.2.10" || member.HwID != "left-id" ||
+		len(member.DeviceIDs) != 2 || member.DeviceIDs[0] != "left-id" || member.DeviceIDs[1] != "right-id" ||
+		member.Connectivity != webtypes.ConnectivityStale || member.ActualVolume == nil || *member.ActualVolume != 12 {
+		t.Fatalf("logical stereo member = %+v", member)
+	}
+
+	projected := app.deviceViewSnapshot()
+	if len(projected) != 1 || projected["192.0.2.5"].Zone == nil ||
+		len(projected["192.0.2.5"].Zone.Members) != 2 {
+		t.Fatalf("top-level projection diverged from zone detail: %+v", projected)
+	}
+}
+
+func TestHandleZoneAddRejectsSameHardwareUnderDifferentKeys(t *testing.T) {
+	app := NewWebApp()
+	app.AddDevice("speaker.local", webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: "http://speaker.local"}),
+		&models.DeviceInfo{Name: "Speaker", DeviceID: "SAMEHW01"},
+	))
+	app.AddDevice("192.0.2.10", webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Speaker alias", DeviceID: "SAMEHW01"}))
+
+	req := httptest.NewRequest("POST", "/api/control/devices/speaker.local/zone/add/192.0.2.10", nil)
+	req = withChiParams(req, map[string]string{"id": "speaker.local", "slaveId": "192.0.2.10"})
+	w := httptest.NewRecorder()
+	app.HandleZoneAdd(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCurrentSourceAllowsMultiroom(t *testing.T) {
+	sources := &models.Sources{SourceItem: []models.SourceItem{
+		{Source: "SPOTIFY", SourceAccount: "first", MultiroomAllowed: true},
+		{Source: "BLUETOOTH", MultiroomAllowed: false},
+	}}
+
+	for _, test := range []struct {
+		name       string
+		nowPlaying *models.NowPlaying
+		allowed    bool
+	}{
+		{name: "matching account", nowPlaying: &models.NowPlaying{Source: "SPOTIFY", SourceAccount: "first"}, allowed: true},
+		{name: "different account", nowPlaying: &models.NowPlaying{Source: "SPOTIFY", SourceAccount: "second"}},
+		{name: "source disallows multiroom", nowPlaying: &models.NowPlaying{Source: "BLUETOOTH"}},
+		{name: "standby", nowPlaying: &models.NowPlaying{Source: "STANDBY"}},
+		{name: "missing state"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := currentSourceAllowsMultiroom(test.nowPlaying, sources); got != test.allowed {
+				t.Fatalf("currentSourceAllowsMultiroom() = %t, want %t", got, test.allowed)
+			}
+		})
+	}
+}
+
+func TestHandleZoneAddUsesSetZoneWithoutStartingPlayback(t *testing.T) {
+	var paths []string
+	var zoneBody string
+	masterSpeaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/now_playing":
+			_, _ = w.Write([]byte(`<nowPlaying deviceID="MASTERHW01" source="LOCAL_INTERNET_RADIO"><playStatus>PLAY_STATE</playStatus></nowPlaying>`))
+		case "/sources":
+			_, _ = w.Write([]byte(`<sources deviceID="MASTERHW01"><sourceItem source="LOCAL_INTERNET_RADIO" status="READY" isLocal="false" multiroomallowed="true" /></sources>`))
+		case "/getZone":
+			_, _ = w.Write([]byte(`<zone master="MASTERHW01"/>`))
+		case "/setZone":
+			body, _ := io.ReadAll(r.Body)
+			zoneBody = string(body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer masterSpeaker.Close()
+
+	app := NewWebApp()
+	master := webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: masterSpeaker.URL}),
+		&models.DeviceInfo{Name: "Master", DeviceID: "MASTERHW01"},
+	)
+	master.SetStatus(&webtypes.DeviceStatus{IsConnected: true, LastActivity: time.Now()})
+	app.AddDevice("192.0.2.10", master)
+	app.AddDevice("192.0.2.20", webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Slave", DeviceID: "SLAVEHW02"}))
+
+	req := httptest.NewRequest("POST", "/api/control/devices/192.0.2.10/zone/add/192.0.2.20", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "slaveId": "192.0.2.20"})
+	w := httptest.NewRecorder()
+	app.HandleZoneAdd(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	wantPaths := []string{"GET /now_playing", "GET /sources", "GET /getZone", "POST /setZone"}
+	if !reflect.DeepEqual(paths, wantPaths) {
+		t.Fatalf("requests = %v, want %v", paths, wantPaths)
+	}
+	if !strings.Contains(zoneBody, "SLAVEHW02") {
+		t.Fatalf("setZone body does not contain slave: %s", zoneBody)
+	}
+}
+
+func TestHandleZoneAddRejectsStandbyMaster(t *testing.T) {
+	var paths []string
+	masterSpeaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/now_playing":
+			_, _ = w.Write([]byte(`<nowPlaying deviceID="MASTERHW01" source="STANDBY"/>`))
+		case "/sources":
+			_, _ = w.Write([]byte(`<sources deviceID="MASTERHW01"><sourceItem source="LOCAL_INTERNET_RADIO" status="READY" multiroomallowed="true" /></sources>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer masterSpeaker.Close()
+
+	app := NewWebApp()
+	app.AddDevice("192.0.2.10", webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: masterSpeaker.URL}),
+		&models.DeviceInfo{Name: "Master", DeviceID: "MASTERHW01"},
+	))
+	app.AddDevice("192.0.2.20", webtypes.NewDeviceConnection(nil,
+		&models.DeviceInfo{Name: "Slave", DeviceID: "SLAVEHW02"}))
+
+	req := httptest.NewRequest("POST", "/api/control/devices/192.0.2.10/zone/add/192.0.2.20", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "slaveId": "192.0.2.20"})
+	w := httptest.NewRecorder()
+	app.HandleZoneAdd(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if want := []string{"GET /now_playing", "GET /sources"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("requests = %v, want %v", paths, want)
 	}
 }
 
@@ -938,6 +1598,46 @@ func TestHandleZoneRemove_UsesRemoveZoneSlave(t *testing.T) {
 
 	if !strings.Contains(gotBody, `master="MASTERHW01"`) {
 		t.Errorf("removeZoneSlave body should name the master, got: %s", gotBody)
+	}
+}
+
+func TestHandleZoneRemoveUsesMasterTopologyForMissingMember(t *testing.T) {
+	var requests []string
+	var removeBody string
+	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/getZone":
+			_, _ = w.Write([]byte(`<zone master="MASTERHW01"><member ipaddress="192.0.2.10">MASTERHW01</member><member ipaddress="192.0.2.99">MISSINGHW02</member></zone>`))
+		case "/removeZoneSlave":
+			body, _ := io.ReadAll(r.Body)
+			removeBody = string(body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer speaker.Close()
+
+	app := NewWebApp()
+	app.AddDevice("192.0.2.10", webtypes.NewDeviceConnection(
+		client.NewClient(&client.Config{Host: speaker.URL}),
+		&models.DeviceInfo{Name: "Master", DeviceID: "MASTERHW01"},
+	))
+
+	req := httptest.NewRequest("POST", "/api/control/devices/192.0.2.10/zone/remove/192.0.2.99", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10", "slaveId": "192.0.2.99"})
+	w := httptest.NewRecorder()
+	app.HandleZoneRemove(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if want := []string{"GET /getZone", "POST /removeZoneSlave"}; !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+	if !strings.Contains(removeBody, "MISSINGHW02") || !strings.Contains(removeBody, "192.0.2.99") {
+		t.Fatalf("removeZoneSlave body lost topology-only member identity: %s", removeBody)
 	}
 }
 
@@ -1012,77 +1712,64 @@ func TestHandleZoneLeave_UsesRemoveZoneSlave(t *testing.T) {
 	}
 }
 
-// TestHandleGetZoneCandidates_IncludesHiddenPairMemberAndSelf guards two
-// things the stereo-pair projection (device_projection.go) must not affect:
-// Zone and Group are separate, unrelated groupings, so (a) a stereo pair's
-// hidden non-master member -- absent from the collapsed "devices" list --
-// must still be a valid zone-add candidate, matching how HandleZoneAdd
-// already treats it (raw registry lookup, unaffected by projection); and
-// (b) the endpoint itself does not exclude the requesting {id} device,
-// since deciding what to exclude (this page's own device, current zone
-// members, ...) is the caller's concern -- Zone.js already does this via
-// the existing zoneIps set, which includes the master's own IP even for a
-// standalone zone (see models.ZoneInfo.IsStandalone).
-func TestHandleGetZoneCandidates_IncludesHiddenPairMemberAndSelf(t *testing.T) {
+func TestHandleGetZoneCandidatesIncludesHiddenPairMemberAndSelf(t *testing.T) {
 	app := NewWebApp()
-
 	group := testStereoGroup()
-	master := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "left-id", Name: "Living Room", IPAddress: "192.0.2.10"})
-	master.SetStatus(&webtypes.DeviceStatus{IsConnected: true, Group: group})
-	app.AddDevice("192.0.2.10", master)
 
-	hiddenMember := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "right-id", Name: "Living Room", IPAddress: "192.0.2.11"})
-	hiddenMember.SetStatus(&webtypes.DeviceStatus{IsConnected: true, Group: group})
-	app.AddDevice("192.0.2.11", hiddenMember)
-
-	standalone := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "kitchen-id", Name: "Kitchen", IPAddress: "192.0.2.12"})
-	standalone.SetStatus(&webtypes.DeviceStatus{IsConnected: true})
-	app.AddDevice("192.0.2.12", standalone)
-
-	// Sanity check: the hidden member really is absent from the projected
-	// device list this test is guarding against leaking into.
-	projected := app.deviceViewSnapshot()
-	if _, visible := projected["192.0.2.11"]; visible {
-		t.Fatal("test setup: expected 192.0.2.11 to be hidden by the stereo-pair projection")
+	for _, device := range []struct {
+		id     string
+		hwID   string
+		name   string
+		status *webtypes.DeviceStatus
+	}{
+		{"192.0.2.10", "left-id", "Living Room", &webtypes.DeviceStatus{IsConnected: true, Group: group}},
+		{"192.0.2.11", "right-id", "Living Room", &webtypes.DeviceStatus{IsConnected: true, Group: group}},
+		{"192.0.2.12", "kitchen-id", "Kitchen", &webtypes.DeviceStatus{IsConnected: true}},
+	} {
+		conn := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
+			DeviceID:  device.hwID,
+			Name:      device.name,
+			IPAddress: device.id,
+		})
+		conn.SetStatus(device.status)
+		app.AddDevice(device.id, conn)
 	}
 
-	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.10/zone/candidates", nil)
+	if _, visible := app.deviceViewSnapshot()["192.0.2.11"]; visible {
+		t.Fatal("test setup: stereo member should be hidden from logical projection")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/control/devices/192.0.2.10/zone/candidates", nil)
 	req = withChiParams(req, map[string]string{"id": "192.0.2.10"})
 	w := httptest.NewRecorder()
-
 	app.HandleGetZoneCandidates(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var response webtypes.APIResponse
+	var response struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
+		t.Fatalf("decode response: %v", err)
 	}
-
-	data, ok := response.Data.(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected data to be a map, got %T", response.Data)
-	}
-
-	for _, ip := range []string{"192.0.2.10", "192.0.2.11", "192.0.2.12"} {
-		if _, ok := data[ip]; !ok {
-			t.Errorf("expected %s in zone candidates, got: %+v", ip, data)
+	for _, id := range []string{"192.0.2.10", "192.0.2.11", "192.0.2.12"} {
+		if _, ok := response.Data[id]; !ok {
+			t.Errorf("candidate %s missing from %+v", id, response.Data)
 		}
 	}
 }
 
-func TestHandleGetZoneCandidates_UnknownDeviceNotFound(t *testing.T) {
+func TestHandleGetZoneCandidatesUnknownDeviceNotFound(t *testing.T) {
 	app := NewWebApp()
-
-	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.99/zone/candidates", nil)
-	req = withChiParams(req, map[string]string{"id": "192.0.2.99"})
+	req := httptest.NewRequest(http.MethodGet, "/api/control/devices/missing/zone/candidates", nil)
+	req = withChiParams(req, map[string]string{"id": "missing"})
 	w := httptest.NewRecorder()
 
 	app.HandleGetZoneCandidates(w, req)
 
 	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for an unknown device, got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
 	}
 }

@@ -107,29 +107,6 @@ func (b *Bass) String() string {
 	return fmt.Sprintf("Bass: %d (%s)", b.GetLevel(), GetBassLevelName(b.GetLevel()))
 }
 
-// UnmarshalXML implements custom XML unmarshaling with validation
-func (b *Bass) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	// Use a temporary struct to avoid infinite recursion
-	type TempBass Bass
-
-	temp := (*TempBass)(b)
-
-	if err := d.DecodeElement(temp, &start); err != nil {
-		return err
-	}
-
-	// Validate bass levels are within acceptable range
-	if !ValidateBassLevel(b.TargetBass) {
-		return fmt.Errorf("invalid target bass level: %d", b.TargetBass)
-	}
-
-	if !ValidateBassLevel(b.ActualBass) {
-		return fmt.Errorf("invalid actual bass level: %d", b.ActualBass)
-	}
-
-	return nil
-}
-
 // MarshalXML implements custom XML marshaling
 func (b *Bass) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
 	type TempBass Bass
@@ -167,6 +144,25 @@ type BassCapabilities struct {
 	BassMin       int      `xml:"bassMin"`
 	BassMax       int      `xml:"bassMax"`
 	BassDefault   int      `xml:"bassDefault"`
+}
+
+// Validate checks that the reported range and default are internally
+// consistent. Structural XML completeness is checked by the client before it
+// constructs this public value model.
+func (bc *BassCapabilities) Validate() error {
+	if bc == nil {
+		return fmt.Errorf("bass capabilities are nil")
+	}
+
+	if bc.BassMin > bc.BassMax {
+		return fmt.Errorf("bass minimum %d exceeds maximum %d", bc.BassMin, bc.BassMax)
+	}
+
+	if bc.BassDefault < bc.BassMin || bc.BassDefault > bc.BassMax {
+		return fmt.Errorf("bass default %d is outside range %d to %d", bc.BassDefault, bc.BassMin, bc.BassMax)
+	}
+
+	return nil
 }
 
 // IsBassSupported returns true if bass control is supported

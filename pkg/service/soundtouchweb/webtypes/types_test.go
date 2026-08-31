@@ -184,6 +184,10 @@ func TestDeviceStatus(t *testing.T) {
 			ActualVolume: 75,
 			MuteEnabled:  false,
 		},
+		Balance: &models.Balance{
+			TargetBalance: 10,
+			ActualBalance: 10,
+		},
 		Bass: &models.Bass{
 			ActualBass: 3,
 		},
@@ -204,6 +208,10 @@ func TestDeviceStatus(t *testing.T) {
 			t.Error("Expected bass to be set")
 		}
 
+		if status.Balance == nil || status.Balance.ActualBalance != 10 {
+			t.Error("Expected balance readback to be set")
+		}
+
 		if !status.IsConnected {
 			t.Error("Expected device to be connected")
 		}
@@ -222,6 +230,10 @@ func TestDeviceStatus(t *testing.T) {
 
 		if emptyStatus.Volume != nil {
 			t.Error("Expected volume to be nil")
+		}
+
+		if emptyStatus.Balance != nil {
+			t.Error("Expected balance to be nil")
 		}
 
 		if emptyStatus.IsConnected {

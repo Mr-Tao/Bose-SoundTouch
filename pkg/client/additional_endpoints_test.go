@@ -172,6 +172,40 @@ func TestClient_GetBassCapabilities(t *testing.T) {
 			responseBody:   "invalid xml content",
 			expectError:    true,
 		},
+		{
+			name:           "missing bassAvailable",
+			responseStatus: http.StatusOK,
+			responseBody: `<bassCapabilities>
+				<bassMin>-9</bassMin><bassMax>0</bassMax><bassDefault>0</bassDefault>
+			</bassCapabilities>`,
+			expectError: true,
+		},
+		{
+			name:           "missing zero-valued bassMax",
+			responseStatus: http.StatusOK,
+			responseBody: `<bassCapabilities>
+				<bassAvailable>true</bassAvailable><bassMin>-9</bassMin><bassDefault>0</bassDefault>
+			</bassCapabilities>`,
+			expectError: true,
+		},
+		{
+			name:           "malformed scalar",
+			responseStatus: http.StatusOK,
+			responseBody: `<bassCapabilities>
+				<bassAvailable>true</bassAvailable><bassMin>-9</bassMin>
+				<bassMax>invalid</bassMax><bassDefault>0</bassDefault>
+			</bassCapabilities>`,
+			expectError: true,
+		},
+		{
+			name:           "minimum exceeds maximum",
+			responseStatus: http.StatusOK,
+			responseBody: `<bassCapabilities>
+				<bassAvailable>true</bassAvailable><bassMin>1</bassMin>
+				<bassMax>0</bassMax><bassDefault>0</bassDefault>
+			</bassCapabilities>`,
+			expectError: true,
+		},
 	}
 
 	for _, tt := range tests {

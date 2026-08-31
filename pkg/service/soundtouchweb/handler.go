@@ -14,10 +14,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 	bmxpkg "github.com/gesellix/bose-soundtouch/pkg/service/bmx"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
 	"github.com/gesellix/bose-soundtouch/pkg/service/stations"
+	"github.com/gesellix/bose-soundtouch/pkg/stereopair"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 )
@@ -37,6 +39,16 @@ type WebApp struct {
 	Upgrader  websocket.Upgrader
 	WSClients map[*websocket.Conn]bool
 	WSMutex   sync.RWMutex
+	// webSocketWriteMu serializes browser WebSocket writes independently of the
+	// client registry. Gorilla permits only one concurrent writer per connection.
+	webSocketWriteMu sync.Mutex
+	// webSocketWriteTimeout bounds each browser WebSocket write. A stalled client
+	// must not indefinitely delay a lifecycle response waiting for older frames.
+	webSocketWriteTimeout time.Duration
+
+	deviceBroadcastMu      sync.Mutex
+	deviceBroadcastPending bool
+	deviceBroadcastRunning bool
 
 	Version    string
 	Commit     string
@@ -52,6 +64,11 @@ type WebApp struct {
 	// empty and falls back to ServiceURL.
 	InternalServiceURL string
 
+	// OnboardingURL identifies a separately mounted, confirmation-driven Wi-Fi
+	// setup workflow. Embedded service builds set it only when that workflow is
+	// actually mounted; standalone player builds leave it empty.
+	OnboardingURL string
+
 	// ServiceClient is used for server-side calls to the AfterTouch service
 	// (currently the TTS proxy). When nil, serviceHTTPClient falls back to
 	// http.DefaultClient. Set it via NewServiceHTTPClient to trust the
@@ -63,11 +80,8 @@ type WebApp struct {
 	// soundtouch-service points it at the service datastore's known devices so
 	// the UI shows manually-added speakers even when network discovery is
 	// disabled. Standalone soundtouch-player leaves it nil.
-	//
-	// A non-nil error means the underlying read failed (e.g. a datastore
-	// glitch), which callers must NOT treat the same as "zero hosts
-	// persisted" -- doing so would make a transient read failure look like
-	// every persisted device is already registered.
+	// A non-nil error means the backing read failed; callers must not interpret
+	// that as an authoritative empty inventory.
 	ExtraDeviceHosts func() ([]string, error)
 
 	// TriggerDiscovery, when set, runs an external discovery sweep instead of
@@ -84,12 +98,23 @@ type WebApp struct {
 	// removal only prunes the in-memory registry).
 	RemoveDeviceHook func(deviceID string) error
 
-	// seedMu serializes seedExtraDevices runs so the bounded startup retry
-	// loop (SeedExtraDevicesUntilReady) and a devices-changed-hook-triggered
-	// SeedExtraDevices never probe the same still-offline host concurrently.
+	// seedMu serializes startup retries and datastore-change-triggered reseeds.
 	seedMu sync.Mutex
 
-	discoveryStatus atomic.Value // stores *webtypes.DiscoveryStatus
+	// StereoPairs coordinates persistent ST10 stereo-pair mutations across
+	// both physical speakers. It is shared for the lifetime of WebApp so its
+	// mutation lock covers concurrent CLI-like requests from every browser.
+	StereoPairs StereoPairLifecycle
+
+	// zoneVolumeLocks serialize proportional volume batches per authoritative
+	// zone master while allowing unrelated zones to move independently.
+	zoneVolumeLocks sync.Map
+	// volumeReadbackRetryWait is an injectable wait used by deterministic race
+	// tests; production instances leave it nil and use the bounded real delay.
+	volumeReadbackRetryWait func(time.Duration)
+
+	discoveryStatus     atomic.Value // stores *webtypes.DiscoveryStatus
+	discoveryGeneration atomic.Uint64
 }
 
 // serviceHTTPClient returns the client used for outbound calls to the
@@ -125,13 +150,61 @@ type DeviceEntry struct {
 
 // NewWebApp creates a new WebApp instance for SPA mode
 func NewWebApp() *WebApp {
-	return &WebApp{
-		devices:   make(map[string]*webtypes.DeviceConnection),
-		WSClients: make(map[*websocket.Conn]bool),
+	app := &WebApp{
+		devices:               make(map[string]*webtypes.DeviceConnection),
+		WSClients:             make(map[*websocket.Conn]bool),
+		webSocketWriteTimeout: defaultWebSocketWriteTimeout,
 		Upgrader: websocket.Upgrader{
 			CheckOrigin: func(_ *http.Request) bool { return true },
 		},
 	}
+	app.StereoPairs = stereopair.NewWithGenerationLifecyclePersistence(
+		app.stereoPairClient,
+		func(ref stereopair.GenerationRef) error {
+			return stereopair.DeleteMargeGroupGeneration(app.stereoPairPersistenceClient(), ref)
+		},
+		func(refs []stereopair.GenerationRef) error {
+			return stereopair.EnsureMargeNoGroupGenerations(app.stereoPairPersistenceClient(), refs)
+		},
+		func(ref stereopair.GenerationRef, name string) error {
+			return stereopair.RenameMargeGroupGeneration(app.stereoPairPersistenceClient(), ref, name)
+		},
+	)
+
+	return app
+}
+
+func (app *WebApp) stereoPairPersistenceClient() *http.Client {
+	base := app.serviceHTTPClient()
+	if base.Timeout >= stereopair.RequestTimeout {
+		return base
+	}
+
+	configured := *base
+	configured.Timeout = stereopair.RequestTimeout
+
+	return &configured
+}
+
+// SetStereoPairGenerationPersistence overrides both exact post-teardown
+// retirement and the read-only pre-create generation barrier.
+func (app *WebApp) SetStereoPairGenerationPersistence(
+	cleanup stereopair.GenerationCleanup,
+	preflight stereopair.GenerationPreflight,
+	rename stereopair.GenerationRename,
+) {
+	app.StereoPairs = stereopair.NewWithGenerationLifecyclePersistence(app.stereoPairClient, cleanup, preflight, rename)
+}
+
+// stereoPairClient uses a dedicated long-timeout client. Pair creation can
+// legitimately span multiple 15-second speaker/Marge retry cycles, while the
+// ordinary status clients intentionally use a shorter timeout.
+func (app *WebApp) stereoPairClient(host string) (stereopair.Client, error) {
+	if strings.TrimSpace(host) == "" {
+		return nil, fmt.Errorf("speaker host is empty")
+	}
+
+	return client.NewClient(&client.Config{Host: host, Timeout: stereopair.RequestTimeout}), nil
 }
 
 // GetDevice returns the device for id and whether it exists.
@@ -144,23 +217,21 @@ func (app *WebApp) GetDevice(id string) (*webtypes.DeviceConnection, bool) {
 	return device, ok
 }
 
-// DeviceSnapshot returns device entries taken under a single read lock.
-// Callers can iterate the result without holding any registry lock.
-// Devices added or removed after the call
+// DeviceSnapshot returns a list of (id, *DeviceConnection) pairs taken
+// under a single read lock. Callers can iterate the result without
+// holding any registry lock. Devices added or removed after the call
 // are not reflected. A pointer captured here stays valid even if the
 // device is later removed (RemoveDevice only detaches it from the map
-// and stops its goroutines), so iterating a stale snapshot is safe.
+// and stops its goroutines), so iterating a stale snapshot is safe. LastSeen
+// is copied by value because TouchDevice can update the connection after the
+// registry lock is released.
 func (app *WebApp) DeviceSnapshot() []DeviceEntry {
 	app.devicesMu.RLock()
 	defer app.devicesMu.RUnlock()
 
 	out := make([]DeviceEntry, 0, len(app.devices))
 	for id, device := range app.devices {
-		out = append(out, DeviceEntry{
-			ID:       id,
-			Device:   device,
-			LastSeen: device.LastSeen,
-		})
+		out = append(out, DeviceEntry{ID: id, Device: device, LastSeen: device.LastSeen})
 	}
 
 	return out
@@ -211,52 +282,69 @@ func (app *WebApp) TouchDevice(id string) bool {
 
 // RemoveDevice removes the device registered under id and stops its
 // background goroutines (status poller + WebSocket reconnect loop) via
-// conn.Close. Returns true if id was present. Close runs outside the
-// registry lock because it performs network I/O (WebSocket disconnect).
+// conn.Close. Registry removal shares the connection's balance-write fence
+// so it cannot replace a connection between a final identity check and balance
+// write initiation. Close runs outside both locks because it performs network
+// I/O (WebSocket disconnect).
 func (app *WebApp) RemoveDevice(id string) bool {
-	app.devicesMu.Lock()
+	app.devicesMu.RLock()
+	conn, exists := app.devices[id]
+	app.devicesMu.RUnlock()
 
-	conn, ok := app.devices[id]
-	if ok {
-		delete(app.devices, id)
+	if !exists {
+		return false
 	}
 
-	app.devicesMu.Unlock()
+	removed := false
 
-	if ok {
+	conn.WithBalanceWriteFence(func() {
+		app.devicesMu.Lock()
+		if app.devices[id] == conn {
+			delete(app.devices, id)
+
+			removed = true
+		}
+		app.devicesMu.Unlock()
+	})
+
+	if removed {
 		conn.Close()
 	}
 
-	return ok
+	return removed
 }
 
 // removeDeviceIfMatch removes id only when it still points at expected. It is
 // used when an asynchronous probe must not delete a newer replacement that was
 // registered under the same host.
 func (app *WebApp) removeDeviceIfMatch(id string, expected *webtypes.DeviceConnection) bool {
-	app.devicesMu.Lock()
-
-	current, ok := app.devices[id]
-	if ok && current == expected {
-		delete(app.devices, id)
-	} else {
-		ok = false
+	if expected == nil {
+		return false
 	}
 
-	app.devicesMu.Unlock()
+	removed := false
 
-	if ok {
+	expected.WithBalanceWriteFence(func() {
+		app.devicesMu.Lock()
+		if app.devices[id] == expected {
+			delete(app.devices, id)
+
+			removed = true
+		}
+		app.devicesMu.Unlock()
+	})
+
+	if removed {
 		expected.Close()
 	}
 
-	return ok
+	return removed
 }
 
 // HandleAPIDevices returns all devices as JSON
 func (app *WebApp) HandleAPIDevices(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Return all devices as JSON
 	response := webtypes.APIResponse{
 		Success: true,
 		Data:    app.deviceViewSnapshot(),
@@ -284,17 +372,12 @@ func (app *WebApp) HandleAPIDevice(w http.ResponseWriter, r *http.Request) {
 	// Update device status to get fresh power state
 	app.UpdateDeviceStatus(deviceID, device)
 
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 
 	response := webtypes.APIResponse{
 		Success: true,
 		Data: map[string]interface{}{
-			"info":   device.DeviceInfo,
+			"info":   device.Info(),
 			"status": device.Status(),
 		},
 	}
@@ -364,11 +447,6 @@ func (app *WebApp) HandleAPIControl(w http.ResponseWriter, r *http.Request) {
 	if !exists {
 		app.sendError(w, "Device not found", http.StatusNotFound)
 		return
-	}
-
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -465,8 +543,44 @@ func (app *WebApp) handleVolumeControl(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	err := device.Client.SetVolume(volumeReq.Level)
-	app.sendControlResponse(w, err, fmt.Sprintf("Volume set to %d", volumeReq.Level))
+	app.handleVerifiedVolumeControl(w, chi.URLParam(r, "id"), device, volumeReq.Level)
+}
+
+func (app *WebApp) handleVerifiedVolumeControl(
+	w http.ResponseWriter,
+	controlID string,
+	device *webtypes.DeviceConnection,
+	level int,
+) {
+	topology, current := device.SnapshotGroupTopology()
+	if !current || !authoritativeVolumeTopology(device, topology) {
+		app.sendError(w, "Volume control topology is unverified", http.StatusConflict)
+
+		return
+	}
+
+	member := zoneVolumeMemberResult{
+		ControlID: controlID,
+		Target:    intPointer(level),
+	}
+
+	atTarget, confirmed := app.applyVolumeTarget(&member, controlID, device, topology, nil, level)
+	if confirmed {
+		app.BroadcastDeviceList()
+	}
+
+	if !atTarget {
+		status := http.StatusBadGateway
+		if strings.Contains(member.Error, "topology") || strings.Contains(member.Error, "state changed") {
+			status = http.StatusConflict
+		}
+
+		app.sendError(w, member.Error, status)
+
+		return
+	}
+
+	app.sendControlResponse(w, nil, fmt.Sprintf("Volume set to %d", level))
 }
 
 // handlePresetControl processes preset control requests
@@ -528,8 +642,14 @@ func (app *WebApp) handleBassControl(w http.ResponseWriter, r *http.Request, dev
 		return
 	}
 
-	if bassReq.Level < -9 || bassReq.Level > 9 {
-		app.sendError(w, "Bass must be between -9 and 9", http.StatusBadRequest)
+	capabilities := effectiveBassCapabilities(device.Status())
+	if !capabilities.BassAvailable {
+		app.sendError(w, "Bass control is unavailable", http.StatusBadRequest)
+		return
+	}
+
+	if !capabilities.ValidateLevel(bassReq.Level) {
+		app.sendError(w, fmt.Sprintf("Bass must be between %d and %d", capabilities.BassMin, capabilities.BassMax), http.StatusBadRequest)
 		return
 	}
 
@@ -538,8 +658,84 @@ func (app *WebApp) handleBassControl(w http.ResponseWriter, r *http.Request, dev
 		return
 	}
 
-	err := device.Client.SetBass(bassReq.Level)
-	app.sendControlResponse(w, err, fmt.Sprintf("Bass set to %d", bassReq.Level))
+	result := struct {
+		Requested int     `json:"requested"`
+		Target    *int    `json:"target"`
+		Actual    *int    `json:"actual"`
+		AtTarget  bool    `json:"atTarget"`
+		Revision  *uint64 `json:"revision,omitempty"`
+	}{Requested: bassReq.Level}
+	response := webtypes.APIResponse{Success: true}
+	statusCode := http.StatusOK
+	broadcast := false
+
+	device.WithBassOperation(func() {
+		generation := device.BeginBassRefresh()
+		writeErr := device.Client.SetBassWithCapabilities(bassReq.Level, &capabilities)
+		bass, readErr := device.Client.GetBass()
+
+		if readErr != nil || bass == nil {
+			statusCode = http.StatusBadGateway
+			response.Success = false
+
+			switch {
+			case writeErr != nil && readErr != nil:
+				response.Error = fmt.Sprintf("Bass write and readback are unverified: write: %v; read: %v", writeErr, readErr)
+			case readErr != nil:
+				response.Error = fmt.Sprintf("Bass readback is unverified: %v", readErr)
+			default:
+				response.Error = "Bass readback is unverified"
+			}
+
+			return
+		}
+
+		revision, applied := device.ApplyPolledBassWithRevision(generation, bass)
+		if !applied {
+			statusCode = http.StatusConflict
+			response.Success = false
+			response.Error = "Bass state changed during update"
+
+			return
+		}
+
+		target := bass.TargetBass
+		actual := bass.ActualBass
+		result.Target = &target
+		result.Actual = &actual
+		result.AtTarget = target == bassReq.Level && actual == bassReq.Level
+		result.Revision = &revision
+		broadcast = true
+	})
+
+	if broadcast {
+		app.BroadcastDeviceList()
+	}
+
+	response.Data = result
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode bass response", http.StatusInternalServerError)
+	}
+}
+
+func effectiveBassCapabilities(status *webtypes.DeviceStatus) models.BassCapabilities {
+	if status != nil && status.BassCapabilities != nil {
+		capabilities := *status.BassCapabilities
+		if capabilities.Validate() == nil {
+			return capabilities
+		}
+	}
+
+	return models.BassCapabilities{
+		BassAvailable: true,
+		BassMin:       -9,
+		BassMax:       0,
+		BassDefault:   0,
+	}
 }
 
 // handleSourceControl processes source control requests. POST with an exact
@@ -640,11 +836,6 @@ func (app *WebApp) HandleDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
-	}
-
 	if device.Client == nil {
 		app.sendError(w, "Device client not available", http.StatusInternalServerError)
 		return
@@ -672,11 +863,6 @@ func (app *WebApp) HandleDirectVolumeControl(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
-	}
-
 	if device.Client == nil {
 		app.sendError(w, "Device client not available", http.StatusInternalServerError)
 		return
@@ -684,8 +870,7 @@ func (app *WebApp) HandleDirectVolumeControl(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 
-	err = device.Client.SetVolume(volumeLevel)
-	app.sendControlResponse(w, err, fmt.Sprintf("Volume set to %d", volumeLevel))
+	app.handleVerifiedVolumeControl(w, deviceID, device, volumeLevel)
 }
 
 // HandleDevicePower handles power toggle commands for devices
@@ -696,11 +881,6 @@ func (app *WebApp) HandleDevicePower(w http.ResponseWriter, r *http.Request) {
 	if !exists {
 		app.sendError(w, "Device not found", http.StatusNotFound)
 		return
-	}
-
-	// Connect WebSocket for real-time updates if not already connected
-	if device.WebSocket == nil {
-		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
 	if device.Client == nil {
@@ -757,72 +937,132 @@ func (app *WebApp) HandleDevicePowerStatus(w http.ResponseWriter, r *http.Reques
 
 // BroadcastDeviceList sends updated device list to all connected WebSocket clients
 func (app *WebApp) BroadcastDeviceList() {
-	app.WSMutex.RLock()
-	defer app.WSMutex.RUnlock()
+	_ = app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		return app.broadcastDeviceListLocked(batch)
+	})
+}
 
+func (app *WebApp) broadcastDeviceListLocked(batch webSocketWriteBatch) error {
+	clients := app.globalWebSocketClients()
 	message := webtypes.WebSocketMessage{
 		Type: "devices",
 		Data: app.deviceViewSnapshot(),
 	}
 
-	// Send to all connected clients
-	var failedClients []*websocket.Conn
-
-	for client := range app.WSClients {
-		if err := client.WriteJSON(message); err != nil {
+	for _, client := range clients {
+		if err := batch.writeJSON(client, message); err != nil {
 			log.Printf("Failed to send device update to WebSocket client: %v", err)
-			// Mark for removal to avoid modifying map during iteration
-			failedClients = append(failedClients, client)
+			app.removeGlobalWebSocketClient(client)
 		}
 	}
 
-	// Remove failed clients
-	for _, client := range failedClients {
-		delete(app.WSClients, client)
-		client.Close()
+	return nil
+}
+
+// QueueDeviceListBroadcast schedules one device projection without blocking a
+// speaker's event read loop on browser I/O. At most one worker runs per app;
+// events during a slow write are coalesced into one follow-up snapshot rather
+// than expanding into an unbounded queue or set of goroutines.
+func (app *WebApp) QueueDeviceListBroadcast() {
+	app.deviceBroadcastMu.Lock()
+
+	app.deviceBroadcastPending = true
+	if app.deviceBroadcastRunning {
+		app.deviceBroadcastMu.Unlock()
+
+		return
+	}
+
+	app.deviceBroadcastRunning = true
+	app.deviceBroadcastMu.Unlock()
+
+	go app.runDeviceListBroadcasts()
+}
+
+func (app *WebApp) runDeviceListBroadcasts() {
+	for {
+		app.deviceBroadcastMu.Lock()
+		if !app.deviceBroadcastPending {
+			app.deviceBroadcastRunning = false
+			app.deviceBroadcastMu.Unlock()
+
+			return
+		}
+
+		app.deviceBroadcastPending = false
+		app.deviceBroadcastMu.Unlock()
+
+		app.BroadcastDeviceList()
 	}
 }
 
-// BroadcastDiscoveryStatus sends discovery progress updates to all connected WebSocket clients
+// BeginDiscovery reserves a monotonically increasing generation before a
+// discovery goroutine starts. Reservation shares the browser writer lock with
+// status publication: either an older frame is fully published first, or the
+// newer reservation wins and the older frame is rejected.
+func (app *WebApp) BeginDiscovery() uint64 {
+	app.webSocketWriteMu.Lock()
+	defer app.webSocketWriteMu.Unlock()
+
+	return app.discoveryGeneration.Add(1)
+}
+
+// BroadcastDiscoveryStatus preserves the original exported API for callers
+// that do not run overlapping discovery jobs. Internal asynchronous paths use
+// BroadcastDiscoveryStatusFor with an explicitly reserved generation.
 func (app *WebApp) BroadcastDiscoveryStatus(status string, deviceCount int) {
-	discoveryStatus := &webtypes.DiscoveryStatus{
-		Status:      status,
-		DeviceCount: deviceCount,
+	generation := app.discoveryGeneration.Load()
+	if generation == 0 {
+		generation = app.BeginDiscovery()
 	}
 
-	switch status {
-	case "starting":
-		discoveryStatus.IsDiscovering = true
-	case "completed", "failed":
-		discoveryStatus.IsDiscovering = false
-	}
+	app.BroadcastDiscoveryStatusFor(generation, status, deviceCount)
+}
 
-	app.discoveryStatus.Store(discoveryStatus)
+// BroadcastDiscoveryStatusFor sends discovery progress only when generation
+// is still current. The generation check, persisted status, client snapshot,
+// and writes share the global browser writer lock, so a stale transition can
+// neither overwrite state nor follow a newer frame.
+func (app *WebApp) BroadcastDiscoveryStatusFor(generation uint64, status string, deviceCount int) bool {
+	accepted := false
 
-	app.WSMutex.RLock()
-	defer app.WSMutex.RUnlock()
-
-	message := webtypes.WebSocketMessage{
-		Type: "discovery_status",
-		Data: discoveryStatus,
-	}
-
-	// Send to all connected clients
-	var failedClients []*websocket.Conn
-
-	for client := range app.WSClients {
-		if err := client.WriteJSON(message); err != nil {
-			log.Printf("Failed to send discovery status to WebSocket client: %v", err)
-			// Mark for removal to avoid modifying map during iteration
-			failedClients = append(failedClients, client)
+	_ = app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		if generation != app.discoveryGeneration.Load() {
+			return nil
 		}
-	}
 
-	// Remove failed clients
-	for _, client := range failedClients {
-		delete(app.WSClients, client)
-		client.Close()
-	}
+		discoveryStatus := &webtypes.DiscoveryStatus{
+			Status:      status,
+			DeviceCount: deviceCount,
+		}
+
+		switch status {
+		case "starting":
+			discoveryStatus.IsDiscovering = true
+		case "completed", "failed":
+			discoveryStatus.IsDiscovering = false
+		}
+
+		app.discoveryStatus.Store(discoveryStatus)
+
+		accepted = true
+
+		message := webtypes.WebSocketMessage{
+			Type: "discovery_status",
+			Data: discoveryStatus,
+		}
+
+		for _, client := range app.globalWebSocketClients() {
+			if err := batch.writeJSON(client, message); err != nil {
+				log.Printf("Failed to send discovery status to WebSocket client: %v", err)
+				app.removeGlobalWebSocketClient(client)
+			}
+		}
+
+		return nil
+	})
+
+	return accepted
 }
 
 // HandleTuneInSearch handles TuneIn search requests, proxying directly to the bmx package.
@@ -895,7 +1135,7 @@ func (app *WebApp) HandleTuneInNavigate(w http.ResponseWriter, r *http.Request) 
 // Returns "" when no match is found.
 func (app *WebApp) findIPByHwID(hwID string) string {
 	for _, entry := range app.DeviceSnapshot() {
-		if entry.Device.DeviceInfo != nil && entry.Device.DeviceInfo.DeviceID == hwID {
+		if info := entry.Device.Info(); info != nil && info.DeviceID == hwID {
 			return entry.ID
 		}
 	}
@@ -934,36 +1174,69 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 	masterIP := app.findIPByHwID(zone.Master)
 
 	masterName := ""
-	if conn, ok := app.GetDevice(masterIP); ok && conn.DeviceInfo != nil {
-		masterName = conn.DeviceInfo.Name
-	}
 
-	type memberInfo struct {
-		IP   string `json:"ip"`
-		HwID string `json:"hwId"`
-		Name string `json:"name"`
-	}
-
-	members := make([]memberInfo, 0, len(zone.Members))
-
-	for _, m := range zone.Members {
-		name := ""
-		if conn, ok := app.GetDevice(m.IP); ok && conn.DeviceInfo != nil {
-			name = conn.DeviceInfo.Name
+	if conn, ok := app.GetDevice(masterIP); ok {
+		if info := conn.Info(); info != nil {
+			masterName = info.Name
 		}
+	}
 
-		members = append(members, memberInfo{IP: m.IP, HwID: m.DeviceID, Name: name})
+	var masterMember *zoneMemberView
+
+	members := make([]zoneMemberView, 0, len(zone.Members))
+
+	projection, projected := projectZoneInfo(zone, captureDeviceProjectionEntries(app.DeviceSnapshot()))
+	if projected {
+		masterIP = projection.MasterControlID
+		for index := range projection.Members {
+			member := &projection.Members[index]
+			if member.ControlID == projection.MasterControlID {
+				master := *member
+				masterMember = &master
+				masterName = member.Name
+
+				continue
+			}
+
+			members = append(members, *member)
+		}
+	} else {
+		for _, m := range zone.Members {
+			// SoundTouch masters include themselves in their /getZone member list.
+			// Keep the API projection role-based so the master is not also rendered
+			// as a removable member.
+			if m.DeviceID == zone.Master {
+				continue
+			}
+
+			member := zoneMemberView{
+				ControlID:    m.IP,
+				IP:           m.IP,
+				HardwareID:   m.DeviceID,
+				DeviceIDs:    []string{m.DeviceID},
+				Connectivity: webtypes.ConnectivityOffline,
+			}
+			if conn, ok := app.GetDevice(m.IP); ok {
+				if info := conn.Info(); info != nil {
+					member.Name = info.Name
+				}
+
+				status := conn.Status()
+				member.Connectivity = projectedConnectivity(status)
+				member.Available = member.Connectivity != webtypes.ConnectivityOffline
+
+				if status != nil && status.Volume != nil {
+					volume := status.Volume.ActualVolume
+					member.ActualVolume = &volume
+				}
+			}
+
+			members = append(members, member)
+		}
 	}
 
 	isMaster := zone.Master == currentHwID && !zone.IsStandalone()
-	isSlave := false
-
-	for _, m := range zone.Members {
-		if m.DeviceID == currentHwID {
-			isSlave = true
-			break
-		}
-	}
+	isSlave := zone.IsMember(currentHwID)
 
 	w.Header().Set("Content-Type", "application/json")
 
@@ -973,6 +1246,7 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 			"masterIp":     masterIP,
 			"masterHwId":   zone.Master,
 			"masterName":   masterName,
+			"master":       masterMember,
 			"members":      members,
 			"isMaster":     isMaster,
 			"isSlave":      isSlave,
@@ -987,7 +1261,12 @@ func (app *WebApp) HandleGetZone(w http.ResponseWriter, r *http.Request) {
 // becomes the master.
 func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 	masterIP := chi.URLParam(r, "id")
+
 	slaveIP := chi.URLParam(r, "slaveId")
+	if masterIP == slaveIP {
+		app.sendError(w, "A device cannot be added to its own zone", http.StatusBadRequest)
+		return
+	}
 
 	masterConn, ok := app.GetDevice(masterIP)
 	if !ok {
@@ -1003,6 +1282,28 @@ func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 
 	if masterConn.Client == nil || masterConn.DeviceInfo == nil || slaveConn.DeviceInfo == nil {
 		app.sendError(w, "Device not ready", http.StatusInternalServerError)
+		return
+	}
+
+	if masterConn.DeviceInfo.DeviceID == slaveConn.DeviceInfo.DeviceID {
+		app.sendError(w, "A device cannot be added to its own zone", http.StatusBadRequest)
+		return
+	}
+
+	nowPlaying, err := masterConn.Client.GetNowPlaying()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sources, err := masterConn.Client.GetSources()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if !currentSourceAllowsMultiroom(nowPlaying, sources) {
+		app.sendError(w, "Start a multiroom-capable source before grouping speakers", http.StatusConflict)
 		return
 	}
 
@@ -1028,6 +1329,27 @@ func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 	app.sendControlResponse(w, masterConn.Client.SetZone(zoneReq), "Device added to zone")
 }
 
+func currentSourceAllowsMultiroom(nowPlaying *models.NowPlaying, sources *models.Sources) bool {
+	if nowPlaying == nil || sources == nil {
+		return false
+	}
+
+	source := strings.TrimSpace(nowPlaying.Source)
+	if source == "" || source == "STANDBY" || source == "INVALID_SOURCE" {
+		return false
+	}
+
+	for i := range sources.SourceItem {
+		item := &sources.SourceItem[i]
+		if item.Source == source && item.MultiroomAllowed &&
+			(nowPlaying.SourceAccount == "" || item.SourceAccount == nowPlaying.SourceAccount) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // HandleZoneRemove removes a slave from the zone.
 func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 	masterIP := chi.URLParam(r, "id")
@@ -1039,19 +1361,41 @@ func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slaveConn, ok := app.GetDevice(slaveIP)
-	if !ok {
-		app.sendError(w, "Slave device not found", http.StatusNotFound)
-		return
-	}
-
-	if masterConn.Client == nil || masterConn.DeviceInfo == nil || slaveConn.DeviceInfo == nil {
+	if masterConn.Client == nil || masterConn.DeviceInfo == nil {
 		app.sendError(w, "Device not ready", http.StatusInternalServerError)
 		return
 	}
 
 	masterHwID := masterConn.DeviceInfo.DeviceID
-	slaveHwID := slaveConn.DeviceInfo.DeviceID
+
+	slaveHwID := ""
+	if slaveConn, found := app.GetDevice(slaveIP); found && slaveConn.DeviceInfo != nil {
+		slaveHwID = slaveConn.DeviceInfo.DeviceID
+	}
+
+	// A disconnected member can disappear from the registry while the master
+	// still reports it in /getZone. In that case, use only the master's current
+	// topology to recover the hardware ID; never accept an arbitrary target IP.
+	if strings.TrimSpace(slaveHwID) == "" {
+		zone, err := masterConn.Client.GetZone()
+		if err != nil {
+			app.sendError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		for _, member := range zone.Members {
+			if strings.TrimSpace(member.IP) == strings.TrimSpace(slaveIP) &&
+				strings.TrimSpace(member.DeviceID) != strings.TrimSpace(masterHwID) {
+				slaveHwID = member.DeviceID
+				break
+			}
+		}
+
+		if strings.TrimSpace(slaveHwID) == "" {
+			app.sendError(w, "Slave device not found in current zone", http.StatusNotFound)
+			return
+		}
+	}
 
 	// Remove a single member with the dedicated /removeZoneSlave endpoint.
 	// Rebuilding the zone via /setZone with the remaining members does not
@@ -1131,20 +1475,10 @@ func (app *WebApp) HandleZoneLeave(w http.ResponseWriter, r *http.Request) {
 		"Left zone")
 }
 
-// HandleGetZoneCandidates returns every registered physical device, for the
-// "add to zone" picker. Unlike HandleAPIDevices, this deliberately bypasses
-// the stereo-pair projection (deviceViewSnapshot): Zone and Group are
-// separate, unrelated groupings, and a device that's currently hidden as a
-// stereo-pair member (see device_projection.go) must still be an
-// independently addressable zone target, exactly as the backend
-// HandleZoneAdd/HandleZoneRemove already treat it (both look devices up via
-// the raw registry, unaffected by projection).
-//
-// Deliberately does not exclude the {id} device itself: which candidates to
-// exclude (the page's own device, current zone members, ...) is a caller
-// concern, not an inherent property of "what devices exist" -- excluding it
-// here would make this endpoint silently unusable for any future caller
-// that isn't Zone.js's current "add to my own zone" flow.
+// HandleGetZoneCandidates returns every registered physical device for the
+// add-to-zone picker. It deliberately bypasses logical stereo and zone
+// projection because hidden physical members remain addressable mutation
+// targets. Candidate filtering is left to the caller.
 func (app *WebApp) HandleGetZoneCandidates(w http.ResponseWriter, r *http.Request) {
 	deviceID := chi.URLParam(r, "id")
 
@@ -1160,21 +1494,19 @@ func (app *WebApp) HandleGetZoneCandidates(w http.ResponseWriter, r *http.Reques
 	candidates := make(map[string]zoneCandidate)
 
 	for _, entry := range app.DeviceSnapshot() {
-		if entry.Device == nil || entry.Device.DeviceInfo == nil {
+		if entry.Device == nil || entry.Device.Info() == nil {
 			continue
 		}
 
-		candidates[entry.ID] = zoneCandidate{Info: entry.Device.DeviceInfo}
+		candidates[entry.ID] = zoneCandidate{Info: entry.Device.Info()}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 
-	response := webtypes.APIResponse{
+	if err := json.NewEncoder(w).Encode(webtypes.APIResponse{
 		Success: true,
 		Data:    candidates,
-	}
-
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+	}); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
 }

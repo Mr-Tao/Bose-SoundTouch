@@ -57,7 +57,7 @@
 //		log.Fatal(err)
 //	}
 //
-//	err = client.SetBalance(-10)  // Range: -50 (left) to +50 (right)
+//	err = client.SetBalance(-7)   // Conservative fallback range: -7 to +7
 //	if err != nil {
 //		log.Fatal(err)
 //	}
@@ -132,7 +132,7 @@
 //   - Playback Control (Play/Pause/Stop/Next/Previous/Key commands)
 //   - Volume Control (Get/Set/Increment/Decrement)
 //   - Bass Control (-9 to +9 range)
-//   - Balance Control (-50 to +50 range)
+//   - Balance Control (device-advertised range)
 //   - Source Selection (Spotify, Bluetooth, AUX, Radio, etc.)
 //   - Preset Management (Get configured presets)
 //   - Clock/Time Management
@@ -144,6 +144,7 @@ package client
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -680,6 +681,25 @@ func (c *Client) SetBass(level int) error {
 	return c.post("/bass", bassReq)
 }
 
+// SetBassWithCapabilities sets bass after validating the level against the
+// capabilities reported by this device. Callers that cache /bassCapabilities
+// can use this without falling back to the legacy generic model range.
+func (c *Client) SetBassWithCapabilities(level int, capabilities *models.BassCapabilities) error {
+	if err := capabilities.Validate(); err != nil {
+		return fmt.Errorf("invalid bass capabilities: %w", err)
+	}
+
+	if !capabilities.BassAvailable {
+		return fmt.Errorf("bass control is unavailable")
+	}
+
+	if !capabilities.ValidateLevel(level) {
+		return fmt.Errorf("invalid bass level: %d (must be between %d and %d)", level, capabilities.BassMin, capabilities.BassMax)
+	}
+
+	return c.post("/bass", &models.BassRequest{Level: level})
+}
+
 // SetBassSafe sets bass with validation and clamping
 func (c *Client) SetBassSafe(level int) error {
 	clampedLevel := models.ClampBassLevel(level)
@@ -736,11 +756,13 @@ func (c *Client) GetBalance() (*models.Balance, error) {
 
 // SetBalance sets the balance level using the /balance endpoint
 func (c *Client) SetBalance(level int) error {
-	if !models.ValidateBalanceLevel(level) {
-		return fmt.Errorf("invalid balance level: %d (must be between %d and %d)", level, models.BalanceLevelMin, models.BalanceLevelMax)
-	}
+	return c.SetBalanceForRange(level, models.BalanceLevelMin, models.BalanceLevelMax)
+}
 
-	balanceReq, err := models.NewBalanceRequest(level)
+// SetBalanceForRange sets balance after validating against a capability range
+// obtained from the same device.
+func (c *Client) SetBalanceForRange(level, minLevel, maxLevel int) error {
+	balanceReq, err := models.NewBalanceRequestForRange(level, minLevel, maxLevel)
 	if err != nil {
 		return fmt.Errorf("failed to create balance request: %w", err)
 	}
@@ -756,32 +778,34 @@ func (c *Client) SetBalanceSafe(level int) error {
 
 // IncreaseBalance increases balance by the specified amount (with safety limits)
 func (c *Client) IncreaseBalance(amount int) (*models.Balance, error) {
-	currentBalance, err := c.GetBalance()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get current balance: %w", err)
-	}
-
-	newLevel := models.ClampBalanceLevel(currentBalance.GetLevel() + amount)
-
-	err = c.SetBalance(newLevel)
-	if err != nil {
-		return nil, fmt.Errorf("failed to set balance: %w", err)
-	}
-
-	// Return updated balance
-	return c.GetBalance()
+	return c.adjustBalance(amount)
 }
 
 // DecreaseBalance decreases balance by the specified amount (with safety limits)
 func (c *Client) DecreaseBalance(amount int) (*models.Balance, error) {
+	return c.adjustBalance(-amount)
+}
+
+func (c *Client) adjustBalance(delta int) (*models.Balance, error) {
 	currentBalance, err := c.GetBalance()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get current balance: %w", err)
 	}
 
-	newLevel := models.ClampBalanceLevel(currentBalance.GetLevel() - amount)
+	minLevel, maxLevel := models.BalanceLevelMin, models.BalanceLevelMax
 
-	err = c.SetBalance(newLevel)
+	available, advertisedMin, advertisedMax, _, capabilityKnown := currentBalance.Capability()
+	if capabilityKnown {
+		if !available {
+			return nil, fmt.Errorf("failed to set balance: balance is unavailable")
+		}
+
+		minLevel, maxLevel = advertisedMin, advertisedMax
+	}
+
+	newLevel := models.ClampBalanceLevelForRange(currentBalance.GetLevel()+delta, minLevel, maxLevel)
+
+	err = c.SetBalanceForRange(newLevel, minLevel, maxLevel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to set balance: %w", err)
 	}
@@ -1021,6 +1045,164 @@ func (c *Client) SetClockTimeNow() error {
 	return c.SetClockTime(request)
 }
 
+// GetSystemTimeout retrieves the power-saving setting from /systemtimeout.
+func (c *Client) GetSystemTimeout() (*models.SystemTimeout, error) {
+	var setting models.SystemTimeout
+	if err := c.get("/systemtimeout", &setting); err != nil {
+		return nil, fmt.Errorf("failed to get system timeout: %w", err)
+	}
+
+	return &setting, nil
+}
+
+// SetSystemTimeout updates /systemtimeout. HTTP success only confirms that the
+// request was accepted; callers must read the setting back before reporting it.
+func (c *Client) SetSystemTimeout(setting *models.SystemTimeout) error {
+	if err := setting.Validate(); err != nil {
+		return fmt.Errorf("invalid system timeout request: %w", err)
+	}
+
+	if err := c.post("/systemtimeout", setting); err != nil {
+		return fmt.Errorf("failed to set system timeout: %w", err)
+	}
+
+	return nil
+}
+
+// GetRebroadcastLatencyMode retrieves /rebroadcastlatencymode.
+func (c *Client) GetRebroadcastLatencyMode() (*models.RebroadcastLatencyMode, error) {
+	var setting models.RebroadcastLatencyMode
+	if err := c.get("/rebroadcastlatencymode", &setting); err != nil {
+		return nil, fmt.Errorf("failed to get rebroadcast latency mode: %w", err)
+	}
+
+	return &setting, nil
+}
+
+// SetRebroadcastLatencyMode updates /rebroadcastlatencymode. HTTP success only
+// confirms request acceptance; callers must read the setting back.
+func (c *Client) SetRebroadcastLatencyMode(mode models.RebroadcastLatencyModeValue) error {
+	request := &models.RebroadcastLatencyModeRequest{Mode: mode}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid rebroadcast latency mode request: %w", err)
+	}
+
+	if err := c.post("/rebroadcastlatencymode", request); err != nil {
+		return fmt.Errorf("failed to set rebroadcast latency mode: %w", err)
+	}
+
+	return nil
+}
+
+// GetLanguage retrieves the current integer system language from /language.
+// Unknown codes are returned unchanged for compatibility with newer firmware.
+func (c *Client) GetLanguage() (*models.SystemLanguage, error) {
+	var language models.SystemLanguage
+	if err := c.get("/language", &language); err != nil {
+		return nil, fmt.Errorf("failed to get system language: %w", err)
+	}
+
+	return &language, nil
+}
+
+// SetLanguage updates /language. HTTP success only confirms request acceptance;
+// callers must read the language back before reporting the change.
+func (c *Client) SetLanguage(code models.LanguageCode) error {
+	request := &models.SystemLanguage{Code: code}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid system language request: %w", err)
+	}
+
+	if err := c.post("/language", request); err != nil {
+		return fmt.Errorf("failed to set system language: %w", err)
+	}
+
+	return nil
+}
+
+// GetBluetoothInfo retrieves the speaker adapter information from /bluetoothInfo.
+func (c *Client) GetBluetoothInfo() (*models.BluetoothInfo, error) {
+	var info models.BluetoothInfo
+	if err := c.get("/bluetoothInfo", &info); err != nil {
+		return nil, fmt.Errorf("failed to get Bluetooth info: %w", err)
+	}
+
+	return &info, nil
+}
+
+// RenameSource updates the source display name through /nameSource. HTTP
+// success only confirms request acceptance; callers must read sources back.
+func (c *Client) RenameSource(source, sourceAccount, itemName string) error {
+	request := &models.SourceRenameRequest{
+		Source:        source,
+		SourceAccount: sourceAccount,
+		ItemName:      itemName,
+	}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid source rename request: %w", err)
+	}
+
+	if err := c.post("/nameSource", request); err != nil {
+		return fmt.Errorf("failed to rename source: %w", err)
+	}
+
+	return nil
+}
+
+// EnterPairingMode requests the firmware's legacy general pairing mode through
+// its state-changing GET endpoint.
+func (c *Client) EnterPairingMode() error {
+	var response struct {
+		XMLName xml.Name
+	}
+	if err := c.mutatingGet("/enterPairingMode", &response); err != nil {
+		return fmt.Errorf("failed to enter pairing mode: %w", err)
+	}
+
+	return nil
+}
+
+// EnterBluetoothPairing requests Bluetooth discoverable mode through the
+// Bluetooth-specific state-changing GET endpoint. Callers must verify
+// discoverability through a subsequent now-playing read.
+func (c *Client) EnterBluetoothPairing() error {
+	var response struct {
+		XMLName xml.Name
+	}
+	if err := c.mutatingGet("/enterBluetoothPairing", &response); err != nil {
+		return fmt.Errorf("failed to enter Bluetooth pairing mode: %w", err)
+	}
+
+	return nil
+}
+
+// ClearPairedList requests the firmware's legacy general paired-list clearing
+// through its state-changing GET endpoint.
+func (c *Client) ClearPairedList() error {
+	var response struct {
+		XMLName xml.Name
+	}
+	if err := c.mutatingGet("/clearPairedList", &response); err != nil {
+		return fmt.Errorf("failed to clear paired list: %w", err)
+	}
+
+	return nil
+}
+
+// ClearBluetoothPaired requests removal of Bluetooth pairings through the
+// Bluetooth-specific state-changing GET endpoint. The firmware exposes no
+// paired-list readback, so HTTP success alone does not verify physical state.
+func (c *Client) ClearBluetoothPaired() error {
+	var response struct {
+		XMLName xml.Name
+	}
+	if err := c.mutatingGet("/clearBluetoothPaired", &response); err != nil {
+		return fmt.Errorf("failed to clear Bluetooth paired devices: %w", err)
+	}
+
+	return nil
+}
+
 // GetClockDisplay retrieves clock display settings from the /clockDisplay endpoint
 func (c *Client) GetClockDisplay() (*models.ClockDisplay, error) {
 	var clockDisplay models.ClockDisplay
@@ -1087,6 +1269,18 @@ func (c *Client) GetNetworkInfo() (*models.NetworkInformation, error) {
 	return &networkInfo, nil
 }
 
+// GetNetworkStats retrieves firmware network data from the /netStats endpoint.
+func (c *Client) GetNetworkStats() (*models.NetworkStats, error) {
+	var networkStats models.NetworkStats
+
+	err := c.get("/netStats", &networkStats)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get network stats: %w", err)
+	}
+
+	return &networkStats, nil
+}
+
 // Ping checks if the device is reachable by calling /info
 func (c *Client) Ping() error {
 	_, err := c.GetDeviceInfo()
@@ -1105,6 +1299,10 @@ func (c *Client) Host() string {
 
 // get performs a GET request and unmarshals the XML response
 func (c *Client) get(endpoint string, result interface{}) error {
+	return c.getWithHTTPClient(c.httpClient, endpoint, result)
+}
+
+func (c *Client) getWithHTTPClient(httpClient *http.Client, endpoint string, result interface{}) error {
 	url := c.baseURL + endpoint
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -1115,7 +1313,7 @@ func (c *Client) get(endpoint string, result interface{}) error {
 	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "application/xml")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to execute request: %w", err)
 	}
@@ -1149,6 +1347,37 @@ func (c *Client) get(endpoint string, result interface{}) error {
 	}
 
 	return nil
+}
+
+// mutatingGet performs a firmware-required state-changing GET exactly once at
+// the HTTP transport layer. A fresh connection prevents net/http from
+// automatically replaying the request after an ambiguous failure on a reused
+// connection.
+func (c *Client) mutatingGet(endpoint string, result interface{}) error {
+	baseTransport := c.httpClient.Transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+
+	transport, ok := baseTransport.(*http.Transport)
+	if !ok {
+		return errors.New("state-changing GET requires a cloneable HTTP transport")
+	}
+
+	oneShotTransport := transport.Clone()
+
+	oneShotTransport.DisableKeepAlives = true
+	defer oneShotTransport.CloseIdleConnections()
+
+	oneShotClient := &http.Client{
+		Transport: oneShotTransport,
+		Timeout:   c.httpClient.Timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	return c.getWithHTTPClient(oneShotClient, endpoint, result)
 }
 
 // post performs a POST request with XML body
@@ -1448,10 +1677,11 @@ func (c *Client) GetGroup() (*models.Group, error) {
 	return &g, err
 }
 
-// AddGroup creates a new stereo pair on the device addressed by this client,
-// which becomes the master. The supplied group must contain both LEFT and
-// RIGHT roles; the device assigns the group ID and echoes the full state
-// in the response.
+// AddGroup applies one side of stereo-pair creation to the addressed device.
+// The supplied group must contain both LEFT and RIGHT roles. A master-bound
+// request omits SenderIPAddress; a slave-bound request sets it to the master's
+// IP address. Firmware may acknowledge the request without returning the
+// assigned group ID, so callers must verify the resulting state with GetGroup.
 func (c *Client) AddGroup(group *models.Group) (*models.Group, error) {
 	var result models.Group
 	if err := c.postWithResponse("/addGroup", group, &result); err != nil {
@@ -1481,7 +1711,7 @@ func (c *Client) UpdateGroup(group *models.Group) (*models.Group, error) {
 func (c *Client) RemoveGroup() error {
 	var g models.Group
 
-	return c.get("/removeGroup", &g)
+	return c.mutatingGet("/removeGroup", &g)
 }
 
 // SetName sets the device name
@@ -1494,13 +1724,68 @@ func (c *Client) SetName(name string) error {
 	return c.post("/name", nameRequest)
 }
 
-// GetBassCapabilities retrieves the bass capabilities for the device
+type bassCapabilitiesWire struct {
+	XMLName       xml.Name `xml:"bassCapabilities"`
+	DeviceID      string   `xml:"deviceID,attr"`
+	BassAvailable *bool    `xml:"bassAvailable"`
+	BassMin       *int     `xml:"bassMin"`
+	BassMax       *int     `xml:"bassMax"`
+	BassDefault   *int     `xml:"bassDefault"`
+}
+
+func (wire *bassCapabilitiesWire) value() (*models.BassCapabilities, error) {
+	missing := make([]string, 0, 4)
+
+	if wire.BassAvailable == nil {
+		missing = append(missing, "bassAvailable")
+	}
+
+	if wire.BassMin == nil {
+		missing = append(missing, "bassMin")
+	}
+
+	if wire.BassMax == nil {
+		missing = append(missing, "bassMax")
+	}
+
+	if wire.BassDefault == nil {
+		missing = append(missing, "bassDefault")
+	}
+
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("missing fields: %s", strings.Join(missing, ", "))
+	}
+
+	capabilities := &models.BassCapabilities{
+		XMLName:       wire.XMLName,
+		DeviceID:      wire.DeviceID,
+		BassAvailable: *wire.BassAvailable,
+		BassMin:       *wire.BassMin,
+		BassMax:       *wire.BassMax,
+		BassDefault:   *wire.BassDefault,
+	}
+	if err := capabilities.Validate(); err != nil {
+		return nil, err
+	}
+
+	return capabilities, nil
+}
+
+// GetBassCapabilities retrieves a structurally complete, internally
+// consistent bass capability response from the device.
 func (c *Client) GetBassCapabilities() (*models.BassCapabilities, error) {
-	var bassCapabilities models.BassCapabilities
+	var wire bassCapabilitiesWire
 
-	err := c.get("/bassCapabilities", &bassCapabilities)
+	if err := c.get("/bassCapabilities", &wire); err != nil {
+		return nil, err
+	}
 
-	return &bassCapabilities, err
+	capabilities, err := wire.value()
+	if err != nil {
+		return nil, fmt.Errorf("invalid bass capabilities response: %w", err)
+	}
+
+	return capabilities, nil
 }
 
 // GetTrackInfo retrieves track information (duplicate of GetNowPlaying per official API)

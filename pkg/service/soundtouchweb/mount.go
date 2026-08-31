@@ -38,6 +38,7 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 		r.Get("/ws", app.HandleWebSocket)
 
 		r.Post("/discover", func(w http.ResponseWriter, r *http.Request) {
+			generation := app.BeginDiscovery()
 			app.HandleAPIDiscover(w, r)
 
 			// Trigger discovery
@@ -46,11 +47,16 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 
-				app.BroadcastDiscoveryStatus("starting", app.DeviceCount())
+				app.BroadcastDiscoveryStatusFor(generation, "starting", app.DeviceCount())
 
-				app.DiscoverDevices(ctx, discoveryService)
+				err := app.DiscoverDevicesWithResult(ctx, discoveryService)
 
-				app.BroadcastDiscoveryStatus("completed", app.DeviceCount())
+				status := "completed"
+				if err != nil {
+					status = "failed"
+				}
+
+				app.BroadcastDiscoveryStatusFor(generation, status, app.DeviceCount())
 				app.BroadcastDeviceList()
 			}()
 		})
@@ -64,6 +70,17 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/", app.HandleAPIDevice)
 				r.Delete("/", app.HandleDeleteDevice)
+				r.Route("/settings", func(r chi.Router) {
+					r.Get("/", app.HandleGetDeviceSettings)
+					r.Patch("/clock-display", app.HandleSetClockDisplay)
+					r.Post("/clock-time", app.HandleSetClockTime)
+					r.Patch("/system-timeout", app.HandleSetSystemTimeout)
+					r.Patch("/language", app.HandleSetSystemLanguage)
+					r.Patch("/sync", app.HandleSetRebroadcastLatencyMode)
+					r.Post("/bluetooth/pair", app.HandleEnterBluetoothPairing)
+					r.Delete("/bluetooth/pairings", app.HandleClearBluetoothPairings)
+					r.Patch("/source-name", app.HandleSetSourceName)
+				})
 				r.Post("/key/{key}", app.HandleDeviceKey)
 				r.Post("/volume/{volume}", app.HandleDirectVolumeControl)
 				r.Post("/power", app.HandleDevicePower)
@@ -72,8 +89,8 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 				// Low-level "play this ContentItem" primitive (not a provider).
 				r.Post("/play", app.HandleDevicePlay)
 				// Generic key / preset / source / bass actions. Source selection is
-				// canonically POSTed as JSON; its GET form remains temporarily for
-				// compatibility and marks every response as deprecated.
+				// canonically POSTed as JSON; GET remains a deprecated compatibility
+				// route.
 				r.Get("/action/{action}", app.HandleAPIControl)
 				r.Post("/action/{action}", app.HandleAPIControl)
 				r.Get("/ws", app.HandleDeviceWebSocket)
@@ -89,10 +106,20 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 				r.Route("/zone", func(r chi.Router) {
 					r.Get("/", app.HandleGetZone)
 					r.Get("/candidates", app.HandleGetZoneCandidates)
+					r.Post("/volume/{volume}", app.HandleZoneVolume)
+					r.Post("/member/{memberId}/volume/{volume}", app.HandleZoneMemberVolume)
 					r.Post("/add/{slaveId}", app.HandleZoneAdd)
 					r.Post("/remove/{slaveId}", app.HandleZoneRemove)
 					r.Post("/dissolve", app.HandleZoneDissolve)
 					r.Post("/leave", app.HandleZoneLeave)
+				})
+
+				r.Route("/stereo-pair", func(r chi.Router) {
+					r.Get("/", app.HandleGetStereoPair)
+					r.Post("/", app.HandleCreateStereoPair)
+					r.Patch("/", app.HandleRenameStereoPair)
+					r.Delete("/", app.HandleDissolveStereoPair)
+					r.Post("/balance/{level}", app.HandleStereoBalance)
 				})
 
 				// Play a result from a content provider on this device.

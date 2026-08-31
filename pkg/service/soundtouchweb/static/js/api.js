@@ -20,12 +20,45 @@ async function checkedReq(url, opts = {}) {
 }
 
 export const api = {
-    devices: () => req('/api/control/devices'),
+    devices: () => req('/api/control/devices', { cache: 'no-store' }),
     device: (id) => req(`/api/control/devices/${id}`),
     removeDevice: (id) => req(`/api/control/devices/${id}`, { method: 'DELETE' }),
+    settings: (id) => req(`/api/control/devices/${id}/settings/`),
+    setClockDisplay: (id, body) => req(`/api/control/devices/${id}/settings/clock-display`, {
+        method: 'PATCH',
+        headers: JSON_HEADERS,
+        body: JSON.stringify(body),
+    }),
+    setClockTime: (id) => req(`/api/control/devices/${id}/settings/clock-time`, { method: 'POST' }),
+    setSystemTimeout: (id, enabled) => req(`/api/control/devices/${id}/settings/system-timeout`, {
+        method: 'PATCH',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ enabled }),
+    }),
+    setLanguage: (id, code) => req(`/api/control/devices/${id}/settings/language`, {
+        method: 'PATCH',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ code }),
+    }),
+    setSync: (id, mode) => req(`/api/control/devices/${id}/settings/sync`, {
+        method: 'PATCH',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ mode }),
+    }),
+    bluetoothPair: (id) => req(`/api/control/devices/${id}/settings/bluetooth/pair`, { method: 'POST' }),
+    clearBluetoothPairings: (id) => req(`/api/control/devices/${id}/settings/bluetooth/pairings`, { method: 'DELETE' }),
+    setSourceName: (id, source, sourceAccount, name) => req(`/api/control/devices/${id}/settings/source-name`, {
+        method: 'PATCH',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ source, sourceAccount, name }),
+    }),
     discover: () => req('/api/control/discover', { method: 'POST' }),
     key: (id, key) => req(`/api/control/devices/${id}/key/${key}`, { method: 'POST' }),
     volume: (id, level) => req(`/api/control/devices/${id}/volume/${level}`, { method: 'POST' }),
+    zoneVolume: (id, level) => req(`/api/control/devices/${id}/zone/volume/${level}`, { method: 'POST' }),
+    zoneMemberVolume: (zoneMasterId, memberId, level) =>
+        req(`/api/control/devices/${zoneMasterId}/zone/member/${memberId}/volume/${level}`, { method: 'POST' }),
+    stereoBalance: (id, level) => req(`/api/control/devices/${id}/stereo-pair/balance/${level}`, { method: 'POST' }),
     bass: (id, level) => req(`/api/control/devices/${id}/action/bass`, {
         method: 'POST',
         headers: JSON_HEADERS,
@@ -33,12 +66,28 @@ export const api = {
     }),
     power: (id) => req(`/api/control/devices/${id}/power`, { method: 'POST' }),
     recents: (id) => req(`/api/control/devices/${id}/recents`),
-    zone: (id) => req(`/api/control/devices/${id}/zone`),
+    zone: (id) => req(`/api/control/devices/${id}/zone`, { cache: 'no-store' }),
     zoneCandidates: (id) => req(`/api/control/devices/${id}/zone/candidates`),
     zoneAdd: (masterId, slaveId) => req(`/api/control/devices/${masterId}/zone/add/${slaveId}`, { method: 'POST' }),
     zoneRemove: (masterId, slaveId) => req(`/api/control/devices/${masterId}/zone/remove/${slaveId}`, { method: 'POST' }),
     zoneDissolve: (id) => req(`/api/control/devices/${id}/zone/dissolve`, { method: 'POST' }),
     zoneLeave: (id) => req(`/api/control/devices/${id}/zone/leave`, { method: 'POST' }),
+    stereoPair: (id) => req(`/api/control/devices/${id}/stereo-pair/`),
+    stereoPairCreate: (leftId, rightId, name) => req(`/api/control/devices/${leftId}/stereo-pair/`, {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ rightId, name }),
+    }),
+    stereoPairRename: (id, groupId, name) => req(`/api/control/devices/${id}/stereo-pair/`, {
+        method: 'PATCH',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ groupId, name }),
+    }),
+    stereoPairDissolve: (id, groupId, group) => req(`/api/control/devices/${id}/stereo-pair/`, {
+        method: 'DELETE',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ groupId, group }),
+    }),
     play: (id, item) => req(`/api/control/devices/${id}/play`, {
         method: 'POST',
         headers: JSON_HEADERS,

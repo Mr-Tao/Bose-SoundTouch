@@ -8,29 +8,53 @@ import (
 
 // Balance represents the response from /balance endpoint
 type Balance struct {
-	XMLName       xml.Name `xml:"balance"`
-	DeviceID      string   `xml:"deviceID,attr"`
-	TargetBalance int      `xml:"targetbalance"`
-	ActualBalance int      `xml:"actualbalance"`
+	XMLName          xml.Name `xml:"balance" json:"-"`
+	DeviceID         string   `xml:"deviceID,attr" json:"deviceID,omitempty"`
+	BalanceAvailable bool     `xml:"-" json:"balanceAvailable"`
+	BalanceMin       int      `xml:"-" json:"balanceMin"`
+	BalanceMax       int      `xml:"-" json:"balanceMax"`
+	BalanceDefault   int      `xml:"-" json:"balanceDefault"`
+	TargetBalance    int      `xml:"-" json:"targetBalance"`
+	ActualBalance    int      `xml:"-" json:"actualBalance"`
+	CapabilityKnown  bool     `xml:"-" json:"capabilityKnown"`
+}
+
+type balanceXML struct {
+	DeviceID            string `xml:"deviceID,attr"`
+	BalanceAvailable    *bool  `xml:"balanceAvailable,omitempty"`
+	BalanceMin          *int   `xml:"balanceMin,omitempty"`
+	BalanceMax          *int   `xml:"balanceMax,omitempty"`
+	BalanceDefault      *int   `xml:"balanceDefault,omitempty"`
+	TargetBalance       *int   `xml:"targetBalance,omitempty"`
+	ActualBalance       *int   `xml:"actualBalance,omitempty"`
+	LegacyTargetBalance *int   `xml:"targetbalance,omitempty"`
+	LegacyActualBalance *int   `xml:"actualbalance,omitempty"`
 }
 
 // BalanceRequest represents the request for POST /balance endpoint
 type BalanceRequest struct {
 	XMLName xml.Name `xml:"balance"`
-	Level   int      `xml:",chardata"`
+	Level   int      `xml:"targetBalance"`
 }
 
-// Balance level constants
+// Balance level constants are the conservative fallback used by callers that
+// do not yet have a confirmed /balance capability response.
 const (
-	BalanceLevelMin     = -50
-	BalanceLevelMax     = 50
+	BalanceLevelMin     = -7
+	BalanceLevelMax     = 7
 	BalanceLevelDefault = 0
 )
 
 // NewBalanceRequest creates a new balance request with validation
 func NewBalanceRequest(level int) (*BalanceRequest, error) {
-	if !ValidateBalanceLevel(level) {
-		return nil, fmt.Errorf("invalid balance level: %d (must be between %d and %d)", level, BalanceLevelMin, BalanceLevelMax)
+	return NewBalanceRequestForRange(level, BalanceLevelMin, BalanceLevelMax)
+}
+
+// NewBalanceRequestForRange creates a balance request validated against a
+// capability range confirmed by the caller.
+func NewBalanceRequestForRange(level, minLevel, maxLevel int) (*BalanceRequest, error) {
+	if !ValidateBalanceLevelForRange(level, minLevel, maxLevel) {
+		return nil, fmt.Errorf("invalid balance level: %d (must be between %d and %d)", level, minLevel, maxLevel)
 	}
 
 	return &BalanceRequest{
@@ -40,20 +64,54 @@ func NewBalanceRequest(level int) (*BalanceRequest, error) {
 
 // ValidateBalanceLevel validates that a balance level is within the allowed range
 func ValidateBalanceLevel(level int) bool {
-	return level >= BalanceLevelMin && level <= BalanceLevelMax
+	return ValidateBalanceLevelForRange(level, BalanceLevelMin, BalanceLevelMax)
+}
+
+// ValidateBalanceLevelForRange validates a balance level against an explicit
+// device-advertised range.
+func ValidateBalanceLevelForRange(level, minLevel, maxLevel int) bool {
+	return minLevel <= maxLevel && level >= minLevel && level <= maxLevel
 }
 
 // ClampBalanceLevel clamps a balance level to the valid range
 func ClampBalanceLevel(level int) int {
-	if level < BalanceLevelMin {
-		return BalanceLevelMin
+	return ClampBalanceLevelForRange(level, BalanceLevelMin, BalanceLevelMax)
+}
+
+// ClampBalanceLevelForRange clamps a balance level to an explicit range.
+func ClampBalanceLevelForRange(level, minLevel, maxLevel int) int {
+	if minLevel > maxLevel {
+		return level
 	}
 
-	if level > BalanceLevelMax {
-		return BalanceLevelMax
+	if level < minLevel {
+		return minLevel
+	}
+
+	if level > maxLevel {
+		return maxLevel
 	}
 
 	return level
+}
+
+// Capability returns the latest advertised balance capability when all
+// capability fields are present and internally consistent.
+func (b *Balance) Capability() (available bool, minLevel, maxLevel, defaultLevel int, ok bool) {
+	if b == nil || !b.CapabilityKnown || b.BalanceMin > b.BalanceMax ||
+		!ValidateBalanceLevelForRange(b.BalanceDefault, b.BalanceMin, b.BalanceMax) {
+		return false, 0, 0, 0, false
+	}
+
+	return b.BalanceAvailable, b.BalanceMin, b.BalanceMax, b.BalanceDefault, true
+}
+
+// ValidateRequestedLevel reports whether the device currently advertises an
+// available capability whose range includes level.
+func (b *Balance) ValidateRequestedLevel(level int) bool {
+	available, minLevel, maxLevel, _, ok := b.Capability()
+
+	return ok && available && ValidateBalanceLevelForRange(level, minLevel, maxLevel)
 }
 
 // GetLevel returns the target balance level
@@ -108,23 +166,74 @@ func (b *Balance) String() string {
 	return fmt.Sprintf("Balance: %d (%s)", b.GetLevel(), GetBalanceLevelName(b.GetLevel()))
 }
 
-// UnmarshalXML implements custom XML unmarshaling with validation
+// UnmarshalXML accepts the camel-case fields emitted by current SoundTouch
+// firmware as well as the legacy lower-case target/actual field spelling.
 func (b *Balance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	// Use a temporary struct to avoid infinite recursion
-	type TempBalance Balance
-
-	temp := (*TempBalance)(b)
-
-	if err := d.DecodeElement(temp, &start); err != nil {
+	var wire balanceXML
+	if err := d.DecodeElement(&wire, &start); err != nil {
 		return err
 	}
 
-	// Validate balance levels are within acceptable range
-	if !ValidateBalanceLevel(b.TargetBalance) {
+	*b = Balance{XMLName: start.Name, DeviceID: wire.DeviceID}
+
+	target := wire.TargetBalance
+	if target == nil {
+		target = wire.LegacyTargetBalance
+	}
+
+	actual := wire.ActualBalance
+	if actual == nil {
+		actual = wire.LegacyActualBalance
+	}
+
+	if target != nil {
+		b.TargetBalance = *target
+	}
+
+	if actual != nil {
+		b.ActualBalance = *actual
+	}
+
+	capabilityFields := 0
+
+	for _, present := range []bool{
+		wire.BalanceAvailable != nil,
+		wire.BalanceMin != nil,
+		wire.BalanceMax != nil,
+		wire.BalanceDefault != nil,
+	} {
+		if present {
+			capabilityFields++
+		}
+	}
+
+	if capabilityFields == 0 {
+		return nil
+	}
+
+	if capabilityFields != 4 {
+		return fmt.Errorf("incomplete balance capability response")
+	}
+
+	b.BalanceAvailable = *wire.BalanceAvailable
+	b.BalanceMin = *wire.BalanceMin
+	b.BalanceMax = *wire.BalanceMax
+	b.BalanceDefault = *wire.BalanceDefault
+
+	b.CapabilityKnown = true
+	if _, _, _, _, ok := b.Capability(); !ok {
+		return fmt.Errorf("invalid balance capability range %d..%d with default %d", b.BalanceMin, b.BalanceMax, b.BalanceDefault)
+	}
+
+	if target == nil || actual == nil {
+		return fmt.Errorf("incomplete balance readback response")
+	}
+
+	if !ValidateBalanceLevelForRange(b.TargetBalance, b.BalanceMin, b.BalanceMax) {
 		return fmt.Errorf("invalid target balance level: %d", b.TargetBalance)
 	}
 
-	if !ValidateBalanceLevel(b.ActualBalance) {
+	if !ValidateBalanceLevelForRange(b.ActualBalance, b.BalanceMin, b.BalanceMax) {
 		return fmt.Errorf("invalid actual balance level: %d", b.ActualBalance)
 	}
 
@@ -133,11 +242,32 @@ func (b *Balance) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 
 // MarshalXML implements custom XML marshaling
 func (b *Balance) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
-	type TempBalance Balance
+	if start.Name.Local == "" {
+		start.Name.Local = "balance"
+	}
 
-	temp := (*TempBalance)(b)
+	if b.CapabilityKnown {
+		if _, _, _, _, ok := b.Capability(); !ok {
+			return fmt.Errorf("invalid balance capability range %d..%d with default %d", b.BalanceMin, b.BalanceMax, b.BalanceDefault)
+		}
+	}
 
-	return e.EncodeElement(temp, start)
+	target := b.TargetBalance
+	actual := b.ActualBalance
+
+	wire := balanceXML{
+		DeviceID:      b.DeviceID,
+		TargetBalance: &target,
+		ActualBalance: &actual,
+	}
+	if b.CapabilityKnown {
+		wire.BalanceAvailable = &b.BalanceAvailable
+		wire.BalanceMin = &b.BalanceMin
+		wire.BalanceMax = &b.BalanceMax
+		wire.BalanceDefault = &b.BalanceDefault
+	}
+
+	return e.EncodeElement(wire, start)
 }
 
 // IsLeftBalance returns true if balance favors left channel (negative level)

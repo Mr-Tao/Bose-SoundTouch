@@ -1,74 +1,230 @@
-import { h } from 'preact';
-import { useState } from 'preact/hooks';
-import htm from 'htm';
+import { h, htm, useEffect, useRef, useState } from '../dependencies.js';
+import { api } from '../api.js';
+import { connectivityLabel, connectivityState } from '../devicePresentation.mjs';
+import { sortDeviceEntries } from '../deviceListPresentation.mjs';
+import { createLatestWinsScheduler, shouldSurfaceLatestFinal } from '../latestWinsScheduler.mjs';
+import {
+    clampVolume,
+    maxReadbackActual,
+    partialFailureMessage,
+} from '../zoneVolumeResult.mjs';
+import { zoneCardPresentation } from '../zonePresentation.mjs';
 
 const html = htm.bind(h);
 
 const SORT_LS_KEY = 'aftertouch_device_sort';
 
-function sortEntries(entries, mode) {
-    const copy = [...entries];
-    if (mode === 'name') {
-        // Sort by the speaker's display name, falling back to the map key (its IP)
-        // when a device has no name yet.
-        copy.sort(([idA, a], [idB, b]) =>
-            (a?.info?.name || idA).localeCompare(b?.info?.name || idB, undefined, { sensitivity: 'base' }));
-    } else {
-        // Default: by IP (the map key), ordered numerically so .2 precedes .10.
-        copy.sort(([idA], [idB]) =>
-            idA.localeCompare(idB, undefined, { numeric: true, sensitivity: 'base' }));
-    }
-    return copy;
+function initialSortMode() {
+    const stored = localStorage.getItem(SORT_LS_KEY);
+    return stored === 'ip' || stored === 'name' ? stored : 'name';
 }
 
-function DeviceCard({ id, device, onSelect, onRemove }) {
+function formatIPAddress(address) {
+    const separator = address.lastIndexOf('.');
+    if (separator === -1) {
+        return html`<span class="device-ip-last">${address}</span>`;
+    }
+
+    return html`
+        <span class="device-ip-prefix">${address.slice(0, separator + 1)}</span>
+        <span class="device-ip-last">${address.slice(separator + 1)}</span>
+    `;
+}
+
+function cardDetails(id, device, showIP, nameID) {
     const { info, status } = device;
     const stereoPair = device.stereoPair;
     const np = status?.nowPlaying;
     const isPlaying = np?.PlayStatus === 'PLAY_STATE';
     const isStandby = !np || np.Source === 'STANDBY';
+    const connectivity = connectivityState(device);
+    const statusLabel = connectivityLabel(device);
+    const showTechnicalDetails = info?.type || stereoPair || (showIP && info?.ip_address);
 
     return html`
-        <div class="device-card" onClick=${() => onSelect(id)}>
-            <div class="device-header">
-                <span class="device-name" title=${info?.name || id}>${info?.name || id}</span>
-                <span class="device-header-right">
-                    <span class="device-indicator ${status?.isConnected ? 'online' : 'offline'}"></span>
-                    ${!stereoPair ? html`<button class="device-remove" title="Remove this device"
-                            aria-label="Remove this device"
-                            onClick=${(e) => { e.stopPropagation(); onRemove(id); }}>✕</button>` : null}
-                </span>
+        <div class="device-header">
+            <span class="device-name" id=${nameID} title=${info?.name || id}>${info?.name || id}</span>
+            <span class="device-indicator ${connectivity}" role="status" title=${statusLabel}
+                  aria-label=${statusLabel}></span>
+        </div>
+        ${!isStandby ? html`
+            <div class="now-playing-mini"
+                 title=${[np.Track || np.StationName || np.Source, np.Artist].filter(Boolean).join(' - ')}>
+                <span class="play-status">${isPlaying ? '▶' : '⏸'}</span>
+                <span class="track-mini">${np.Track || np.StationName || np.Source}</span>
+                ${np.Artist ? html`<span class="artist-mini"> — ${np.Artist}</span>` : null}
             </div>
+        ` : null}
+        ${isStandby ? html`<div class="standby-label">Standby</div>` : null}
+        ${showTechnicalDetails ? html`
             <div class="device-type">
                 ${info?.type || ''}
-                ${info?.ip_address ? html`<span class="device-ip">(${info.ip_address})</span>` : null}
+                ${showIP && info?.ip_address ? html`
+                    <span class="device-ip" title=${info.ip_address}>${formatIPAddress(info.ip_address)}</span>
+                ` : null}
                 ${stereoPair ? html`
                     <span class="stereo-pair-state ${stereoPair.degraded ? 'degraded' : ''}">
                         Stereo pair ${stereoPair.availableMemberCount}/${stereoPair.memberCount}
                     </span>
                 ` : null}
             </div>
-            ${!isStandby ? html`
-                <div class="now-playing-mini" title=${[np.Track || np.StationName || np.Source, np.Artist].filter(Boolean).join(' - ')}>
-                    <span class="play-status">${isPlaying ? '▶' : '⏸'}</span>
-                    <span class="track-mini">${np.Track || np.StationName || np.Source}</span>
-                    ${np.Artist ? html`<span class="artist-mini"> — ${np.Artist}</span>` : null}
-                </div>
-            ` : null}
-            ${isStandby ? html`<div class="standby-label">Standby</div>` : null}
-        </div>
+        ` : null}
     `;
 }
 
-export function DeviceList({ devices, isDiscovering, onSelect, onDiscover, onRemove }) {
-    const [sortMode, setSortMode] = useState(() => localStorage.getItem(SORT_LS_KEY) || 'ip');
+function ZoneDeviceCard({ id, device, onSelect, showIP }) {
+    const zone = device.zone;
+    const controlID = zone.masterControlId || id;
+    const hasProjectedVolume = Number.isFinite(zone.volume);
+    const projectedVolume = clampVolume(zone.volume);
+    const projectedVolumeRef = useRef(projectedVolume);
+    const interactionActiveRef = useRef(false);
+    const interactionGenerationRef = useRef(0);
+    const interactionDirtyRef = useRef(false);
+    const acceptedSequenceRef = useRef(0);
+    const schedulerRef = useRef(null);
+    const [localVolume, setLocalVolume] = useState(projectedVolume);
+    const [isBusy, setIsBusy] = useState(false);
+    const [failure, setFailure] = useState('');
+    const nameID = `zone-name-${controlID.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+
+    projectedVolumeRef.current = projectedVolume;
+
+    if (schedulerRef.current === null) {
+        schedulerRef.current = createLatestWinsScheduler({
+            send: level => api.zoneVolume(controlID, level),
+            onResult(response, metadata) {
+                if (!metadata.isLatest) return;
+
+                const data = response?.data;
+                if (!response?.success || data?.requested !== metadata.value) {
+                    if (shouldSurfaceLatestFinal(metadata)) {
+                        setFailure(response?.error || 'Group volume update failed.');
+                    }
+                    return;
+                }
+
+                const confirmed = maxReadbackActual(data);
+                if (confirmed !== null) {
+                    acceptedSequenceRef.current = metadata.sequence;
+                    setLocalVolume(confirmed);
+                }
+                if (shouldSurfaceLatestFinal(metadata)) {
+                    setFailure(partialFailureMessage(data));
+                }
+            },
+            onError(_error, metadata) {
+                if (shouldSurfaceLatestFinal(metadata)) {
+                    setFailure('Group volume update failed.');
+                }
+            },
+            onStateChange(next) {
+                setIsBusy(next.active);
+                if (!next.active && !interactionActiveRef.current &&
+                    acceptedSequenceRef.current !== next.latestSequence) {
+                    setLocalVolume(projectedVolumeRef.current);
+                }
+            },
+        });
+    }
+
+    useEffect(() => () => schedulerRef.current.dispose(), []);
+    useEffect(() => {
+        if (!interactionActiveRef.current && !schedulerRef.current.isActive()) {
+            setLocalVolume(projectedVolume);
+        }
+    }, [projectedVolume]);
+
+    function beginVolumeInteraction() {
+        if (interactionActiveRef.current) return;
+
+        interactionGenerationRef.current += 1;
+        interactionActiveRef.current = true;
+        interactionDirtyRef.current = false;
+    }
+
+    function queueVolume(event, force) {
+        const level = clampVolume(parseInt(event.currentTarget.value, 10));
+        if (!force) {
+            beginVolumeInteraction();
+            interactionDirtyRef.current = true;
+        }
+        setLocalVolume(level);
+        setFailure('');
+        schedulerRef.current.queue(level, {
+            force,
+            interactionGeneration: interactionGenerationRef.current,
+        });
+    }
+
+    function finishVolume(event) {
+        if (!interactionDirtyRef.current) {
+            interactionActiveRef.current = false;
+            return;
+        }
+        interactionDirtyRef.current = false;
+        interactionActiveRef.current = false;
+        queueVolume(event, true);
+    }
+
+    const card = zoneCardPresentation(zone);
+
+    return html`
+        <section class="device-card zone-card ${zone.degraded ? 'degraded' : ''}"
+                 aria-labelledby=${nameID} aria-busy=${isBusy ? 'true' : 'false'}>
+            <button type="button" class="zone-card-open" onClick=${() => onSelect(controlID)}>
+                ${cardDetails(id, device, showIP, nameID)}
+                <div class="zone-card-summary">
+                    <span class="zone-card-badge" title=${card.availabilityTitle}>${card.groupLabel}</span>
+                    ${card.availabilityLabel ? html`
+                        <span class="zone-card-availability degraded" title=${card.availabilityTitle}>
+                            ${card.availabilityLabel}
+                        </span>
+                    ` : null}
+                </div>
+            </button>
+            <div class="zone-volume-row">
+                <label class="zone-volume-label" for=${`${nameID}-volume`}>Group volume</label>
+                <input id=${`${nameID}-volume`} type="range" class="zone-volume-slider"
+                    min="0" max="100" value=${localVolume}
+                    disabled=${zone.availableMemberCount === 0 || !hasProjectedVolume}
+                    onPointerDown=${() => {
+                        beginVolumeInteraction();
+                    }}
+                    onInput=${event => queueVolume(event, false)}
+                    onPointerUp=${finishVolume}
+                    onPointerCancel=${finishVolume}
+                    onChange=${finishVolume}
+                    onBlur=${finishVolume} />
+                <output class="zone-volume-value" for=${`${nameID}-volume`}>
+                    ${hasProjectedVolume ? localVolume : '–'}
+                </output>
+            </div>
+            ${failure ? html`<div class="zone-volume-failure" role="status">${failure}</div>` : null}
+        </section>
+    `;
+}
+
+function DeviceCard({ id, device, onSelect, showIP }) {
+    if (device.zone) {
+        return html`<${ZoneDeviceCard} id=${id} device=${device} onSelect=${onSelect} showIP=${showIP} />`;
+    }
+    return html`
+        <button type="button" class="device-card" onClick=${() => onSelect(id)}>
+            ${cardDetails(id, device, showIP)}
+        </button>
+    `;
+}
+
+export function DeviceList({ devices, isDiscovering, onSelect, onDiscover }) {
+    const [sortMode, setSortMode] = useState(initialSortMode);
 
     function changeSort(mode) {
         setSortMode(mode);
         localStorage.setItem(SORT_LS_KEY, mode);
     }
 
-    const entries = sortEntries(Object.entries(devices), sortMode);
+    const entries = sortDeviceEntries(Object.entries(devices), sortMode);
 
     return html`
         <div class="device-list-container">
@@ -91,13 +247,10 @@ export function DeviceList({ devices, isDiscovering, onSelect, onDiscover, onRem
                 </div>
                 <div class="device-grid" key="grid">
                     ${entries.map(([id, device]) => html`
-                        <${DeviceCard} key=${id} id=${id} device=${device} onSelect=${onSelect} onRemove=${onRemove} />
+                        <${DeviceCard} key=${id} id=${id} device=${device} onSelect=${onSelect}
+                            showIP=${sortMode === 'ip'} />
                     `)}
-                </div>
-                <p class="device-list-note" key="note">
-                    Removing a device clears it here. One that is still online may
-                    reappear after the next discovery scan.
-                </p>`
+                </div>`
         }
         </div>
     `;

@@ -214,6 +214,49 @@ func TestBassCapabilities_UtilityMethods(t *testing.T) {
 	})
 }
 
+func TestBassCapabilities_Validate(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		capabilities *BassCapabilities
+		wantError    bool
+	}{
+		{
+			name: "available valid range",
+			capabilities: &BassCapabilities{
+				BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0,
+			},
+		},
+		{
+			name: "explicit unavailable complete range",
+			capabilities: &BassCapabilities{
+				BassAvailable: false, BassMin: 0, BassMax: 0, BassDefault: 0,
+			},
+		},
+		{
+			name: "minimum exceeds maximum",
+			capabilities: &BassCapabilities{
+				BassAvailable: true, BassMin: 1, BassMax: 0, BassDefault: 0,
+			},
+			wantError: true,
+		},
+		{
+			name: "default outside range",
+			capabilities: &BassCapabilities{
+				BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 1,
+			},
+			wantError: true,
+		},
+		{name: "nil", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.capabilities.Validate()
+			if (err != nil) != test.wantError {
+				t.Fatalf("Validate() error = %v, wantError %v", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestBassMarshalXML(t *testing.T) {
 	bass := Bass{
 		DeviceID:   "1234567890AB",

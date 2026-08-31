@@ -102,6 +102,22 @@ func TestClassifySource(t *testing.T) {
 	}
 }
 
+func TestResolvedDeviceIPAddressSeparatesHostnameFromReportedAddress(t *testing.T) {
+	info := &models.DeviceInfo{NetworkInfo: []models.NetworkInfo{
+		{Type: "SCM", IPAddress: "192.0.2.42"},
+	}}
+
+	if got := resolvedDeviceIPAddress(context.Background(), "kitchen.local", info); got != "192.0.2.42" {
+		t.Fatalf("resolved address = %q, want reported speaker address", got)
+	}
+}
+
+func TestResolvedDeviceIPAddressPreservesLiteralIP(t *testing.T) {
+	if got := resolvedDeviceIPAddress(context.Background(), "192.0.2.20", &models.DeviceInfo{}); got != "192.0.2.20" {
+		t.Fatalf("resolved literal address = %q, want unchanged literal", got)
+	}
+}
+
 func TestRetryUntilReadyStopsAfterSuccess(t *testing.T) {
 	attempts := 0
 	retryUntilReady(context.Background(), time.Millisecond, func() bool {
@@ -132,7 +148,9 @@ func TestRetryUntilReadyStopsAfterContextCancellation(t *testing.T) {
 
 func TestExtraDeviceHostsPresent(t *testing.T) {
 	app := NewWebApp()
-	app.ExtraDeviceHosts = func() ([]string, error) { return []string{"known", "", "known", "missing"}, nil }
+	app.ExtraDeviceHosts = func() ([]string, error) {
+		return []string{"known", "", "known", "missing"}, nil
+	}
 	app.AddDevice("known", &webtypes.DeviceConnection{})
 	desired, err := app.extraDeviceHostSet()
 	if err != nil {
@@ -152,16 +170,6 @@ func TestExtraDeviceHostsPresent(t *testing.T) {
 	}
 }
 
-func TestExtraDeviceHostSetPropagatesHookError(t *testing.T) {
-	app := NewWebApp()
-	wantErr := errors.New("datastore glitch")
-	app.ExtraDeviceHosts = func() ([]string, error) { return nil, wantErr }
-
-	if _, err := app.extraDeviceHostSet(); !errors.Is(err, wantErr) {
-		t.Fatalf("extraDeviceHostSet() error = %v, want %v", err, wantErr)
-	}
-}
-
 func TestSeedExtraDevicesSkipsKnownHosts(t *testing.T) {
 	app := NewWebApp()
 	app.ExtraDeviceHosts = func() ([]string, error) { return []string{"known"}, nil }
@@ -176,17 +184,22 @@ func TestSeedExtraDevicesSkipsKnownHosts(t *testing.T) {
 	}
 }
 
-// TestSeedExtraDevicesUntilReadyRetriesOnHookError covers the code-review
-// finding that a hook error (e.g. a transient datastore read failure) must
-// not be treated as "zero hosts persisted", which would make the readiness
-// check trivially pass and end the retry window immediately.
+func TestExtraDeviceHostSetPropagatesHookError(t *testing.T) {
+	app := NewWebApp()
+	wantErr := errors.New("datastore glitch")
+	app.ExtraDeviceHosts = func() ([]string, error) { return nil, wantErr }
+
+	if _, err := app.extraDeviceHostSet(); !errors.Is(err, wantErr) {
+		t.Fatalf("extraDeviceHostSet() error = %v, want %v", err, wantErr)
+	}
+}
+
 func TestSeedExtraDevicesUntilReadyRetriesOnHookError(t *testing.T) {
 	var calls atomic.Int32
 
 	app := NewWebApp()
 	app.ExtraDeviceHosts = func() ([]string, error) {
-		n := calls.Add(1)
-		if n < 3 {
+		if calls.Add(1) < 3 {
 			return nil, errors.New("datastore glitch")
 		}
 
@@ -199,25 +212,18 @@ func TestSeedExtraDevicesUntilReadyRetriesOnHookError(t *testing.T) {
 	app.SeedExtraDevicesUntilReady(ctx, time.Millisecond)
 
 	if got := calls.Load(); got < 3 {
-		t.Fatalf("hook call count = %d, want at least 3 (kept retrying past the errors)", got)
+		t.Fatalf("hook call count = %d, want at least 3", got)
 	}
 }
 
-// TestSeedExtraDevicesPrunesHostRemovedAfterEarlierAttempt covers the
-// code-review finding that pruning must consider the whole registry, not
-// only hosts inserted during the current call: a host registered by an
-// earlier seed call that later falls out of ExtraDeviceHosts must still be
-// pruned by a later call, and this must hold for the plain SeedExtraDevices
-// path too, not just the bounded retry loop.
 func TestSeedExtraDevicesPrunesHostRemovedAfterEarlierAttempt(t *testing.T) {
-	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write([]byte(`<info deviceID="TESTDEVICE"><name>Stale speaker</name><type>SoundTouch 10</type></info>`))
 	}))
 	server.Start()
 
 	host := strings.TrimPrefix(server.URL, "http://")
-
 	var stillDesired atomic.Bool
 	stillDesired.Store(true)
 
@@ -230,35 +236,22 @@ func TestSeedExtraDevicesPrunesHostRemovedAfterEarlierAttempt(t *testing.T) {
 		return nil, nil
 	}
 
-	// First call registers the host.
 	app.SeedExtraDevices()
 	if _, ok := app.GetDevice(host); !ok {
-		t.Fatalf("host %s was not registered on the first seed call", host)
+		t.Fatalf("host %s was not registered", host)
 	}
 
-	// Simulate the device being removed from the datastore in between calls.
 	stillDesired.Store(false)
-
-	// A later plain SeedExtraDevices call (as triggered by
-	// SetDevicesChangedHook or the manual /api/control/discover route) must
-	// still prune it, not just the bounded retry loop.
 	app.SeedExtraDevices()
 	if _, ok := app.GetDevice(host); ok {
-		t.Fatal("stale host was not pruned by a later SeedExtraDevices call")
+		t.Fatal("stale host was not pruned")
 	}
 }
 
-// TestSeedExtraDevicesSerializesConcurrentRuns covers the code-review finding
-// that the bounded startup retry loop and a devices-changed-hook-triggered
-// SeedExtraDevices call must not issue concurrent probes to the same
-// still-offline host.
 func TestSeedExtraDevicesSerializesConcurrentRuns(t *testing.T) {
 	var infoRequests atomic.Int32
 	release := make(chan struct{})
 
-	// Only /info blocks and counts. A successful registration spawns its own
-	// background status-update request (see the comment below), which must
-	// not be mistaken for a second concurrent seed probe.
 	server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/info" {
 			http.NotFound(w, r)
@@ -266,15 +259,13 @@ func TestSeedExtraDevicesSerializesConcurrentRuns(t *testing.T) {
 		}
 
 		infoRequests.Add(1)
-		<-release // block until the test lets the handler respond
-
+		<-release
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write([]byte(`<info deviceID="TESTDEVICE"><name>Slow speaker</name><type>SoundTouch 10</type></info>`))
 	}))
 	server.Start()
 
 	host := strings.TrimPrefix(server.URL, "http://")
-
 	app := NewWebApp()
 	app.ExtraDeviceHosts = func() ([]string, error) { return []string{host}, nil }
 
@@ -282,25 +273,14 @@ func TestSeedExtraDevicesSerializesConcurrentRuns(t *testing.T) {
 	go func() { app.SeedExtraDevices(); done <- struct{}{} }()
 	go func() { app.SeedExtraDevices(); done <- struct{}{} }()
 
-	// Give both goroutines a moment to reach the handler if they were going
-	// to run concurrently, then let the handler(s) respond.
 	time.Sleep(50 * time.Millisecond)
 	close(release)
-
 	<-done
 	<-done
 
 	if got := infoRequests.Load(); got != 1 {
-		t.Fatalf("/info request count = %d, want 1 (concurrent seeds were not serialized)", got)
+		t.Fatalf("/info request count = %d, want 1", got)
 	}
-
-	// AddDeviceByHost spawns a one-shot status-update goroutine and a 30s-
-	// ticker poll loop on successful registration (see
-	// TestDiscoverDevicesRetriesConfiguredHosts). Give them a moment to
-	// finish before the deferred server.Close() runs, so a still-in-flight
-	// request against the closing httptest server doesn't produce log noise
-	// or -race flakiness.
-	time.Sleep(50 * time.Millisecond)
 }
 
 func TestRemoveDeviceIfMatchKeepsReplacement(t *testing.T) {

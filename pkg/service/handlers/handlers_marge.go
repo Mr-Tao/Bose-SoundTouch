@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -851,17 +852,21 @@ func (s *Server) HandleMargeDeviceGroup(w http.ResponseWriter, r *http.Request) 
 
 	group, err := s.ds.GetGroupForDevice(account, device)
 	if err != nil {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(constants.XMLHeader + `<group/>`))
+		if errors.Is(err, datastore.ErrGroupNotFound) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(constants.XMLHeader + `<group/>`))
+
+			return
+		}
+
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 
 		return
 	}
 
 	data, err := xml.Marshal(group)
 	if err != nil {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(constants.XMLHeader + `<group/>`))
-
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -902,7 +907,13 @@ func (s *Server) HandleMargeAddGroup(w http.ResponseWriter, r *http.Request) {
 
 	id, err := s.ds.AddGroup(account, &group)
 	if err != nil {
+		if errors.Is(err, datastore.ErrGroupMembershipConflict) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+
 		return
 	}
 
@@ -969,7 +980,15 @@ func (s *Server) HandleMargeDeleteGroup(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := s.ds.DeleteGroup(account, groupID); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		switch {
+		case errors.Is(err, datastore.ErrGroupNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case errors.Is(err, datastore.ErrGroupDeleteAmbiguous):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
 		return
 	}
 
@@ -978,10 +997,10 @@ func (s *Server) HandleMargeDeleteGroup(w http.ResponseWriter, r *http.Request) 
 	_, _ = w.Write([]byte(constants.XMLHeader + `<status>Group deleted successfully</status>`))
 }
 
-// HandleMargeDeleteAccountGroups removes all stereo groups stored for an
-// account. Speakers send DELETE /streaming/account/{id}/group/ (trailing
-// slash, no group ID) during stereo-pair teardown. Master and slave often
-// live in different accounts, so each speaker deletes its own copy here.
+// HandleMargeDeleteAccountGroups acknowledges legacy speaker teardown
+// callbacks that carry no group ID. Such a request cannot identify a group
+// generation safely, so it is deliberately non-mutating. Generation-aware
+// callers use HandleMargeDeleteGroup instead.
 func (s *Server) HandleMargeDeleteAccountGroups(w http.ResponseWriter, r *http.Request) {
 	account := chi.URLParam(r, "account")
 
@@ -990,14 +1009,9 @@ func (s *Server) HandleMargeDeleteAccountGroups(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if err := s.ds.DeleteAllGroupsForAccount(account); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/vnd.bose.streaming-v1.2+xml")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(constants.XMLHeader + `<status>Group deleted successfully</status>`))
+	_, _ = w.Write([]byte(constants.XMLHeader + `<status>Group teardown acknowledged</status>`))
 }
 
 // HandleMusicProviderIsEligible returns the music provider eligibility.

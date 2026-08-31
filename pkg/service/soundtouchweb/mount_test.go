@@ -2,11 +2,24 @@ package soundtouchweb
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 )
+
+type generationObservingResponseWriter struct {
+	http.ResponseWriter
+	app               *WebApp
+	generationAtWrite uint64
+}
+
+func (writer *generationObservingResponseWriter) Write(data []byte) (int, error) {
+	writer.generationAtWrite = writer.app.discoveryGeneration.Load()
+
+	return writer.ResponseWriter.Write(data)
+}
 
 // walkRoutes returns the set of route patterns registered on r.
 func walkRoutes(t *testing.T, r chi.Router) map[string]bool {
@@ -72,6 +85,18 @@ func TestMountWebControlAPIShape(t *testing.T) {
 		"/api/control/devices/{id}/providers/radiobrowser/play",
 		"/api/control/devices/{id}/providers/url/play",
 		"/api/control/devices/{id}/providers/tts/play",
+		"/api/control/devices/{id}/stereo-pair/",
+		"/api/control/devices/{id}/stereo-pair/balance/{level}",
+		"/api/control/devices/{id}/zone/member/{memberId}/volume/{volume}",
+		"/api/control/devices/{id}/settings/",
+		"/api/control/devices/{id}/settings/clock-display",
+		"/api/control/devices/{id}/settings/clock-time",
+		"/api/control/devices/{id}/settings/system-timeout",
+		"/api/control/devices/{id}/settings/language",
+		"/api/control/devices/{id}/settings/sync",
+		"/api/control/devices/{id}/settings/bluetooth/pair",
+		"/api/control/devices/{id}/settings/bluetooth/pairings",
+		"/api/control/devices/{id}/settings/source-name",
 	}
 	for _, want := range mustExist {
 		if !registered[want] {
@@ -139,5 +164,28 @@ func TestMountStandalone(t *testing.T) {
 		if !routes[want] {
 			t.Errorf("expected standalone Mount to register %q", want)
 		}
+	}
+}
+
+func TestDiscoverRouteReservesGenerationBeforeResponding(t *testing.T) {
+	app := NewWebApp()
+	router := chi.NewRouter()
+	app.MountWeb(router, nil)
+
+	recorder := httptest.NewRecorder()
+	writer := &generationObservingResponseWriter{
+		ResponseWriter: recorder,
+		app:            app,
+	}
+	router.ServeHTTP(writer, httptest.NewRequest(http.MethodPost, "/api/control/discover", nil))
+
+	if writer.generationAtWrite != 1 {
+		t.Fatalf("response observed generation %d, want reservation 1", writer.generationAtWrite)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	if generation := app.discoveryGeneration.Load(); generation != 1 {
+		t.Fatalf("generation = %d, want 1", generation)
 	}
 }

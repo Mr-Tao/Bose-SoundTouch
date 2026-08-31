@@ -12,7 +12,7 @@
 //   - NowPlaying: Current playback status and track information
 //   - Volume: Volume levels and mute status
 //   - Bass: Bass control settings (-9 to +9)
-//   - Balance: Balance control settings (-50 to +50)
+//   - Balance: Balance control settings with a device-advertised range
 //   - Sources: Available audio sources (Spotify, Bluetooth, etc.)
 //   - Presets: Configured preset buttons
 //   - Zone: Multiroom zone configuration
@@ -101,7 +101,7 @@
 //
 //   - Volume: 0-100 range with mute support
 //   - Bass: -9 to +9 range
-//   - Balance: -50 (left) to +50 (right)
+//   - Balance: device-advertised range (-7 to +7 conservative fallback)
 //   - Keys: Predefined key constants (PLAY, PAUSE, etc.)
 //
 // # Thread Safety

@@ -19,37 +19,37 @@ func TestNewBalanceRequest(t *testing.T) {
 			wantLevel: 0,
 		},
 		{
-			name:      "Valid balance level +50",
-			level:     50,
+			name:      "Valid balance level +7",
+			level:     7,
 			wantError: false,
-			wantLevel: 50,
+			wantLevel: 7,
 		},
 		{
-			name:      "Valid balance level -50",
-			level:     -50,
+			name:      "Valid balance level -7",
+			level:     -7,
 			wantError: false,
-			wantLevel: -50,
+			wantLevel: -7,
 		},
 		{
-			name:      "Valid balance level +25",
-			level:     25,
+			name:      "Valid balance level +3",
+			level:     3,
 			wantError: false,
-			wantLevel: 25,
+			wantLevel: 3,
 		},
 		{
-			name:      "Valid balance level -25",
-			level:     -25,
+			name:      "Valid balance level -3",
+			level:     -3,
 			wantError: false,
-			wantLevel: -25,
+			wantLevel: -3,
 		},
 		{
-			name:      "Invalid balance level +51",
-			level:     51,
+			name:      "Invalid balance level +8",
+			level:     8,
 			wantError: true,
 		},
 		{
-			name:      "Invalid balance level -51",
-			level:     -51,
+			name:      "Invalid balance level -8",
+			level:     -8,
 			wantError: true,
 		},
 		{
@@ -87,12 +87,12 @@ func TestValidateBalanceLevel(t *testing.T) {
 	}{
 		{
 			name:  "Valid minimum level",
-			level: -50,
+			level: -7,
 			want:  true,
 		},
 		{
 			name:  "Valid maximum level",
-			level: 50,
+			level: 7,
 			want:  true,
 		},
 		{
@@ -102,22 +102,22 @@ func TestValidateBalanceLevel(t *testing.T) {
 		},
 		{
 			name:  "Valid positive level",
-			level: 25,
+			level: 3,
 			want:  true,
 		},
 		{
 			name:  "Valid negative level",
-			level: -25,
+			level: -3,
 			want:  true,
 		},
 		{
 			name:  "Invalid too high",
-			level: 51,
+			level: 8,
 			want:  false,
 		},
 		{
 			name:  "Invalid too low",
-			level: -51,
+			level: -8,
 			want:  false,
 		},
 		{
@@ -154,43 +154,43 @@ func TestClampBalanceLevel(t *testing.T) {
 		},
 		{
 			name:  "Valid positive level unchanged",
-			level: 25,
-			want:  25,
+			level: 3,
+			want:  3,
 		},
 		{
 			name:  "Valid negative level unchanged",
-			level: -25,
-			want:  -25,
+			level: -3,
+			want:  -3,
 		},
 		{
 			name:  "Maximum level unchanged",
-			level: 50,
-			want:  50,
+			level: 7,
+			want:  7,
 		},
 		{
 			name:  "Minimum level unchanged",
-			level: -50,
-			want:  -50,
+			level: -7,
+			want:  -7,
 		},
 		{
 			name:  "Too high clamped to max",
-			level: 51,
-			want:  50,
+			level: 8,
+			want:  7,
 		},
 		{
 			name:  "Too low clamped to min",
-			level: -51,
-			want:  -50,
+			level: -8,
+			want:  -7,
 		},
 		{
 			name:  "Way too high clamped to max",
 			level: 100,
-			want:  50,
+			want:  7,
 		},
 		{
 			name:  "Way too low clamped to min",
 			level: -100,
-			want:  -50,
+			want:  -7,
 		},
 	}
 
@@ -458,62 +458,120 @@ func TestBalance_UnmarshalXML(t *testing.T) {
 		want      Balance
 	}{
 		{
-			name: "Valid balance XML",
+			name: "Known unavailable unpaired balance",
 			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
 <balance deviceID="1234567890AB">
-  <targetbalance>15</targetbalance>
-  <actualbalance>15</actualbalance>
+  <balanceAvailable>false</balanceAvailable>
+  <balanceMin>-7</balanceMin>
+  <balanceMax>7</balanceMax>
+  <balanceDefault>0</balanceDefault>
+  <targetBalance>0</targetBalance>
+  <actualBalance>0</actualBalance>
+</balance>`,
+			wantError: false,
+			want: Balance{
+				DeviceID:         "1234567890AB",
+				BalanceAvailable: false,
+				BalanceMin:       -7,
+				BalanceMax:       7,
+				BalanceDefault:   0,
+				TargetBalance:    0,
+				ActualBalance:    0,
+				CapabilityKnown:  true,
+			},
+		},
+		{
+			name: "Known available ST10 range",
+			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
+<balance deviceID="1234567890AB">
+  <balanceAvailable>true</balanceAvailable>
+  <balanceMin>-7</balanceMin>
+  <balanceMax>7</balanceMax>
+  <balanceDefault>0</balanceDefault>
+  <targetBalance>-6</targetBalance>
+  <actualBalance>-5</actualBalance>
+</balance>`,
+			wantError: false,
+			want: Balance{
+				DeviceID:         "1234567890AB",
+				BalanceAvailable: true,
+				BalanceMin:       -7,
+				BalanceMax:       7,
+				BalanceDefault:   0,
+				TargetBalance:    -6,
+				ActualBalance:    -5,
+				CapabilityKnown:  true,
+			},
+		},
+		{
+			name: "Hypothetical different valid range",
+			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
+<balance deviceID="1234567890AB">
+  <balanceAvailable>true</balanceAvailable>
+  <balanceMin>-12</balanceMin>
+  <balanceMax>9</balanceMax>
+  <balanceDefault>1</balanceDefault>
+  <targetBalance>8</targetBalance>
+  <actualBalance>7</actualBalance>
+</balance>`,
+			wantError: false,
+			want: Balance{
+				DeviceID:         "1234567890AB",
+				BalanceAvailable: true,
+				BalanceMin:       -12,
+				BalanceMax:       9,
+				BalanceDefault:   1,
+				TargetBalance:    8,
+				ActualBalance:    7,
+				CapabilityKnown:  true,
+			},
+		},
+		{
+			name: "Legacy capability remains unknown",
+			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
+<balance deviceID="1234567890AB">
+  <targetbalance>6</targetbalance>
+  <actualbalance>5</actualbalance>
 </balance>`,
 			wantError: false,
 			want: Balance{
 				DeviceID:      "1234567890AB",
-				TargetBalance: 15,
-				ActualBalance: 15,
+				TargetBalance: 6,
+				ActualBalance: 5,
 			},
 		},
 		{
-			name: "Valid negative balance XML",
+			name: "Partial capability is malformed",
 			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
 <balance deviceID="1234567890AB">
-  <targetbalance>-25</targetbalance>
-  <actualbalance>-25</actualbalance>
-</balance>`,
-			wantError: false,
-			want: Balance{
-				DeviceID:      "1234567890AB",
-				TargetBalance: -25,
-				ActualBalance: -25,
-			},
-		},
-		{
-			name: "Valid zero balance XML",
-			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
-<balance deviceID="1234567890AB">
-  <targetbalance>0</targetbalance>
-  <actualbalance>0</actualbalance>
-</balance>`,
-			wantError: false,
-			want: Balance{
-				DeviceID:      "1234567890AB",
-				TargetBalance: 0,
-				ActualBalance: 0,
-			},
-		},
-		{
-			name: "Invalid target balance too high",
-			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
-<balance deviceID="1234567890AB">
-  <targetbalance>75</targetbalance>
-  <actualbalance>25</actualbalance>
+  <balanceAvailable>true</balanceAvailable>
+  <balanceMin>-7</balanceMin>
+  <targetBalance>0</targetBalance>
+  <actualBalance>0</actualBalance>
 </balance>`,
 			wantError: true,
 		},
 		{
-			name: "Invalid actual balance too low",
-			xmlData: `<?xml version="1.0" encoding="UTF-8" ?>
-<balance deviceID="1234567890AB">
-  <targetbalance>25</targetbalance>
-  <actualbalance>-75</actualbalance>
+			name: "Reversed capability range is malformed",
+			xmlData: `<balance deviceID="1234567890AB">
+  <balanceAvailable>true</balanceAvailable>
+  <balanceMin>7</balanceMin>
+  <balanceMax>-7</balanceMax>
+  <balanceDefault>0</balanceDefault>
+  <targetBalance>0</targetBalance>
+  <actualBalance>0</actualBalance>
+</balance>`,
+			wantError: true,
+		},
+		{
+			name: "Readback outside advertised range is malformed",
+			xmlData: `<balance deviceID="1234567890AB">
+  <balanceAvailable>true</balanceAvailable>
+  <balanceMin>-7</balanceMin>
+  <balanceMax>7</balanceMax>
+  <balanceDefault>0</balanceDefault>
+  <targetBalance>8</targetBalance>
+  <actualBalance>7</actualBalance>
 </balance>`,
 			wantError: true,
 		},
@@ -545,8 +603,39 @@ func TestBalance_UnmarshalXML(t *testing.T) {
 				if balance.ActualBalance != tt.want.ActualBalance {
 					t.Errorf("ActualBalance = %v, want %v", balance.ActualBalance, tt.want.ActualBalance)
 				}
+
+				if balance.CapabilityKnown != tt.want.CapabilityKnown {
+					t.Errorf("CapabilityKnown = %v, want %v", balance.CapabilityKnown, tt.want.CapabilityKnown)
+				}
+
+				if balance.BalanceAvailable != tt.want.BalanceAvailable || balance.BalanceMin != tt.want.BalanceMin ||
+					balance.BalanceMax != tt.want.BalanceMax || balance.BalanceDefault != tt.want.BalanceDefault {
+					t.Errorf("capability = %+v, want %+v", balance, tt.want)
+				}
 			}
 		})
+	}
+}
+
+func TestBalanceCapabilityValidation(t *testing.T) {
+	balance := &Balance{
+		BalanceAvailable: true,
+		BalanceMin:       -12,
+		BalanceMax:       9,
+		BalanceDefault:   1,
+		CapabilityKnown:  true,
+	}
+
+	if !balance.ValidateRequestedLevel(-12) || !balance.ValidateRequestedLevel(9) {
+		t.Fatal("advertised endpoints should be valid")
+	}
+	if balance.ValidateRequestedLevel(-13) || balance.ValidateRequestedLevel(10) {
+		t.Fatal("values outside the advertised range should be invalid")
+	}
+
+	balance.BalanceAvailable = false
+	if balance.ValidateRequestedLevel(0) {
+		t.Fatal("an unavailable capability must reject writes")
 	}
 }
 
@@ -612,19 +701,19 @@ func TestBalanceRequest_MarshalXML(t *testing.T) {
 		t.Errorf("MarshalXML() unexpected error: %v", err)
 	}
 
-	expected := "<balance>25</balance>"
+	expected := "<balance><targetBalance>25</targetBalance></balance>"
 	if string(data) != expected {
 		t.Errorf("MarshalXML() = %v, want %v", string(data), expected)
 	}
 }
 
 func TestBalanceConstants(t *testing.T) {
-	if BalanceLevelMin != -50 {
-		t.Errorf("BalanceLevelMin = %v, want %v", BalanceLevelMin, -50)
+	if BalanceLevelMin != -7 {
+		t.Errorf("BalanceLevelMin = %v, want %v", BalanceLevelMin, -7)
 	}
 
-	if BalanceLevelMax != 50 {
-		t.Errorf("BalanceLevelMax = %v, want %v", BalanceLevelMax, 50)
+	if BalanceLevelMax != 7 {
+		t.Errorf("BalanceLevelMax = %v, want %v", BalanceLevelMax, 7)
 	}
 
 	if BalanceLevelDefault != 0 {
@@ -635,22 +724,22 @@ func TestBalanceConstants(t *testing.T) {
 func TestBalanceLevelEdgeCases(t *testing.T) {
 	// Test boundary values
 	t.Run("Minimum boundary", func(t *testing.T) {
-		if !ValidateBalanceLevel(-50) {
-			t.Error("ValidateBalanceLevel(-50) should be true")
+		if !ValidateBalanceLevel(-7) {
+			t.Error("ValidateBalanceLevel(-7) should be true")
 		}
 
-		if ValidateBalanceLevel(-51) {
-			t.Error("ValidateBalanceLevel(-51) should be false")
+		if ValidateBalanceLevel(-8) {
+			t.Error("ValidateBalanceLevel(-8) should be false")
 		}
 	})
 
 	t.Run("Maximum boundary", func(t *testing.T) {
-		if !ValidateBalanceLevel(50) {
-			t.Error("ValidateBalanceLevel(50) should be true")
+		if !ValidateBalanceLevel(7) {
+			t.Error("ValidateBalanceLevel(7) should be true")
 		}
 
-		if ValidateBalanceLevel(51) {
-			t.Error("ValidateBalanceLevel(51) should be false")
+		if ValidateBalanceLevel(8) {
+			t.Error("ValidateBalanceLevel(8) should be false")
 		}
 	})
 
