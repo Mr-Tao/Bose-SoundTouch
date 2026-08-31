@@ -167,6 +167,28 @@ func TestMountStandalone(t *testing.T) {
 	}
 }
 
+func TestPlayerAssetsRequireRevalidation(t *testing.T) {
+	app := NewWebApp()
+	router := chi.NewRouter()
+	app.MountWeb(router, nil)
+
+	for _, target := range []string{
+		"/app",
+		"/app/static/js/app.js",
+		"/app/static/js/components/BassReductionControl.js",
+	} {
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET %s returned %d", target, recorder.Code)
+		}
+		if got := recorder.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("GET %s Cache-Control = %q, want no-cache", target, got)
+		}
+	}
+}
+
 func TestDiscoverRouteReservesGenerationBeforeResponding(t *testing.T) {
 	app := NewWebApp()
 	router := chi.NewRouter()

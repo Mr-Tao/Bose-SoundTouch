@@ -94,7 +94,7 @@ GET      /app/devices                                                 soundtouch
 GET      /app/library                                                 soundtouchweb.(*WebApp).serveIndex-fm
 GET      /app/playurl                                                 soundtouchweb.(*WebApp).serveIndex-fm
 GET      /app/radiobrowser                                            soundtouchweb.(*WebApp).serveIndex-fm
-GET      /app/static/*                                                http.Handler.ServeHTTP-fm
+GET      /app/static/*                                                soundtouchweb.(*WebApp).MountWeb
 GET      /app/tts                                                     soundtouchweb.(*WebApp).serveIndex-fm
 GET      /app/tunein                                                  soundtouchweb.(*WebApp).serveIndex-fm
 GET      /bmx-icons/*                                                 handlers.(*Server).HandleBmxIcons

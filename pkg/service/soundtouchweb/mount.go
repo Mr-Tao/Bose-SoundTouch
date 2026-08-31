@@ -22,7 +22,14 @@ func (app *WebApp) MountWeb(r chi.Router, discoveryService *discovery.UnifiedDis
 	// Embedded assets, served under the /app subtree so nothing contends with a
 	// host router's own /static (e.g. the Stockholm bridge's root catch-all).
 	subFS, _ := fs.Sub(StaticFS, "static")
-	r.Get("/app/static/*", http.StripPrefix("/app/static", http.FileServer(http.FS(subFS))).ServeHTTP)
+	staticHandler := http.StripPrefix("/app/static", http.FileServer(http.FS(subFS)))
+	r.Get("/app/static/*", func(w http.ResponseWriter, r *http.Request) {
+		// Asset URLs are stable across releases. Require revalidation so a
+		// browser or installed PWA cannot retain an older module graph after an
+		// upgrade and mix it with the current API.
+		w.Header().Set("Cache-Control", "no-cache")
+		staticHandler.ServeHTTP(w, r)
+	})
 
 	// Player / control API. Per #451 this is the post-merge canonical shape:
 	// device-scoped actions nest under devices/{id}/, so every direct child of
@@ -190,6 +197,7 @@ func (app *WebApp) Mount(r chi.Router, discoveryService *discovery.UnifiedDiscov
 func (app *WebApp) serveIndex(w http.ResponseWriter, _ *http.Request) {
 	data, _ := StaticFS.ReadFile("static/index.html")
 
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Type", "text/html")
 	_, _ = w.Write(data)
 }
