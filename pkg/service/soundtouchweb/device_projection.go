@@ -62,6 +62,7 @@ type zoneView struct {
 	PhysicalMemberCount  int              `json:"physicalMemberCount"`
 	AvailableMemberCount int              `json:"availableMemberCount"`
 	Degraded             bool             `json:"degraded"`
+	Volume               *int             `json:"volume,omitempty"`
 	Members              []zoneMemberView `json:"members"`
 }
 
@@ -76,6 +77,7 @@ type zoneMemberView struct {
 	DeviceIDs       []string                 `json:"deviceIds"`
 	Available       bool                     `json:"available"`
 	Connectivity    string                   `json:"connectivity"`
+	ActualVolume    *int                     `json:"actualVolume,omitempty"`
 	PhysicalMembers []zonePhysicalMemberView `json:"physicalMembers"`
 	StereoPair      *stereoPairView          `json:"stereoPair,omitempty"`
 }
@@ -351,6 +353,8 @@ func newZoneProjectionCandidate(
 	availableCount := 0
 	physicalMemberCount := 0
 	degraded := false
+	groupVolume := 0
+	groupVolumeKnown := false
 
 	for _, rawDeviceID := range zone.GetAllDeviceIDs() {
 		deviceID := strings.TrimSpace(rawDeviceID)
@@ -379,6 +383,12 @@ func newZoneProjectionCandidate(
 			byDeviceID,
 		)
 		degraded = degraded || memberDegraded || !member.Available
+		if member.ActualVolume != nil {
+			groupVolumeKnown = true
+			if *member.ActualVolume > groupVolume {
+				groupVolume = *member.ActualVolume
+			}
+		}
 		if member.Available {
 			availableCount++
 		}
@@ -395,6 +405,11 @@ func newZoneProjectionCandidate(
 		return zoneProjectionCandidate{}, false
 	}
 
+	var projectedVolume *int
+	if groupVolumeKnown {
+		projectedVolume = &groupVolume
+	}
+
 	return zoneProjectionCandidate{
 		masterControlID: masterControlID,
 		logicalMembers:  logicalMembers,
@@ -406,6 +421,7 @@ func newZoneProjectionCandidate(
 			PhysicalMemberCount:  physicalMemberCount,
 			AvailableMemberCount: availableCount,
 			Degraded:             degraded,
+			Volume:               projectedVolume,
 			Members:              members,
 		},
 	}, true
@@ -445,6 +461,10 @@ func newZoneMember(
 	}
 	member.Connectivity = projectedConnectivity(view.Status)
 	member.Available = member.Connectivity == "online"
+	if view.Status != nil && view.Status.Volume != nil {
+		volume := view.Status.Volume.ActualVolume
+		member.ActualVolume = &volume
+	}
 
 	if view.StereoPair != nil {
 		member.Kind = "stereoPair"

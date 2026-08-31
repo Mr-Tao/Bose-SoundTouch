@@ -1,5 +1,5 @@
 import { h, render } from 'preact';
-import { useState, useEffect, useCallback } from 'preact/hooks';
+import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { DeviceList } from './components/DeviceList.js';
 import { NowPlaying } from './components/NowPlaying.js';
@@ -15,11 +15,45 @@ import { PlayURL } from './components/PlayURL.js';
 import { TTS } from './components/TTS.js';
 import { Announcements } from './components/Announcements.js';
 import { api } from './api.js';
+import {
+    mergeZoneVolumeReadback,
+    maxZoneVolume,
+    previewZoneVolume,
+    sameZoneMemberVolumes,
+    zoneMemberVolumes,
+} from './zoneVolumePreview.mjs';
 
 const html = htm.bind(h);
 
 function DeviceDetail({ deviceId, devices, onBack }) {
     const device = devices[deviceId];
+    const controlsMode = device?.zone && !device.zone.isStandalone &&
+        device.zone.masterControlId === deviceId ? 'zone' : 'device';
+    const [zoneVolumePreview, setZoneVolumePreview] = useState(null);
+    const previewExpiryRef = useRef(null);
+
+    function clearPreviewExpiry() {
+        if (previewExpiryRef.current !== null) {
+            clearTimeout(previewExpiryRef.current);
+            previewExpiryRef.current = null;
+        }
+    }
+
+    useEffect(() => {
+        clearPreviewExpiry();
+        setZoneVolumePreview(null);
+    }, [deviceId, controlsMode]);
+    useEffect(() => () => clearPreviewExpiry(), []);
+
+    const authoritativeZoneVolumes = zoneMemberVolumes(device?.zone);
+
+    useEffect(() => {
+        if (zoneVolumePreview?.phase !== 'reconciling') return;
+        if (!sameZoneMemberVolumes(zoneVolumePreview.volumes, authoritativeZoneVolumes)) return;
+
+        clearPreviewExpiry();
+        setZoneVolumePreview(null);
+    }, [device?.zone, zoneVolumePreview]);
 
     if (!device) {
         return html`
@@ -28,6 +62,73 @@ function DeviceDetail({ deviceId, devices, onBack }) {
             </div>
             <p>Device not found.</p>
         `;
+    }
+
+    function beginGroupVolume(level, generation) {
+        clearPreviewExpiry();
+        setZoneVolumePreview(current => {
+            const startingVolumes = current?.controlId === deviceId
+                ? current.volumes
+                : zoneMemberVolumes(device.zone);
+            return {
+                controlId: deviceId,
+                generation,
+                phase: 'active',
+                startingLevel: level,
+                startingVolumes,
+                volumes: startingVolumes,
+            };
+        });
+    }
+
+    function previewGroupVolume(level, generation) {
+        clearPreviewExpiry();
+        setZoneVolumePreview(current => {
+            const continuing = current?.controlId === deviceId &&
+                current.generation === generation && current.phase === 'active';
+            const startingVolumes = continuing
+                ? current.startingVolumes
+                : zoneMemberVolumes(device.zone);
+            const startingLevel = continuing
+                ? current.startingLevel
+                : maxZoneVolume(startingVolumes);
+            return {
+                controlId: deviceId,
+                generation,
+                phase: 'active',
+                startingLevel,
+                startingVolumes,
+                volumes: previewZoneVolume(startingVolumes, startingLevel, level),
+            };
+        });
+    }
+
+    function reconcileGroupVolume(data, generation) {
+        clearPreviewExpiry();
+        setZoneVolumePreview(current => {
+            if (current?.controlId !== deviceId || current.generation !== generation) return current;
+            return {
+                ...current,
+                phase: 'reconciling',
+                volumes: mergeZoneVolumeReadback(current.volumes, data),
+            };
+        });
+        previewExpiryRef.current = setTimeout(() => {
+            previewExpiryRef.current = null;
+            setZoneVolumePreview(current =>
+                current?.controlId === deviceId && current.generation === generation &&
+                    current.phase === 'reconciling'
+                    ? null
+                    : current);
+        }, 1200);
+    }
+
+    function rejectGroupVolumePreview(generation) {
+        clearPreviewExpiry();
+        setZoneVolumePreview(current =>
+            current?.controlId === deviceId && current.generation === generation
+                ? null
+                : current);
     }
 
     return html`
@@ -42,10 +143,24 @@ function DeviceDetail({ deviceId, devices, onBack }) {
                 </button>
             </div>
             <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} />
-            <${Controls} deviceId=${deviceId} status=${device.status} />
+            <${Controls}
+                key=${`${deviceId}:${controlsMode}`}
+                deviceId=${deviceId}
+                device=${device}
+                onZoneVolumeStart=${beginGroupVolume}
+                onZoneVolumePreview=${previewGroupVolume}
+                onZoneVolumeReadback=${reconcileGroupVolume}
+                onZoneVolumeFailure=${rejectGroupVolumePreview}
+            />
             <${Presets} deviceId=${deviceId} status=${device.status} />
             <${Sources} deviceId=${deviceId} status=${device.status} />
-            <${Zone} deviceId=${deviceId} devices=${devices} />
+            <${Zone}
+                deviceId=${deviceId}
+                devices=${devices}
+                volumePreview=${zoneVolumePreview?.controlId === deviceId
+                    ? zoneVolumePreview.volumes
+                    : null}
+            />
             <${Recents} deviceId=${deviceId} />
         </div>
     `;

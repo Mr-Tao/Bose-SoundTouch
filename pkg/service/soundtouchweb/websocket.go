@@ -285,10 +285,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		})
 
 		wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
-			conn.UpdateStatus(func(s *webtypes.DeviceStatus) {
-				s.Volume = &event.Volume
-				s.LastActivity = time.Now()
-			})
+			conn.ApplyVolumeEvent(&event.Volume, time.Now())
 		})
 
 		wsClient.OnConnectionState(func(event *models.ConnectionStateUpdatedEvent) {
@@ -408,6 +405,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		groupGeneration = conn.BeginGroupRefresh()
 	}
 	zoneGeneration := conn.BeginZoneRefresh()
+	volumeGeneration := conn.BeginVolumeRefresh()
 
 	// Phase 1: slow network fetches. Local vars only, no shared state
 	// is touched yet. Errors are recorded so the merge below can tell
@@ -439,10 +437,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 			statusUpdated = true
 		}
 
-		if volumeErr == nil {
-			s.Volume = volume
-			statusUpdated = true
-		}
+		statusUpdated = statusUpdated || volumeErr == nil
 
 		if presetsErr == nil {
 			s.Presets = presets
@@ -469,6 +464,10 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		s.IsConnected = statusUpdated
 		s.LastActivity = time.Now()
 	})
+
+	if volumeErr == nil {
+		conn.ApplyPolledVolume(volumeGeneration, volume)
+	}
 
 	if stereoCapable && groupErr == nil {
 		conn.ApplyPolledGroup(groupGeneration, group)

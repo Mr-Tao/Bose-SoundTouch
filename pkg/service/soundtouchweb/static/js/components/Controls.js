@@ -1,7 +1,9 @@
 import { h } from 'preact';
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
+import { createLatestWinsScheduler, shouldSurfaceLatestFinal } from '../latestWinsScheduler.mjs';
+import { clampVolume, maxReadbackActual, partialFailureMessage } from '../zoneVolumeResult.mjs';
 
 const html = htm.bind(h);
 
@@ -43,28 +45,175 @@ function IconRepeat({ one = false }) {
     </svg>`;
 }
 
-export function Controls({ deviceId, status }) {
+export function Controls({
+    deviceId,
+    device,
+    onZoneVolumeStart = () => {},
+    onZoneVolumePreview = () => {},
+    onZoneVolumeReadback = () => {},
+    onZoneVolumeFailure = () => {},
+}) {
+    const status = device?.status;
+    const zone = device?.zone;
+    const controlsLogicalZone = Boolean(zone && !zone.isStandalone &&
+        zone.masterControlId === deviceId);
     const np = status?.nowPlaying;
     const isPlaying = np?.PlayStatus === 'PLAY_STATE';
-    const actualVolume = status?.volume?.ActualVolume ?? 0;
+    const projectedVolume = clampVolume(
+        controlsLogicalZone && Number.isFinite(zone?.volume)
+            ? zone.volume
+            : (status?.volume?.ActualVolume ?? 0),
+    );
     const isMuted = status?.volume?.MuteEnabled ?? false;
     const shuffle = np?.ShuffleSetting ?? 'SHUFFLE_OFF';
     const repeat = np?.RepeatSetting ?? 'REPEAT_OFF';
     const actualBass = status?.bass?.TargetBass ?? 0;
     const hasBass = status?.bass != null;
 
-    const [localVolume, setLocalVolume] = useState(actualVolume);
+    const projectedVolumeRef = useRef(projectedVolume);
+    const controlTargetRef = useRef({ deviceId, group: controlsLogicalZone });
+    const zoneCallbacksRef = useRef({
+        onReadback: onZoneVolumeReadback,
+        onFailure: onZoneVolumeFailure,
+    });
+    const interactionActiveRef = useRef(false);
+    const interactionGenerationRef = useRef(0);
+    const interactionDirtyRef = useRef(false);
+    const acceptedSequenceRef = useRef(0);
+    const schedulerRef = useRef(null);
+    const [localVolume, setLocalVolume] = useState(projectedVolume);
     const [localBass, setLocalBass] = useState(actualBass);
+    const [volumeBusy, setVolumeBusy] = useState(false);
+    const [volumeFailure, setVolumeFailure] = useState('');
 
-    useEffect(() => { setLocalVolume(actualVolume); }, [actualVolume]);
+    projectedVolumeRef.current = projectedVolume;
+    controlTargetRef.current = { deviceId, group: controlsLogicalZone };
+    zoneCallbacksRef.current = {
+        onReadback: onZoneVolumeReadback,
+        onFailure: onZoneVolumeFailure,
+    };
+
+    if (schedulerRef.current === null) {
+        schedulerRef.current = createLatestWinsScheduler({
+            send(level, request) {
+                const target = controlTargetRef.current;
+                request.group = target.group;
+                return target.group
+                    ? api.zoneVolume(target.deviceId, level)
+                    : api.volume(target.deviceId, level);
+            },
+            onResult(response, metadata) {
+                if (!metadata.isLatest ||
+                    metadata.interactionGeneration !== interactionGenerationRef.current) return;
+
+                if (!response?.success) {
+                    if (metadata.group) {
+                        zoneCallbacksRef.current.onFailure(metadata.interactionGeneration);
+                    }
+                    if (shouldSurfaceLatestFinal(metadata)) {
+                        setVolumeFailure(response?.error || 'Volume update failed.');
+                    }
+                    return;
+                }
+
+                if (metadata.group) {
+                    const data = response.data;
+                    if (data?.requested !== metadata.value) {
+                        zoneCallbacksRef.current.onFailure(metadata.interactionGeneration);
+                        if (shouldSurfaceLatestFinal(metadata)) {
+                            setVolumeFailure('Group volume update failed.');
+                        }
+                        return;
+                    }
+
+                    const confirmed = maxReadbackActual(data);
+                    if (metadata.final) {
+                        zoneCallbacksRef.current.onReadback(data, metadata.interactionGeneration);
+                    }
+                    if (confirmed !== null &&
+                        (metadata.final || !interactionActiveRef.current)) {
+                        acceptedSequenceRef.current = metadata.sequence;
+                        setLocalVolume(confirmed);
+                    }
+                    if (shouldSurfaceLatestFinal(metadata)) {
+                        setVolumeFailure(partialFailureMessage(data));
+                    }
+                    return;
+                }
+
+                acceptedSequenceRef.current = metadata.sequence;
+                setLocalVolume(metadata.value);
+                if (shouldSurfaceLatestFinal(metadata)) setVolumeFailure('');
+            },
+            onError(_error, metadata) {
+                if (metadata.interactionGeneration !== interactionGenerationRef.current) return;
+                if (metadata.isLatest && metadata.group) {
+                    zoneCallbacksRef.current.onFailure(metadata.interactionGeneration);
+                }
+                if (shouldSurfaceLatestFinal(metadata)) {
+                    setVolumeFailure(metadata.group
+                        ? 'Group volume update failed.'
+                        : 'Volume update failed.');
+                }
+            },
+            onStateChange(next) {
+                setVolumeBusy(next.active);
+                if (!next.active && !interactionActiveRef.current &&
+                    acceptedSequenceRef.current !== next.latestSequence) {
+                    setLocalVolume(projectedVolumeRef.current);
+                    if (controlTargetRef.current.group) {
+                        zoneCallbacksRef.current.onFailure(interactionGenerationRef.current);
+                    }
+                }
+            },
+        });
+    }
+
+    useEffect(() => () => schedulerRef.current.dispose(), []);
+    useEffect(() => {
+        if (!interactionActiveRef.current && !schedulerRef.current.isActive()) {
+            setLocalVolume(projectedVolume);
+        }
+    }, [projectedVolume]);
     useEffect(() => { setLocalBass(actualBass); }, [actualBass]);
 
     const send = (key) => api.key(deviceId, key);
 
-    function onVolumeChange(e) {
-        const val = parseInt(e.target.value, 10);
-        setLocalVolume(val);
-        api.volume(deviceId, val);
+    function beginVolumeInteraction() {
+        if (interactionActiveRef.current) return;
+        interactionGenerationRef.current += 1;
+        interactionActiveRef.current = true;
+        interactionDirtyRef.current = false;
+        if (controlsLogicalZone) {
+            onZoneVolumeStart(localVolume, interactionGenerationRef.current);
+        }
+    }
+
+    function queueVolume(event, force) {
+        const level = clampVolume(parseInt(event.currentTarget.value, 10));
+        if (!force) {
+            beginVolumeInteraction();
+            interactionDirtyRef.current = true;
+        }
+        setLocalVolume(level);
+        if (controlsLogicalZone) {
+            onZoneVolumePreview(level, interactionGenerationRef.current);
+        }
+        setVolumeFailure('');
+        schedulerRef.current.queue(level, {
+            force,
+            interactionGeneration: interactionGenerationRef.current,
+        });
+    }
+
+    function finishVolumeInteraction(event) {
+        if (!interactionDirtyRef.current) {
+            interactionActiveRef.current = false;
+            return;
+        }
+        interactionDirtyRef.current = false;
+        interactionActiveRef.current = false;
+        queueVolume(event, true);
     }
 
     function onBassChange(e) {
@@ -101,12 +250,19 @@ export function Controls({ deviceId, status }) {
                     ${IconRepeat({ one: repeat === 'REPEAT_ONE' })}
                 </button>
             </div>
-            <div class="volume-row">
+            <div class="volume-row" aria-busy=${volumeBusy ? 'true' : 'false'}>
                 <span class="volume-icon">${IconVolume({ size: 16 })}</span>
                 <input type="range" class="volume-slider" min="0" max="100"
-                    value=${localVolume} onInput=${onVolumeChange} />
+                    value=${localVolume} aria-label=${controlsLogicalZone ? 'Group volume' : 'Volume'}
+                    onPointerDown=${beginVolumeInteraction}
+                    onInput=${event => queueVolume(event, false)}
+                    onPointerUp=${finishVolumeInteraction}
+                    onPointerCancel=${finishVolumeInteraction}
+                    onChange=${finishVolumeInteraction}
+                    onBlur=${finishVolumeInteraction} />
                 <span class="volume-value">${localVolume}</span>
             </div>
+            ${volumeFailure ? html`<div class="volume-control-failure" role="status">${volumeFailure}</div>` : null}
             ${hasBass && html`
                 <div class="bass-row">
                     <span class="bass-label">Bass</span>

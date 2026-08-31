@@ -8,6 +8,7 @@ import {
     zoneMemberCountSummary,
     zoneMemberMetadata,
 } from '../zonePresentation.mjs';
+import { ZoneMemberVolumeControl } from './ZoneMemberVolumeControl.js';
 
 const html = htm.bind(h);
 
@@ -27,7 +28,7 @@ function inferredPhysicalCount(members) {
         total + Math.max(1, member?.physicalMembers?.length || 0), 0);
 }
 
-export function Zone({ deviceId, devices }) {
+export function Zone({ deviceId, devices, volumePreview = null }) {
     const [zone, setZone] = useState(null);
     const [candidates, setCandidates] = useState({});
     const [loading, setLoading] = useState(true);
@@ -95,6 +96,8 @@ export function Zone({ deviceId, devices }) {
         : (Number.isInteger(projection?.physicalMemberCount)
             ? projection.physicalMemberCount
             : inferredPhysicalCount(logicalMembers));
+    const zoneMasterId = projection?.masterControlId || resolvedMaster.controlId ||
+        zone.masterIp || deviceId;
 
     // Source candidates independently from Group projection while recognizing
     // the logical IDs already represented by the current zone.
@@ -111,6 +114,7 @@ export function Zone({ deviceId, devices }) {
         const member = resolved.member;
         const metadata = zoneMemberMetadata(member);
         const isStereoPair = member?.kind === 'stereoPair';
+        const previewVolume = volumePreview?.[resolved.controlId];
 
         return html`
             <div class="zone-logical-member" key=${resolved.controlId}>
@@ -130,6 +134,15 @@ export function Zone({ deviceId, devices }) {
                         </div>
                     </div>
                 </div>
+
+                <${ZoneMemberVolumeControl}
+                    zoneMasterId=${zoneMasterId}
+                    memberId=${resolved.controlId}
+                    ariaLabel=${`${metadata.name} volume`}
+                    available=${member?.available !== false}
+                    volume=${member?.actualVolume}
+                    previewVolume=${previewVolume}
+                />
 
                 ${isStereoPair ? html`
                     <div class="zone-physical-members">

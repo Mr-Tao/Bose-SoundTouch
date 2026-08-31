@@ -49,16 +49,24 @@ type DeviceConnection struct {
 
 	status atomic.Pointer[DeviceStatus]
 
+	volumeMu          sync.Mutex
+	volumeGeneration  uint64
+	volumeOperationMu sync.Mutex
+	groupWriteMu      sync.Mutex
+	zoneWriteMu       sync.RWMutex
+
 	// groupMu orders polled /getGroup responses against real-time
 	// groupUpdated events. Starting a newer refresh or receiving an event
 	// invalidates any older in-flight poll.
-	groupMu         sync.Mutex
-	groupGeneration uint64
+	groupMu                  sync.Mutex
+	groupGeneration          uint64
+	confirmedGroupGeneration uint64
 
 	// zoneMu protects the last topology confirmed by a zone master. Member
 	// responses and failed refreshes must not dissolve a logical zone.
-	zoneMu         sync.Mutex
-	zoneGeneration uint64
+	zoneMu                  sync.Mutex
+	zoneGeneration          uint64
+	confirmedZoneGeneration uint64
 
 	// done is closed by Close when the device is removed from the
 	// registry, signalling its background goroutines (the status poller
@@ -136,6 +144,139 @@ func (c *DeviceConnection) SetStatus(s *DeviceStatus) {
 	c.status.Store(s)
 }
 
+// BeginVolumeRefresh reserves a field-specific generation for an asynchronous
+// /volume readback. Unrelated speaker events do not invalidate it.
+func (c *DeviceConnection) BeginVolumeRefresh() uint64 {
+	c.volumeMu.Lock()
+	defer c.volumeMu.Unlock()
+
+	c.volumeGeneration++
+
+	return c.volumeGeneration
+}
+
+// ApplyPolledVolume stores a /volume response only if no newer volume
+// readback or volumeUpdated event superseded it.
+func (c *DeviceConnection) ApplyPolledVolume(generation uint64, volume *models.Volume) bool {
+	c.volumeMu.Lock()
+	defer c.volumeMu.Unlock()
+
+	if generation != c.volumeGeneration {
+		return false
+	}
+
+	c.UpdateStatus(func(status *DeviceStatus) {
+		status.Volume = volume
+	})
+
+	return true
+}
+
+// ApplyVolumeEvent stores a volumeUpdated event and invalidates in-flight
+// /volume readbacks while preserving unrelated status fields.
+func (c *DeviceConnection) ApplyVolumeEvent(volume *models.Volume, activity time.Time) bool {
+	c.volumeMu.Lock()
+	defer c.volumeMu.Unlock()
+
+	c.volumeGeneration++
+	changed := !reflect.DeepEqual(c.Status().Volume, volume)
+	c.UpdateStatus(func(status *DeviceStatus) {
+		status.Volume = volume
+		status.LastActivity = activity
+	})
+
+	return changed
+}
+
+// WithVolumeOperation serializes one write and its readback sequence per
+// physical control target.
+func (c *DeviceConnection) WithVolumeOperation(operation func()) {
+	c.volumeOperationMu.Lock()
+	defer c.volumeOperationMu.Unlock()
+
+	operation()
+}
+
+// WithGroupWriteFence linearizes a group-authoritative write with group
+// refresh and event invalidation.
+func (c *DeviceConnection) WithGroupWriteFence(operation func()) {
+	c.groupWriteMu.Lock()
+	defer c.groupWriteMu.Unlock()
+
+	operation()
+}
+
+// WithZoneWriteFence lets current zone-member writes proceed together while
+// excluding the start of a newer authoritative zone refresh.
+func (c *DeviceConnection) WithZoneWriteFence(operation func()) {
+	c.zoneWriteMu.RLock()
+	defer c.zoneWriteMu.RUnlock()
+
+	operation()
+}
+
+// GroupTopology identifies one confirmed firmware group generation.
+type GroupTopology struct {
+	Group *models.Group
+
+	generation uint64
+}
+
+// SnapshotGroupTopology captures group ownership only when the latest refresh
+// has been confirmed.
+func (c *DeviceConnection) SnapshotGroupTopology() (GroupTopology, bool) {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	if c.groupGeneration != c.confirmedGroupGeneration {
+		return GroupTopology{}, false
+	}
+
+	return GroupTopology{Group: c.Status().Group, generation: c.groupGeneration}, true
+}
+
+// GroupTopologyCurrent reports whether a captured group generation still owns
+// the same firmware topology.
+func (c *DeviceConnection) GroupTopologyCurrent(topology GroupTopology) bool {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	return c.groupGeneration == c.confirmedGroupGeneration &&
+		topology.generation == c.groupGeneration &&
+		reflect.DeepEqual(topology.Group, c.Status().Group)
+}
+
+// ZoneTopology identifies one confirmed authoritative zone generation.
+type ZoneTopology struct {
+	Zone *models.ZoneInfo
+
+	generation uint64
+}
+
+// SnapshotZoneTopology captures the current zone only when the latest master
+// refresh has been confirmed.
+func (c *DeviceConnection) SnapshotZoneTopology() (ZoneTopology, bool) {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	if c.zoneGeneration != c.confirmedZoneGeneration {
+		return ZoneTopology{}, false
+	}
+
+	return ZoneTopology{Zone: c.Status().Zone, generation: c.zoneGeneration}, true
+}
+
+// ZoneTopologyCurrent reports whether a captured zone generation is still
+// authoritative and unchanged.
+func (c *DeviceConnection) ZoneTopologyCurrent(topology ZoneTopology) bool {
+	c.zoneMu.Lock()
+	defer c.zoneMu.Unlock()
+
+	return c.zoneGeneration == c.confirmedZoneGeneration &&
+		topology.generation == c.zoneGeneration &&
+		reflect.DeepEqual(topology.Zone, c.Status().Zone)
+}
+
 // UpdateStatus atomically applies mut to a copy of the current status
 // and stores the result. If another goroutine updates the status while
 // mut runs, UpdateStatus retries with the newer status — so concurrent
@@ -165,6 +306,9 @@ func (c *DeviceConnection) UpdateStatus(mut func(*DeviceStatus)) {
 // BeginGroupRefresh starts a new generation for an asynchronous /getGroup
 // request. Only the latest started request may later update Group.
 func (c *DeviceConnection) BeginGroupRefresh() uint64 {
+	c.groupWriteMu.Lock()
+	defer c.groupWriteMu.Unlock()
+
 	c.groupMu.Lock()
 	defer c.groupMu.Unlock()
 
@@ -183,16 +327,22 @@ func (c *DeviceConnection) ApplyPolledGroup(generation uint64, group *models.Gro
 		return false
 	}
 
+	c.confirmedGroupGeneration = generation
+
 	return c.replaceGroup(normalizeGroup(group), time.Time{})
 }
 
 // ApplyGroupEvent stores the newest groupUpdated event and invalidates all
 // in-flight /getGroup requests. Empty teardown events clear the current claim.
 func (c *DeviceConnection) ApplyGroupEvent(group *models.Group, activity time.Time) bool {
+	c.groupWriteMu.Lock()
+	defer c.groupWriteMu.Unlock()
+
 	c.groupMu.Lock()
 	defer c.groupMu.Unlock()
 
 	c.groupGeneration++
+	c.confirmedGroupGeneration = c.groupGeneration
 
 	return c.replaceGroup(normalizeGroup(group), activity)
 }
@@ -220,6 +370,9 @@ func normalizeGroup(group *models.Group) *models.Group {
 // BeginZoneRefresh starts a new generation for an asynchronous master
 // /getZone request. Starting a new refresh invalidates any older response.
 func (c *DeviceConnection) BeginZoneRefresh() uint64 {
+	c.zoneWriteMu.Lock()
+	defer c.zoneWriteMu.Unlock()
+
 	c.zoneMu.Lock()
 	defer c.zoneMu.Unlock()
 
@@ -251,6 +404,8 @@ func (c *DeviceConnection) ApplyPolledZone(
 		(master != "" && master != queriedDeviceID) {
 		return false
 	}
+
+	c.confirmedZoneGeneration = generation
 
 	return c.replaceZone(normalizeZone(zone))
 }
