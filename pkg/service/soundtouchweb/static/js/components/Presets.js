@@ -20,7 +20,7 @@ function sourceLabel(source) {
 // the current content to that slot.  The save button lives *outside* the
 // play button in the DOM (via the wrapper div) to avoid invalid nested
 // <button> elements.
-function PresetSlot({ preset, deviceId, active, canSave }) {
+function PresetSlot({ preset, deviceId, active, canSave, command, commandBusy, onSelect }) {
     const [saveState, setSaveState] = useState(null); // null | 'saved' | 'error'
 
     const item = preset?.ContentItem;
@@ -29,7 +29,7 @@ function PresetSlot({ preset, deviceId, active, canSave }) {
     const name = item?.ItemName || `Preset ${preset?.ID ?? ''}`;
 
     function select() {
-        if (!isEmpty) api.control(deviceId, 'preset', preset.ID);
+        if (!isEmpty) (onSelect || (() => api.control(deviceId, 'preset', preset.ID)))(preset);
     }
 
     function save(e) {
@@ -51,7 +51,9 @@ function PresetSlot({ preset, deviceId, active, canSave }) {
                 class="preset-slot ${isEmpty ? 'empty' : ''} ${active ? 'active' : ''}"
                 data-source=${item?.Source ?? ''}
                 onClick=${select}
-                disabled=${isEmpty}
+                disabled=${isEmpty || commandBusy}
+                aria-busy=${command?.action === 'preset' && commandBusy &&
+                    command?.expected?.targetId === String(preset.ID) ? 'true' : null}
                 title=${isEmpty ? 'Empty' : name}
             >
                 ${art
@@ -75,7 +77,7 @@ function PresetSlot({ preset, deviceId, active, canSave }) {
     `;
 }
 
-export function Presets({ deviceId, status }) {
+export function Presets({ deviceId, status, command, commandBusy = false, onSelect }) {
     const presets = status?.presets?.Preset ?? [];
     const currentSource = status?.nowPlaying?.Source;
     const currentLocation = status?.nowPlaying?.ContentItem?.Location;
@@ -104,6 +106,9 @@ export function Presets({ deviceId, status }) {
                         deviceId=${deviceId}
                         active=${isActive(preset)}
                         canSave=${canSave}
+                        command=${command}
+                        commandBusy=${commandBusy}
+                        onSelect=${onSelect}
                     />
                 `)}
             </div>

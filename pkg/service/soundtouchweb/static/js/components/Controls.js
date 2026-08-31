@@ -53,6 +53,8 @@ export function Controls({
     onToggleMute,
     onToggleShuffle,
     onCycleRepeat,
+    onPreviousTrack,
+    onNextTrack,
 }) {
     const np = status?.nowPlaying;
     const isPlaying = np?.PlayStatus === 'PLAY_STATE';
@@ -75,6 +77,8 @@ export function Controls({
     const muteCommand = command?.action?.startsWith('mute-') ? command : null;
     const shuffleCommand = command?.action?.startsWith('shuffle-') ? command : null;
     const repeatCommand = command?.action?.startsWith('repeat-') ? command : null;
+    const previousCommand = command?.action === 'previous-track' ? command : null;
+    const nextCommand = command?.action === 'next-track' ? command : null;
 
     function onVolumeChange(e) {
         const val = parseInt(e.target.value, 10);
@@ -91,7 +95,13 @@ export function Controls({
     return html`
         <div class="controls">
             <div class="transport">
-                <button class="ctrl-btn" onClick=${() => send('PREV_TRACK')} title="Previous">⏮</button>
+                <button
+                    class="ctrl-btn command-btn previous-btn ${previousCommand?.outcome || ''}"
+                    onClick=${onPreviousTrack || (() => send('PREV_TRACK'))}
+                    disabled=${commandBusy || !np}
+                    aria-busy=${previousCommand && commandBusy ? 'true' : null}
+                    title=${previousCommand && commandBusy ? commandStatus : 'Previous'}
+                >⏮</button>
                 <button
                     class="ctrl-btn play-btn command-btn ${transportCommand?.outcome || ''}"
                     onClick=${onTogglePlayback || (() => send(isPlaying ? 'PAUSE' : 'PLAY'))}
@@ -101,7 +111,13 @@ export function Controls({
                 >
                     ${isPlaying ? '⏸' : '▶'}
                 </button>
-                <button class="ctrl-btn" onClick=${() => send('NEXT_TRACK')} title="Next">⏭</button>
+                <button
+                    class="ctrl-btn command-btn next-btn ${nextCommand?.outcome || ''}"
+                    onClick=${onNextTrack || (() => send('NEXT_TRACK'))}
+                    disabled=${commandBusy || !np}
+                    aria-busy=${nextCommand && commandBusy ? 'true' : null}
+                    title=${nextCommand && commandBusy ? commandStatus : 'Next'}
+                >⏭</button>
                 <button
                     class="ctrl-btn command-btn mute-btn ${isMuted ? 'active' : ''} ${muteCommand?.outcome || ''}"
                     onClick=${onToggleMute || (() => send('MUTE'))}
