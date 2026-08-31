@@ -215,6 +215,20 @@ func TestSession_RequestIDsAreUniquePerStep(t *testing.T) {
 	}
 }
 
+func TestSession_SetLanguageRejectsUnknownCodeBeforeWrite(t *testing.T) {
+	f := newFakeSpeaker(t)
+	s := dialFakeSession(t, f, "X")
+
+	err := s.SetLanguage(context.Background(), 14)
+	if err == nil {
+		t.Fatal("expected unknown language code to be rejected")
+	}
+
+	if frames := f.recordedFrames(); len(frames) != 0 {
+		t.Fatalf("invalid language wrote %d frames: %v", len(frames), frames)
+	}
+}
+
 func TestSession_IgnoresUpdatesFramesBeforeAck(t *testing.T) {
 	f := newFakeSpeaker(t)
 	f.reply = func(frame string) []string {

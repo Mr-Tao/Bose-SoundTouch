@@ -8,29 +8,30 @@ import (
 
 // NowPlaying represents the current playback information from /now_playing endpoint
 type NowPlaying struct {
-	XMLName             xml.Name             `xml:"nowPlaying"`
-	DeviceID            string               `xml:"deviceID,attr"`
-	Source              string               `xml:"source,attr"`
-	SourceAccount       string               `xml:"sourceAccount,attr,omitempty"`
-	ContentItem         *ContentItem         `xml:"ContentItem,omitempty"`
-	Track               string               `xml:"track,omitempty"`
-	Artist              string               `xml:"artist,omitempty"`
-	Album               string               `xml:"album,omitempty"`
-	StationName         string               `xml:"stationName,omitempty"`
-	Art                 *Art                 `xml:"art,omitempty"`
-	Time                *Time                `xml:"time,omitempty"`
-	SkipEnabled         *SkipEnabled         `xml:"skipEnabled,omitempty"`
-	FavoriteEnabled     *FavoriteEnabled     `xml:"favoriteEnabled,omitempty"`
-	PlayStatus          PlayStatus           `xml:"playStatus,omitempty"`
-	ShuffleSetting      ShuffleSetting       `xml:"shuffleSetting,omitempty"`
-	RepeatSetting       RepeatSetting        `xml:"repeatSetting,omitempty"`
-	SkipPreviousEnabled *SkipPreviousEnabled `xml:"skipPreviousEnabled,omitempty"`
-	SeekSupported       *SeekSupported       `xml:"seekSupported,omitempty"`
-	StreamType          string               `xml:"streamType,omitempty"`
-	TrackID             string               `xml:"trackID,omitempty"`
-	Position            *Position            `xml:"position,omitempty"`
-	Description         string               `xml:"description,omitempty"`
-	StationLocation     string               `xml:"stationLocation,omitempty"`
+	XMLName              xml.Name              `xml:"nowPlaying"`
+	DeviceID             string                `xml:"deviceID,attr"`
+	Source               string                `xml:"source,attr"`
+	SourceAccount        string                `xml:"sourceAccount,attr,omitempty"`
+	ContentItem          *ContentItem          `xml:"ContentItem,omitempty"`
+	Track                string                `xml:"track,omitempty"`
+	Artist               string                `xml:"artist,omitempty"`
+	Album                string                `xml:"album,omitempty"`
+	StationName          string                `xml:"stationName,omitempty"`
+	Art                  *Art                  `xml:"art,omitempty"`
+	Time                 *Time                 `xml:"time,omitempty"`
+	SkipEnabled          *SkipEnabled          `xml:"skipEnabled,omitempty"`
+	FavoriteEnabled      *FavoriteEnabled      `xml:"favoriteEnabled,omitempty"`
+	PlayStatus           PlayStatus            `xml:"playStatus,omitempty"`
+	ShuffleSetting       ShuffleSetting        `xml:"shuffleSetting,omitempty"`
+	RepeatSetting        RepeatSetting         `xml:"repeatSetting,omitempty"`
+	SkipPreviousEnabled  *SkipPreviousEnabled  `xml:"skipPreviousEnabled,omitempty"`
+	SeekSupported        *SeekSupported        `xml:"seekSupported,omitempty"`
+	StreamType           string                `xml:"streamType,omitempty"`
+	TrackID              string                `xml:"trackID,omitempty"`
+	Position             *Position             `xml:"position,omitempty"`
+	Description          string                `xml:"description,omitempty"`
+	StationLocation      string                `xml:"stationLocation,omitempty"`
+	ConnectionStatusInfo *ConnectionStatusInfo `xml:"connectionStatusInfo,omitempty"`
 }
 
 // ContentItem represents metadata about the currently playing content
@@ -42,6 +43,17 @@ type ContentItem struct {
 	IsPresetable  bool   `xml:"isPresetable,attr"`
 	ItemName      string `xml:"itemName,omitempty"`
 	ContainerArt  string `xml:"containerArt,omitempty"`
+}
+
+// ConnectionStatusInfo describes the active Bluetooth connection state.
+type ConnectionStatusInfo struct {
+	DeviceName string `xml:"deviceName,attr"`
+	Status     string `xml:"status,attr"`
+}
+
+// IsDiscoverable reports whether the speaker is advertising for pairing.
+func (c *ConnectionStatusInfo) IsDiscoverable() bool {
+	return c != nil && c.Status == "DISCOVERABLE"
 }
 
 // Art represents album artwork information

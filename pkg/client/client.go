@@ -170,6 +170,11 @@ type Client struct {
 	avTransportURLOverride string
 }
 
+// ErrMutationOutcomeUnknown reports that a state-changing GET may have reached
+// the speaker, but its authoritative response could not be verified. Callers
+// must read device state back rather than retrying the mutation blindly.
+var ErrMutationOutcomeUnknown = errors.New("state-changing GET outcome is unknown")
+
 // Config holds configuration for the SoundTouch client
 type Config struct {
 	Host      string
@@ -1022,6 +1027,152 @@ func (c *Client) SetClockTimeNow() error {
 	return c.SetClockTime(request)
 }
 
+// GetSystemTimeout retrieves the power-saving setting from /systemtimeout.
+func (c *Client) GetSystemTimeout() (*models.SystemTimeout, error) {
+	var setting models.SystemTimeout
+	if err := c.get("/systemtimeout", &setting); err != nil {
+		return nil, fmt.Errorf("failed to get system timeout: %w", err)
+	}
+
+	return &setting, nil
+}
+
+// SetSystemTimeout updates /systemtimeout. HTTP success only confirms that the
+// request was accepted; callers must read the setting back before reporting it.
+func (c *Client) SetSystemTimeout(setting *models.SystemTimeout) error {
+	if err := setting.Validate(); err != nil {
+		return fmt.Errorf("invalid system timeout request: %w", err)
+	}
+
+	if err := c.post("/systemtimeout", setting); err != nil {
+		return fmt.Errorf("failed to set system timeout: %w", err)
+	}
+
+	return nil
+}
+
+// GetRebroadcastLatencyMode retrieves /rebroadcastlatencymode.
+func (c *Client) GetRebroadcastLatencyMode() (*models.RebroadcastLatencyMode, error) {
+	var setting models.RebroadcastLatencyMode
+	if err := c.get("/rebroadcastlatencymode", &setting); err != nil {
+		return nil, fmt.Errorf("failed to get rebroadcast latency mode: %w", err)
+	}
+
+	return &setting, nil
+}
+
+// SetRebroadcastLatencyMode updates /rebroadcastlatencymode. HTTP success only
+// confirms request acceptance; callers must read the setting back.
+func (c *Client) SetRebroadcastLatencyMode(mode models.RebroadcastLatencyModeValue) error {
+	request := &models.RebroadcastLatencyModeRequest{Mode: mode}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid rebroadcast latency mode request: %w", err)
+	}
+
+	if err := c.post("/rebroadcastlatencymode", request); err != nil {
+		return fmt.Errorf("failed to set rebroadcast latency mode: %w", err)
+	}
+
+	return nil
+}
+
+// GetLanguage retrieves the current integer system language from /language.
+// Unknown codes are returned unchanged for compatibility with newer firmware.
+func (c *Client) GetLanguage() (*models.SystemLanguage, error) {
+	var language models.SystemLanguage
+	if err := c.get("/language", &language); err != nil {
+		return nil, fmt.Errorf("failed to get system language: %w", err)
+	}
+
+	return &language, nil
+}
+
+// SetLanguage updates /language. HTTP success only confirms request acceptance;
+// callers must read the language back before reporting the change.
+func (c *Client) SetLanguage(code models.LanguageCode) error {
+	request := &models.SystemLanguage{Code: code}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid system language request: %w", err)
+	}
+
+	if err := c.post("/language", request); err != nil {
+		return fmt.Errorf("failed to set system language: %w", err)
+	}
+
+	return nil
+}
+
+// GetBluetoothInfo retrieves the speaker adapter information from /bluetoothInfo.
+func (c *Client) GetBluetoothInfo() (*models.BluetoothInfo, error) {
+	var info models.BluetoothInfo
+	if err := c.get("/bluetoothInfo", &info); err != nil {
+		return nil, fmt.Errorf("failed to get Bluetooth info: %w", err)
+	}
+
+	return &info, nil
+}
+
+// RenameSource updates the source display name through /nameSource. HTTP
+// success only confirms request acceptance; callers must read sources back.
+func (c *Client) RenameSource(source, sourceAccount, itemName string) error {
+	request := &models.SourceRenameRequest{
+		Source:        source,
+		SourceAccount: sourceAccount,
+		ItemName:      itemName,
+	}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid source rename request: %w", err)
+	}
+
+	if err := c.post("/nameSource", request); err != nil {
+		return fmt.Errorf("failed to rename source: %w", err)
+	}
+
+	return nil
+}
+
+// EnterPairingMode requests the firmware's legacy general pairing mode through
+// its state-changing GET endpoint.
+func (c *Client) EnterPairingMode() error {
+	if err := c.mutatingGetConfirmStatus("/enterPairingMode"); err != nil {
+		return fmt.Errorf("failed to enter pairing mode: %w", err)
+	}
+
+	return nil
+}
+
+// EnterBluetoothPairing requests Bluetooth discoverable mode through the
+// Bluetooth-specific state-changing GET endpoint. Callers must verify
+// discoverability through a subsequent now-playing read.
+func (c *Client) EnterBluetoothPairing() error {
+	if err := c.mutatingGetConfirmStatus("/enterBluetoothPairing"); err != nil {
+		return fmt.Errorf("failed to enter Bluetooth pairing mode: %w", err)
+	}
+
+	return nil
+}
+
+// ClearPairedList requests the firmware's legacy general paired-list clearing
+// through its state-changing GET endpoint.
+func (c *Client) ClearPairedList() error {
+	if err := c.mutatingGetConfirmStatus("/clearPairedList"); err != nil {
+		return fmt.Errorf("failed to clear paired list: %w", err)
+	}
+
+	return nil
+}
+
+// ClearBluetoothPaired requests removal of Bluetooth pairings through the
+// Bluetooth-specific state-changing GET endpoint. The firmware exposes no
+// paired-list readback, so HTTP success alone does not verify physical state.
+func (c *Client) ClearBluetoothPaired() error {
+	if err := c.mutatingGetConfirmStatus("/clearBluetoothPaired"); err != nil {
+		return fmt.Errorf("failed to clear Bluetooth paired devices: %w", err)
+	}
+
+	return nil
+}
+
 // GetClockDisplay retrieves clock display settings from the /clockDisplay endpoint
 func (c *Client) GetClockDisplay() (*models.ClockDisplay, error) {
 	var clockDisplay models.ClockDisplay
@@ -1157,9 +1308,9 @@ func (c *Client) getWithHTTPClient(httpClient *http.Client, endpoint string, res
 }
 
 // mutatingGet performs a firmware-required state-changing GET exactly once at
-// the HTTP transport layer. A fresh connection prevents net/http from
-// automatically replaying the request after an ambiguous failure on a reused
-// connection.
+// the HTTP transport layer, unmarshaling the response into result. A fresh
+// connection prevents net/http from automatically replaying the request
+// after an ambiguous failure on a reused connection.
 func (c *Client) mutatingGet(endpoint string, result interface{}) error {
 	baseTransport := c.httpClient.Transport
 	if baseTransport == nil {
@@ -1185,6 +1336,122 @@ func (c *Client) mutatingGet(endpoint string, result interface{}) error {
 	}
 
 	return c.getWithHTTPClient(oneShotClient, endpoint, result)
+}
+
+// mutatingGetConfirmStatus performs the same one-shot, firmware-required
+// state-changing GET as mutatingGet, for endpoints that return no meaningful
+// body to unmarshal -- confirmation instead comes from the device echoing
+// back <status>{endpoint}</status>.
+func (c *Client) mutatingGetConfirmStatus(endpoint string) error {
+	baseTransport := c.httpClient.Transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+
+	transport, ok := baseTransport.(*http.Transport)
+	if !ok {
+		return errors.New("state-changing GET requires a cloneable HTTP transport")
+	}
+
+	oneShotTransport := transport.Clone()
+
+	oneShotTransport.DisableKeepAlives = true
+	defer oneShotTransport.CloseIdleConnections()
+
+	oneShotClient := &http.Client{
+		Transport: oneShotTransport,
+		Timeout:   c.httpClient.Timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "application/xml")
+
+	resp, err := oneShotClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: failed to execute request: %w", ErrMutationOutcomeUnknown, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("%w: failed to read response: %w", ErrMutationOutcomeUnknown, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if apiErr := mutationAPIError(body); apiErr != nil {
+			return apiErr
+		}
+
+		return fmt.Errorf(
+			"%w: API request failed with status %d: %s",
+			ErrMutationOutcomeUnknown,
+			resp.StatusCode,
+			string(body),
+		)
+	}
+
+	if apiErr := mutationAPIError(body); apiErr != nil {
+		return apiErr
+	}
+
+	return validateMutationStatus(body, endpoint)
+}
+
+func mutationAPIError(body []byte) error {
+	switch mutationResponseRoot(body) {
+	case "errors":
+		var errs models.ErrorsResponse
+		if err := xml.Unmarshal(body, &errs); err == nil && len(errs.Errors) > 0 {
+			return &errs
+		}
+	case "error":
+		var apiError models.APIError
+		if err := xml.Unmarshal(body, &apiError); err == nil && apiError.Message != "" {
+			return &apiError
+		}
+	}
+
+	return nil
+}
+
+func mutationResponseRoot(body []byte) string {
+	var root struct {
+		XMLName xml.Name
+	}
+	if xml.Unmarshal(body, &root) != nil {
+		return ""
+	}
+
+	return root.XMLName.Local
+}
+
+func validateMutationStatus(body []byte, endpoint string) error {
+	var status struct {
+		XMLName xml.Name `xml:"status"`
+		Value   string   `xml:",chardata"`
+	}
+	if err := xml.Unmarshal(body, &status); err != nil {
+		return fmt.Errorf("%w: malformed XML response: %w", ErrMutationOutcomeUnknown, err)
+	}
+
+	if strings.TrimSpace(status.Value) != endpoint {
+		return fmt.Errorf(
+			"%w: expected <status>%s</status>, got %s",
+			ErrMutationOutcomeUnknown,
+			endpoint,
+			strings.TrimSpace(string(body)),
+		)
+	}
+
+	return nil
 }
 
 // post performs a POST request with XML body
