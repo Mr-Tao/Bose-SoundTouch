@@ -307,6 +307,35 @@ func TestNowPlaying_UnmarshalXML(t *testing.T) {
 	}
 }
 
+func TestNowPlaying_BluetoothConnectionStatusInfo(t *testing.T) {
+	input := `<nowPlaying source="BLUETOOTH"><connectionStatusInfo deviceName="Phone" status="DISCOVERABLE"></connectionStatusInfo></nowPlaying>`
+	var nowPlaying NowPlaying
+	if err := xml.Unmarshal([]byte(input), &nowPlaying); err != nil {
+		t.Fatalf("xml.Unmarshal(): %v", err)
+	}
+	if nowPlaying.ConnectionStatusInfo == nil {
+		t.Fatal("ConnectionStatusInfo is nil")
+	}
+	if nowPlaying.ConnectionStatusInfo.DeviceName != "Phone" {
+		t.Fatalf("DeviceName = %q, want Phone", nowPlaying.ConnectionStatusInfo.DeviceName)
+	}
+	if nowPlaying.ConnectionStatusInfo.Status != "DISCOVERABLE" {
+		t.Fatalf("Status = %q, want DISCOVERABLE", nowPlaying.ConnectionStatusInfo.Status)
+	}
+	if !nowPlaying.ConnectionStatusInfo.IsDiscoverable() {
+		t.Fatal("IsDiscoverable() = false, want true")
+	}
+
+	nowPlaying.ConnectionStatusInfo.Status = "CONNECTED"
+	if nowPlaying.ConnectionStatusInfo.IsDiscoverable() {
+		t.Fatal("IsDiscoverable() = true for CONNECTED")
+	}
+	var absent *ConnectionStatusInfo
+	if absent.IsDiscoverable() {
+		t.Fatal("nil IsDiscoverable() = true")
+	}
+}
+
 func TestNowPlaying_RadioStation(t *testing.T) {
 	xmlData := `<?xml version="1.0" encoding="UTF-8" ?>
 <nowPlaying deviceID="AABBCCDDEEFF" source="TUNEIN">
