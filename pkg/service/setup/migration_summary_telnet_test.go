@@ -105,6 +105,14 @@ func TestGetMigrationSummary_TelnetFailsSSHFails(t *testing.T) {
 	if !strings.Contains(summary.TelnetProbeError, "connection refused") {
 		t.Errorf("TelnetProbeError = %q, want connection refused", summary.TelnetProbeError)
 	}
+
+	if summary.MigrationDataReadiness != MigrationDataReadinessUnverified {
+		t.Errorf(
+			"MigrationDataReadiness = %q, want %q for a datastore-less summary",
+			summary.MigrationDataReadiness,
+			MigrationDataReadinessUnverified,
+		)
+	}
 }
 
 func TestGetMigrationSummary_IsPairedFromLiveInfo(t *testing.T) {

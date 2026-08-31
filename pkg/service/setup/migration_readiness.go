@@ -2,6 +2,7 @@ package setup
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,13 +18,16 @@ type MigrationDataNotReadyError struct {
 	Action string
 }
 
-func (e *MigrationDataNotReadyError) Error() string {
-	action := e.Action
-	if action == "" {
-		action = "Run Data Sync for this device and retry migration."
+func (e *MigrationDataNotReadyError) effectiveAction() string {
+	if e.Action != "" {
+		return e.Action
 	}
 
-	return fmt.Sprintf("Migration data is not ready: %s. %s", e.Reason, action)
+	return "Run Data Sync for this device and retry migration."
+}
+
+func (e *MigrationDataNotReadyError) Error() string {
+	return fmt.Sprintf("Migration data is not ready: %s. %s", e.Reason, e.effectiveAction())
 }
 
 func migrationDataNotReadyf(format string, args ...any) error {
@@ -32,6 +36,53 @@ func migrationDataNotReadyf(format string, args ...any) error {
 
 func migrationDataNotReadyWithAction(reason, action string) error {
 	return &MigrationDataNotReadyError{Reason: reason, Action: action}
+}
+
+const (
+	MigrationDataReadinessReady      = "ready"
+	MigrationDataReadinessBlocked    = "blocked"
+	MigrationDataReadinessUnverified = "unverified"
+)
+
+type migrationDataReadinessResult struct {
+	State  string
+	Reason string
+	Action string
+}
+
+// migrationDataReadiness exposes the mutation gate as a read-only result for
+// callers planning a migration. Service-backed callers get the same data
+// check that MigrateSpeaker runs when it has a datastore. A datastore-less
+// summary is explicitly unverified; the legacy direct CLI migration path can
+// still bypass this check and is not a fleet-safe migration path.
+func (m *Manager) migrationDataReadiness(deviceIP string) migrationDataReadinessResult {
+	if m.DataStore == nil {
+		return migrationDataReadinessResult{
+			State:  MigrationDataReadinessUnverified,
+			Reason: "the caller has no service datastore to verify",
+			Action: "Run the service-backed migration summary before migrating.",
+		}
+	}
+
+	err := m.checkMigrationDataReady(deviceIP)
+	if err == nil {
+		return migrationDataReadinessResult{State: MigrationDataReadinessReady}
+	}
+
+	var notReady *MigrationDataNotReadyError
+	if errors.As(err, &notReady) {
+		return migrationDataReadinessResult{
+			State:  MigrationDataReadinessBlocked,
+			Reason: notReady.Reason,
+			Action: notReady.effectiveAction(),
+		}
+	}
+
+	return migrationDataReadinessResult{
+		State:  MigrationDataReadinessBlocked,
+		Reason: err.Error(),
+		Action: "Resolve the readiness error and retry the service-backed summary.",
+	}
 }
 
 // checkMigrationDataReady proves that redirecting the speaker to this service

@@ -76,6 +76,9 @@ type MigrationSummary struct {
 	DeviceID                 string      `json:"device_id,omitempty"`
 	AccountID                string      `json:"account_id,omitempty"`
 	FirmwareVersion          string      `json:"firmware_version,omitempty"`
+	MigrationDataReadiness   string      `json:"migration_data_readiness"`
+	MigrationDataReason      string      `json:"migration_data_reason,omitempty"`
+	MigrationDataAction      string      `json:"migration_data_action,omitempty"`
 	CACertTrusted            bool        `json:"ca_cert_trusted"`
 	ServerHTTPSURL           string      `json:"server_https_url,omitempty"`
 	CurrentResolvConf        string      `json:"current_resolv_conf,omitempty"`
@@ -322,6 +325,11 @@ func (m *Manager) GetMigrationSummary(deviceIP, targetURL, proxyURL string, opti
 	summary := &MigrationSummary{
 		SSHSuccess: false,
 	}
+	readinessCh := make(chan migrationDataReadinessResult, 1)
+
+	go func() {
+		readinessCh <- m.migrationDataReadiness(deviceIP)
+	}()
 
 	// Run the telnet preflight in parallel with the SSH-based probes below.
 	// Both transports are queried independently: SSH gives access to
@@ -402,6 +410,13 @@ func (m *Manager) GetMigrationSummary(deviceIP, targetURL, proxyURL string, opti
 	// 7. Cross-check SSH-XML and telnet-getpdo readings; surface any
 	// divergence as a non-fatal warning.
 	m.crossCheckPreflights(summary)
+
+	// 8. Merge the service-backed data-preservation gate. It runs in parallel
+	// with the transport probes above and never mutates the datastore or device.
+	readiness := <-readinessCh
+	summary.MigrationDataReadiness = readiness.State
+	summary.MigrationDataReason = readiness.Reason
+	summary.MigrationDataAction = readiness.Action
 
 	return summary, nil
 }

@@ -275,7 +275,7 @@ Device migration switches your SoundTouch devices from Bose's cloud services to 
 
 ```bash
 # Get migration summary first
-curl http://localhost:8000/setup/migration-summary/192.0.2.100
+curl http://localhost:8000/setup/summary/192.0.2.100
 
 # Perform migration
 curl -X POST http://localhost:8000/setup/migrate/192.0.2.100
@@ -414,7 +414,7 @@ Triggers immediate network device discovery.
 #### `GET /setup/info/{deviceIP}`
 Gets detailed device information and configuration.
 
-#### `GET /setup/migration-summary/{deviceIP}`
+#### `GET /setup/summary/{deviceIP}`
 Analyzes device configuration and provides migration preview.
 
 **Response:**
@@ -423,6 +423,7 @@ Analyzes device configuration and provides migration preview.
   "device_name": "Living Room Speaker",
   "device_model": "SoundTouch 20",
   "firmware_version": "19.0.5",
+  "migration_data_readiness": "ready",
   "ssh_success": true,
   "current_config": "<?xml version=\"1.0\"?>...",
   "planned_config": "<?xml version=\"1.0\"?>...",
@@ -430,6 +431,17 @@ Analyzes device configuration and provides migration preview.
   "migration_required": true
 }
 ```
+
+`migration_data_readiness` is `ready`, `blocked`, or `unverified`. A blocked
+summary also includes `migration_data_reason` and `migration_data_action`.
+Only the service-backed `ready` state proves that the exact live device,
+persisted preset snapshot, and rendered account data agree. A datastore-less
+caller is `unverified`. The migration endpoint runs the same gate again
+before its migration sequence begins, but the preview is not an authorization
+token and is not atomic with concurrent Data Sync, account pairing, device
+removal, or another migration. The legacy direct CLI migration path can bypass
+the datastore gate and is therefore outside the service-backed safety
+workflow.
 
 #### `POST /setup/migrate/{deviceIP}`
 Migrates device to use local services.
@@ -845,7 +857,7 @@ curl http://192.0.2.100:8090/info
 ssh-keyscan 192.0.2.100
 
 # Get migration summary
-curl http://localhost:8000/setup/migration-summary/192.0.2.100
+curl http://localhost:8000/setup/summary/192.0.2.100
 
 # Verify device configuration
 curl http://192.0.2.100:8090/info

@@ -196,6 +196,54 @@ func TestMigrationDataReadinessAllowsValidEmptyAndSyncedPresets(t *testing.T) {
 	})
 }
 
+func TestMigrationDataReadinessSummaryStates(t *testing.T) {
+	t.Run("unverified without datastore", func(t *testing.T) {
+		m := NewManager("http://aftertouch.example:8000", nil, nil)
+
+		result := m.migrationDataReadiness("192.0.2.1")
+
+		if result.State != MigrationDataReadinessUnverified {
+			t.Fatalf("state = %q, want %q", result.State, MigrationDataReadinessUnverified)
+		}
+		if !strings.Contains(result.Action, "service-backed") {
+			t.Fatalf("action = %q, want service-backed guidance", result.Action)
+		}
+	})
+
+	t.Run("blocked with actionable reason", func(t *testing.T) {
+		m, _, deviceIP := newMigrationReadinessFixture(t, `<presets/>`)
+
+		result := m.migrationDataReadiness(deviceIP)
+
+		if result.State != MigrationDataReadinessBlocked {
+			t.Fatalf("state = %q, want %q", result.State, MigrationDataReadinessBlocked)
+		}
+		if !strings.Contains(result.Reason, "missing") {
+			t.Fatalf("reason = %q, want missing snapshot", result.Reason)
+		}
+		if !strings.Contains(result.Action, "Data Sync") {
+			t.Fatalf("action = %q, want Data Sync guidance", result.Action)
+		}
+	})
+
+	t.Run("ready with exact synced data", func(t *testing.T) {
+		preset := readinessPreset("1", "Radio", "http://radio.example/stream")
+		m, ds, deviceIP := newMigrationReadinessFixture(t, livePresetsXML(preset))
+		if err := ds.SavePresets(readinessAccount, readinessDevice, []models.ServicePreset{preset}); err != nil {
+			t.Fatalf("SavePresets: %v", err)
+		}
+
+		result := m.migrationDataReadiness(deviceIP)
+
+		if result.State != MigrationDataReadinessReady {
+			t.Fatalf("state = %q, want %q: reason=%q", result.State, MigrationDataReadinessReady, result.Reason)
+		}
+		if result.Reason != "" || result.Action != "" {
+			t.Fatalf("ready result contains guidance: %#v", result)
+		}
+	})
+}
+
 func TestMigrationDataReadinessDoesNotRewritePresetSnapshots(t *testing.T) {
 	t.Run("ready single device", func(t *testing.T) {
 		preset := readinessPreset("1", "Target Radio", "http://radio.example/target")

@@ -179,6 +179,16 @@ account and device and verifies that its rendered account data preserves every
 live preset slot. If the migration page asks for Data Sync, sync the device and
 retry instead of bypassing the check.
 
+The service-backed migration summary reports this check as `ready`, `blocked`,
+or `unverified`, with an actionable reason for non-ready states. Continue only
+from `ready`. The service-backed Apply request re-runs the same check before
+its migration sequence begins. Do not run Data Sync, account pairing, device
+removal, or another migration concurrently: the preview is not an
+authorization token and the check is not atomic with those operations. A
+datastore-less CLI summary is intentionally `unverified`; the legacy direct
+CLI migration path can bypass this gate and is not a substitute for the
+service-backed workflow.
+
 Migration is also refused while the rendered account contains another device.
 Some speaker firmware wipes its presets after a reboot-triggered resync of a
 shared account even when `/full` contains the correct data. Move the speaker to
