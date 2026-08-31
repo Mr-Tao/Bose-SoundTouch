@@ -340,7 +340,7 @@ render(h(Fixture), document.getElementById('fixture'));
 				playStatus = "STOP_STATE"
 			} else if currentMode == "pause" {
 				if read >= 2 {
-					playStatus = "PAUSE_STATE"
+					playStatus = "STOP_STATE"
 				}
 			} else if currentMode == "mute" {
 				nowPlayingRevision = 200
@@ -454,6 +454,36 @@ render(h(Fixture), document.getElementById('fixture'));
 	for _, command := range []string{"power", "pause", "mute", "shuffle", "repeat", "next", "previous"} {
 		if reads[command] != 3 {
 			t.Errorf("%s readbacks = %d, want 3", command, reads[command])
+		}
+	}
+}
+
+func TestPauseConfirmationAcceptsFirmwareStopWithoutConfirmingStandby(t *testing.T) {
+	const fixture = `
+import { matchesCommand } from '/app/static/js/discreteCommand.js';
+const pause = {action: 'pause'};
+window.pauseConfirmationChecks = {
+  paused: matchesCommand({nowPlaying: {Source: 'PRODUCT', PlayStatus: 'PAUSE_STATE'}}, pause),
+  stoppedSource: matchesCommand({nowPlaying: {Source: 'LOCAL_INTERNET_RADIO', PlayStatus: 'STOP_STATE'}}, pause),
+  standby: !matchesCommand({nowPlaying: {Source: 'STANDBY', PlayStatus: 'STOP_STATE'}}, pause),
+  emptySource: !matchesCommand({nowPlaying: {Source: '', PlayStatus: 'STOP_STATE'}}, pause),
+};
+`
+
+	server := newPlayerFixtureServer(t, fixture, func(chi.Router) {})
+	ctx := newHeadlessChromeContext(t)
+
+	var checks map[string]bool
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(server.URL+"/fixture"),
+		chromedp.Poll(`window.pauseConfirmationChecks !== undefined`, nil),
+		chromedp.Evaluate(`window.pauseConfirmationChecks`, &checks),
+	); err != nil {
+		t.Fatalf("exercise pause confirmation matrix: %v", err)
+	}
+	for name, passed := range checks {
+		if !passed {
+			t.Errorf("pause confirmation check %s failed", name)
 		}
 	}
 }
