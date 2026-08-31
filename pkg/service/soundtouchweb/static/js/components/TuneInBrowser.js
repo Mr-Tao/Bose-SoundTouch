@@ -35,7 +35,12 @@ function toSections(data) {
     }));
 }
 
-export function TuneInBrowser({ devices }) {
+export function TuneInBrowser({
+    devices,
+    onPlaybackRequest,
+    playbackBusy = false,
+    commandReadbackDelays,
+}) {
     const [sections, setSections] = useState([]);
     const [navStack, setNavStack] = useState([{ label: 'TuneIn', path: null }]);
     const [searchQuery, setSearchQuery] = useState('');
@@ -85,6 +90,7 @@ export function TuneInBrowser({ devices }) {
             setNavStack(s => [...s, { label: item.name, path }]);
             browse(path);
         } else if (play) {
+            if (playbackBusy) return;
             setPendingPlay({ ...play, name: item.name, image: item.imageUrl });
         }
     }
@@ -95,9 +101,25 @@ export function TuneInBrowser({ devices }) {
         browse(stack[stack.length - 1].path);
     }
 
-    async function playOn(deviceId) {
-        await api.tuneInPlay(deviceId, { location: pendingPlay.location, type: pendingPlay.type, name: pendingPlay.name });
-        setPendingPlay(null);
+    function playOn(deviceId) {
+        const item = pendingPlay;
+        if (!item) return;
+        const accepted = onPlaybackRequest?.({
+            deviceId,
+            action: 'tunein',
+            readbackDelays: commandReadbackDelays,
+            invoke: () => api.tuneInPlay(deviceId, {
+                location: item.location,
+                type: item.type,
+                name: item.name,
+            }),
+            expected: {
+                source: 'TUNEIN',
+                location: item.location,
+                itemName: item.name,
+            },
+        });
+        if (accepted !== false) setPendingPlay(null);
     }
 
     const deviceEntries = Object.entries(devices);
@@ -153,6 +175,7 @@ export function TuneInBrowser({ devices }) {
                                         <button
                                             class="tunein-play-btn"
                                             title="Play"
+                                            disabled=${playbackBusy}
                                             onClick=${(e) => {
                                                 e.stopPropagation();
                                                 setPendingPlay({ ...play, name: item.name, image: item.imageUrl });
@@ -180,7 +203,12 @@ export function TuneInBrowser({ devices }) {
                         <div class="picker-devices">
                             ${deviceEntries.length === 0 ? html`<p class="picker-no-devices">No devices found. Try discovering first.</p>` : null}
                             ${deviceEntries.map(([id, d]) => html`
-                                <button class="picker-device-btn" key=${id} onClick=${() => playOn(id)}>
+                                <button
+                                    class="picker-device-btn"
+                                    key=${id}
+                                    disabled=${playbackBusy}
+                                    onClick=${() => playOn(id)}
+                                >
                                     <div class="picker-device-info">
                                         <span class="picker-device-name">${d.info?.name || id}</span>
                                         <span class="picker-device-ip">${d.info?.ip_address || ''}</span>
