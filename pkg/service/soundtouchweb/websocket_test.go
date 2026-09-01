@@ -256,6 +256,242 @@ func TestReserveZoneRefreshesAfterEventFencesOlderPollBeforeIO(t *testing.T) {
 	}
 }
 
+type standbyZoneSpeaker struct {
+	server   *httptest.Server
+	mu       sync.Mutex
+	zone     string
+	requests chan struct{}
+	zoneGets int
+}
+
+func newStandbyZoneSpeaker(t *testing.T, zone string) *standbyZoneSpeaker {
+	t.Helper()
+
+	speaker := &standbyZoneSpeaker{
+		zone:     zone,
+		requests: make(chan struct{}, 4),
+	}
+	speaker.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/getZone" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		speaker.mu.Lock()
+		speaker.zoneGets++
+		body := speaker.zone
+		speaker.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(body))
+		speaker.requests <- struct{}{}
+	}))
+	t.Cleanup(speaker.server.Close)
+
+	return speaker
+}
+
+func (speaker *standbyZoneSpeaker) waitForRequest(t *testing.T) {
+	t.Helper()
+
+	select {
+	case <-speaker.requests:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for standby zone refresh")
+	}
+}
+
+func (speaker *standbyZoneSpeaker) getCount() int {
+	speaker.mu.Lock()
+	defer speaker.mu.Unlock()
+
+	return speaker.zoneGets
+}
+
+func waitForZoneState(
+	t *testing.T,
+	conn *webtypes.DeviceConnection,
+	accept func(*models.ZoneInfo) bool,
+) *models.ZoneInfo {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		zone := conn.Status().Zone
+		if accept(zone) {
+			return zone
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for authoritative zone state: %+v", conn.Status().Zone)
+	return nil
+}
+
+func TestNowPlayingStandbyRefreshesAndClearsDissolvedZone(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master:  "master-id",
+		Members: []models.Member{{DeviceID: "member-id", IP: "192.0.2.20"}},
+	}
+	masterSpeaker := newStandbyZoneSpeaker(t, `<zone />`)
+
+	app := NewWebApp()
+	master := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(masterSpeaker.server.URL),
+		&models.DeviceInfo{DeviceID: "master-id", Name: "Master"},
+	)
+	master.SetStatus(&webtypes.DeviceStatus{
+		NowPlaying: &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO"},
+		Zone:       zone,
+	})
+	app.AddDevice("192.0.2.10", master)
+
+	member := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{DeviceID: "member-id", Name: "Member"})
+	member.SetStatus(&webtypes.DeviceStatus{
+		NowPlaying: &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO"},
+	})
+	app.AddDevice("192.0.2.20", member)
+
+	standby := &models.NowPlaying{Source: "STANDBY"}
+	if !app.applyNowPlayingEvent(member, standby) {
+		t.Fatal("standby transition was not reported as changed")
+	}
+	masterSpeaker.waitForRequest(t)
+	waitForZoneState(t, master, func(zone *models.ZoneInfo) bool { return zone == nil })
+
+	if master.Status().Zone != nil {
+		t.Fatalf("confirmed dissolved zone survived: %+v", master.Status().Zone)
+	}
+	if got := masterSpeaker.getCount(); got != 1 {
+		t.Fatalf("master /getZone requests = %d, want 1", got)
+	}
+
+	if app.applyNowPlayingEvent(member, standby) {
+		t.Fatal("duplicate standby payload was reported as changed")
+	}
+	select {
+	case <-masterSpeaker.requests:
+		t.Fatal("duplicate standby event triggered another zone refresh")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestNowPlayingStandbyPreservesAuthoritativeZone(t *testing.T) {
+	zoneXML := `<zone master="master-id"><member ipaddress="192.0.2.20">member-id</member></zone>`
+	masterSpeaker := newStandbyZoneSpeaker(t, zoneXML)
+
+	app := NewWebApp()
+	master := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(masterSpeaker.server.URL),
+		&models.DeviceInfo{DeviceID: "master-id", Name: "Master"},
+	)
+	master.SetStatus(&webtypes.DeviceStatus{
+		NowPlaying: &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO"},
+	})
+	app.AddDevice("192.0.2.10", master)
+
+	if !app.applyNowPlayingEvent(master, &models.NowPlaying{Source: "STANDBY"}) {
+		t.Fatal("standby transition was not reported as changed")
+	}
+	masterSpeaker.waitForRequest(t)
+	current := waitForZoneState(t, master, func(zone *models.ZoneInfo) bool { return zone != nil })
+
+	if current.Master != "master-id" || len(current.Members) != 1 {
+		t.Fatalf("authoritative zone was discarded: %+v", current)
+	}
+}
+
+func TestStandbyEventInvalidatesOlderZonePollAfterMissedPlayEvent(t *testing.T) {
+	zone := &models.ZoneInfo{
+		Master:  "master-id",
+		Members: []models.Member{{DeviceID: "member-id", IP: "192.0.2.20"}},
+	}
+	masterSpeaker := newStandbyZoneSpeaker(t, `<zone />`)
+
+	app := NewWebApp()
+	master := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(masterSpeaker.server.URL),
+		&models.DeviceInfo{DeviceID: "master-id", Name: "Master"},
+	)
+	master.SetStatus(&webtypes.DeviceStatus{
+		NowPlaying: &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO"},
+		Zone:       zone,
+	})
+	app.AddDevice("192.0.2.10", master)
+
+	staleGeneration := master.BeginZoneRefresh()
+	if !app.applyNowPlayingEvent(master, &models.NowPlaying{Source: "STANDBY"}) {
+		t.Fatal("standby transition was not reported as changed")
+	}
+	masterSpeaker.waitForRequest(t)
+	waitForZoneState(t, master, func(zone *models.ZoneInfo) bool { return zone == nil })
+
+	if master.ApplyPolledZone(staleGeneration, "master-id", zone) {
+		t.Fatal("pre-standby zone poll was accepted after standby invalidation")
+	}
+	if master.Status().Zone != nil {
+		t.Fatalf("confirmed dissolved zone survived: %+v", master.Status().Zone)
+	}
+}
+
+func TestMemberStandbyInvalidatesUncachedMasterPollDespiteCachedClaim(t *testing.T) {
+	staleZone := &models.ZoneInfo{
+		Master:  "uncached-master-id",
+		Members: []models.Member{{DeviceID: "member-id", IP: "192.0.2.20"}},
+	}
+	uncachedMasterSpeaker := newStandbyZoneSpeaker(t, `<zone />`)
+	cachedMasterSpeaker := newStandbyZoneSpeaker(t, `<zone />`)
+
+	app := NewWebApp()
+	uncachedMaster := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(uncachedMasterSpeaker.server.URL),
+		&models.DeviceInfo{DeviceID: "uncached-master-id", Name: "Uncached master"},
+	)
+	uncachedMaster.SetStatus(&webtypes.DeviceStatus{
+		NowPlaying: &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO"},
+	})
+	cachedMaster := webtypes.NewDeviceConnection(
+		client.NewClientFromHost(cachedMasterSpeaker.server.URL),
+		&models.DeviceInfo{DeviceID: "cached-master-id", Name: "Cached master"},
+	)
+	cachedMaster.SetStatus(&webtypes.DeviceStatus{
+		NowPlaying: &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO"},
+		Zone: &models.ZoneInfo{
+			Master:  "cached-master-id",
+			Members: []models.Member{{DeviceID: "member-id", IP: "192.0.2.20"}},
+		},
+	})
+	member := webtypes.NewDeviceConnection(nil, &models.DeviceInfo{
+		DeviceID: "member-id",
+		Name:     "Member",
+	})
+	member.SetStatus(&webtypes.DeviceStatus{
+		NowPlaying: &models.NowPlaying{Source: "LOCAL_INTERNET_RADIO"},
+	})
+	app.AddDevice("192.0.2.10", uncachedMaster)
+	app.AddDevice("192.0.2.11", cachedMaster)
+	app.AddDevice("192.0.2.20", member)
+
+	// The real topology is known only to this pre-event poll. The cached claim
+	// points at a different master, so targeted invalidation alone is insufficient.
+	staleGeneration := uncachedMaster.BeginZoneRefresh()
+	if !app.applyNowPlayingEvent(member, &models.NowPlaying{Source: "STANDBY"}) {
+		t.Fatal("member standby transition was not reported as changed")
+	}
+	if uncachedMaster.ApplyPolledZone(staleGeneration, "uncached-master-id", staleZone) {
+		t.Fatal("uncached master poll crossed the standby reservation barrier")
+	}
+
+	uncachedMasterSpeaker.waitForRequest(t)
+	cachedMasterSpeaker.waitForRequest(t)
+	waitForZoneState(t, cachedMaster, func(zone *models.ZoneInfo) bool { return zone == nil })
+	if uncachedMaster.Status().Zone != nil || cachedMaster.Status().Zone != nil {
+		t.Fatalf("authoritative standalone state was not retained: uncached=%+v cached=%+v",
+			uncachedMaster.Status().Zone, cachedMaster.Status().Zone)
+	}
+}
+
 func TestPeriodicPlayerMessagesPreserveStatusUpdateStream(t *testing.T) {
 	app := NewWebApp()
 	group := testStereoGroup()

@@ -138,13 +138,37 @@ func (app *WebApp) applyNowPlayingEvent(
 	conn *webtypes.DeviceConnection,
 	nowPlaying *models.NowPlaying,
 ) bool {
-	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+	enteredStandby := false
+	changed := app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+		previousSource := ""
+		if status.NowPlaying != nil {
+			previousSource = status.NowPlaying.Source
+		}
+
 		changed := !reflect.DeepEqual(status.NowPlaying, nowPlaying)
 		status.NowPlaying = nowPlaying
 		status.LastActivity = time.Now()
+		enteredStandby = !isStandbySource(previousSource) &&
+			nowPlaying != nil && isStandbySource(nowPlaying.Source)
 
 		return changed
 	})
+
+	if enteredStandby {
+		// POWER is a toggle and its HTTP response cannot confirm topology. The
+		// speaker's standby event is the invalidation hint; /getZone stays authoritative.
+		eventDeviceID := zoneEventDeviceID("", conn)
+		for _, refresh := range app.reserveZoneRefreshesAfterStandby(eventDeviceID) {
+			refresh := refresh
+			go app.completeAuthoritativeZoneRefresh(refresh)
+		}
+	}
+
+	return changed
+}
+
+func isStandbySource(source string) bool {
+	return strings.EqualFold(strings.TrimSpace(source), "STANDBY")
 }
 
 func (app *WebApp) applyVolumeEvent(
@@ -592,6 +616,22 @@ func (app *WebApp) reserveZoneRefreshesAfterEvent(
 	eventDeviceID string,
 	eventMasterID string,
 ) []pendingZoneRefresh {
+	return app.reserveZoneRefreshes(eventDeviceID, eventMasterID, false)
+}
+
+// reserveZoneRefreshesAfterStandby also covers masters that are not present in
+// the cached topology. A missed earlier zone event can leave the real master
+// known only to an in-flight poll, so every reachable device must receive the
+// generation barrier before any authoritative /getZone refresh starts.
+func (app *WebApp) reserveZoneRefreshesAfterStandby(eventDeviceID string) []pendingZoneRefresh {
+	return app.reserveZoneRefreshes(eventDeviceID, "", true)
+}
+
+func (app *WebApp) reserveZoneRefreshes(
+	eventDeviceID string,
+	eventMasterID string,
+	includeUncachedMasters bool,
+) []pendingZoneRefresh {
 	candidates := map[string]struct{}{}
 	if eventDeviceID = strings.TrimSpace(eventDeviceID); eventDeviceID != "" {
 		candidates[eventDeviceID] = struct{}{}
@@ -620,6 +660,11 @@ func (app *WebApp) reserveZoneRefreshesAfterEvent(
 
 		if masterID := strings.TrimSpace(status.Zone.Master); masterID != "" {
 			candidates[masterID] = struct{}{}
+		}
+	}
+	if includeUncachedMasters {
+		for deviceID := range connectionsByDeviceID {
+			candidates[deviceID] = struct{}{}
 		}
 	}
 

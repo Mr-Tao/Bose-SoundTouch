@@ -18,6 +18,16 @@ import { api } from './api.js';
 
 const html = htm.bind(h);
 
+function zoneTopologyKey(deviceId, zone) {
+    if (!zone) return `${deviceId}:standalone`;
+
+    const members = (zone.members || []).map(member => {
+        const physical = (member.physicalMembers || []).map(item => item.deviceId).join('+');
+        return `${member.controlId || ''}:${physical}`;
+    });
+    return `${deviceId}:${zone.masterControlId || ''}:${members.join(',')}`;
+}
+
 function DeviceDetail({ deviceId, devices, onBack }) {
     const device = devices[deviceId];
 
@@ -45,7 +55,7 @@ function DeviceDetail({ deviceId, devices, onBack }) {
             <${Controls} deviceId=${deviceId} status=${device.status} />
             <${Presets} deviceId=${deviceId} status=${device.status} />
             <${Sources} deviceId=${deviceId} status=${device.status} />
-            <${Zone} deviceId=${deviceId} devices=${devices} />
+            <${Zone} key=${zoneTopologyKey(deviceId, device.zone)} deviceId=${deviceId} devices=${devices} />
             <${Recents} deviceId=${deviceId} />
         </div>
     `;
@@ -94,12 +104,21 @@ function App() {
             .catch(err => console.error('Failed to fetch version:', err));
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${protocol}//${location.host}/api/control/ws`);
-        let reconnectTimer;
+        const websocketURL = `${protocol}//${location.host}/api/control/ws`;
+        let ws = null;
+        let reconnectTimer = null;
+        let reconnectDelay = 1000;
+        let refreshInFlight = false;
+        let refreshPending = false;
+        let projectionGeneration = 0;
+        let lifecycleGeneration = 0;
+        let resumeTimer = null;
+        let stopped = false;
 
-        ws.onmessage = (event) => {
+        function handleMessage(event) {
             const msg = JSON.parse(event.data);
             if (msg.type === 'devices') {
+                projectionGeneration++;
                 setDevices(msg.data || {});
             } else if (msg.type === 'discovery_status') {
                 if (msg.data?.isDiscovering !== undefined) {
@@ -114,6 +133,7 @@ function App() {
                     showToast(`Found ${msg.data.deviceCount} device(s)`);
                 }
             } else if (msg.type === 'status_update' && msg.deviceId) {
+                projectionGeneration++;
                 setDevices(prev => {
                     // Object.prototype.hasOwnProperty, not a plain prev[msg.deviceId]
                     // truthy check: a deviceId of "__proto__" or "constructor" would
@@ -126,15 +146,110 @@ function App() {
                     };
                 });
             }
-        };
+        }
 
-        ws.onclose = () => {
-            reconnectTimer = setTimeout(() => location.reload(), 5000);
-        };
+        async function refreshVisibleDevices() {
+            if (stopped) return;
+            if (refreshInFlight) {
+                refreshPending = true;
+                return;
+            }
+
+            refreshInFlight = true;
+            const projectionAtStart = projectionGeneration;
+            const lifecycleAtStart = lifecycleGeneration;
+            try {
+                const resp = await api.devices();
+                if (!stopped && resp?.success &&
+                    projectionAtStart === projectionGeneration &&
+                    lifecycleAtStart === lifecycleGeneration) {
+                    projectionGeneration++;
+                    setDevices(resp.data || {});
+                }
+            } catch (err) {
+                if (!stopped) console.error('Failed to refresh devices:', err);
+            } finally {
+                refreshInFlight = false;
+                if (refreshPending && !stopped) {
+                    refreshPending = false;
+                    refreshVisibleDevices();
+                }
+            }
+        }
+
+        function scheduleReconnect() {
+            if (stopped || reconnectTimer !== null) return;
+
+            const delay = reconnectDelay;
+            reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connectWebSocket();
+            }, delay);
+        }
+
+        function connectWebSocket() {
+            if (stopped || ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) return;
+
+            const socket = new WebSocket(websocketURL);
+            ws = socket;
+            socket.onopen = () => {
+                if (ws === socket) reconnectDelay = 1000;
+            };
+            socket.onmessage = event => {
+                if (ws === socket) handleMessage(event);
+            };
+            socket.onclose = () => {
+                if (ws !== socket) return;
+                ws = null;
+                scheduleReconnect();
+            };
+        }
+
+        function resumeLiveUpdates() {
+            resumeTimer = null;
+            if (document.visibilityState === 'hidden') return;
+
+            refreshVisibleDevices();
+            if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+                if (reconnectTimer !== null) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+                connectWebSocket();
+            }
+        }
+
+        function scheduleResumeLiveUpdates() {
+            if (stopped || document.visibilityState === 'hidden' || resumeTimer !== null) return;
+
+            // pageshow, visibilitychange and online can describe the same browser
+            // resume. Invalidate older HTTP work synchronously, then collapse one
+            // synchronous burst into a single reconciliation.
+            lifecycleGeneration++;
+            resumeTimer = setTimeout(resumeLiveUpdates, 0);
+        }
+
+        function handleVisibilityChange() {
+            if (!document.hidden) scheduleResumeLiveUpdates();
+        }
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('pageshow', scheduleResumeLiveUpdates);
+        window.addEventListener('online', scheduleResumeLiveUpdates);
+        connectWebSocket();
 
         return () => {
+            stopped = true;
             clearTimeout(reconnectTimer);
-            ws.close();
+            clearTimeout(resumeTimer);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            window.removeEventListener('pageshow', scheduleResumeLiveUpdates);
+            window.removeEventListener('online', scheduleResumeLiveUpdates);
+            if (ws) {
+                ws.onclose = null;
+                ws.close();
+            }
         };
     }, []);
 

@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
 import { resolvedZoneMember } from '../devicePresentation.mjs';
@@ -32,17 +32,32 @@ export function Zone({ deviceId, devices }) {
     const [candidates, setCandidates] = useState({});
     const [loading, setLoading] = useState(true);
     const [showPicker, setShowPicker] = useState(false);
+    const mounted = useRef(true);
+    const refreshGeneration = useRef(0);
 
     function refresh() {
+        if (!mounted.current) return;
+
+        const generation = ++refreshGeneration.current;
         Promise.all([api.zone(deviceId), api.zoneCandidates(deviceId)])
             .then(([zoneResp, candidatesResp]) => {
+                if (generation !== refreshGeneration.current) return;
                 if (zoneResp.success) setZone(zoneResp.data);
                 if (candidatesResp.success) setCandidates(candidatesResp.data || {});
             })
-            .finally(() => setLoading(false));
+            .finally(() => {
+                if (generation === refreshGeneration.current) setLoading(false);
+            });
     }
 
-    useEffect(() => { refresh(); }, [deviceId]);
+    useEffect(() => {
+        mounted.current = true;
+        refresh();
+        return () => {
+            mounted.current = false;
+            refreshGeneration.current++;
+        };
+    }, [deviceId]);
 
     async function addDevice(slaveId) {
         setShowPicker(false);
