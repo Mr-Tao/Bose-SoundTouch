@@ -294,14 +294,21 @@ func (app *WebApp) HandleAPIDevice(w http.ResponseWriter, r *http.Request) {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
 
+	// Route through the same stereo-pair projection as HandleAPIDevices and
+	// the WebSocket frames. A hidden pair member is exactly as unaddressable
+	// here as it is from the list -- otherwise it would be absent from
+	// "devices" but still fully fetchable, unprojected, by its own id.
+	view, visible := app.deviceViewForID(deviceID)
+	if !visible {
+		app.sendError(w, "Device not found", http.StatusNotFound)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 
 	response := webtypes.APIResponse{
 		Success: true,
-		Data: map[string]interface{}{
-			"info":   device.DeviceInfo,
-			"status": device.Status(),
-		},
+		Data:    view,
 	}
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
