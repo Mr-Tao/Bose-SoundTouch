@@ -4,6 +4,7 @@ package soundtouchweb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -33,12 +34,24 @@ type WebApp struct {
 	devicesMu sync.RWMutex
 	devices   map[string]*webtypes.DeviceConnection
 
-	Upgrader  websocket.Upgrader
-	WSClients map[*websocket.Conn]bool
+	Upgrader websocket.Upgrader
+	// WSClients maps each registered browser WebSocket connection to its own
+	// write-serialization lock (see withConnWrite). Gorilla permits only one
+	// concurrent writer per connection; keying the lock per-connection means
+	// a stalled client's write can never block a write to any OTHER
+	// connection, unlike a single application-wide write lock would.
+	WSClients map[*websocket.Conn]*sync.Mutex
 	WSMutex   sync.RWMutex
-	// webSocketWriteMu serializes browser WebSocket writes independently of the
-	// client registry. Gorilla permits only one concurrent writer per connection.
-	webSocketWriteMu sync.Mutex
+	// discoveryPublishMu serializes discoveryStatus publications against
+	// each other only (Store + client snapshot + fan-out stay ordered across
+	// concurrent BroadcastDiscoveryStatus calls). It is deliberately NOT
+	// shared with connection registration: a newly-registering connection
+	// reads whatever discoveryStatus.Load() currently returns and is never
+	// blocked by an in-flight publication. This is safe because Store()
+	// always commits before a publication takes its client snapshot, so a
+	// registration racing a publication sees either the prior or the new
+	// value -- never something older than what was last actually stored.
+	discoveryPublishMu sync.Mutex
 	// webSocketWriteTimeout bounds each browser WebSocket write so one stalled
 	// client cannot indefinitely block updates for healthy clients.
 	webSocketWriteTimeout time.Duration
@@ -132,7 +145,7 @@ type DeviceEntry struct {
 func NewWebApp() *WebApp {
 	return &WebApp{
 		devices:   make(map[string]*webtypes.DeviceConnection),
-		WSClients: make(map[*websocket.Conn]bool),
+		WSClients: make(map[*websocket.Conn]*sync.Mutex),
 		Upgrader: websocket.Upgrader{
 			CheckOrigin: func(_ *http.Request) bool { return true },
 		},
@@ -736,24 +749,28 @@ func (app *WebApp) HandleDevicePowerStatus(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// BroadcastDeviceList sends updated device list to all connected WebSocket clients
+// BroadcastDeviceList sends updated device list to all connected WebSocket
+// clients. Each client is written under only its own connection lock (see
+// withConnWrite), so a stalled/backgrounded client can never block this
+// call -- including when it runs synchronously from an HTTP handler such as
+// HandleDeleteDevice -- from delivering to every other, healthy client.
 func (app *WebApp) BroadcastDeviceList() {
-	_ = app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
-		clients := app.globalWebSocketClients()
-		message := webtypes.WebSocketMessage{
-			Type: "devices",
-			Data: app.deviceViewSnapshot(),
-		}
+	message := webtypes.WebSocketMessage{
+		Type: "devices",
+		Data: app.deviceViewSnapshot(),
+	}
 
-		for _, client := range clients {
-			if err := batch.writeJSON(client, message); err != nil {
+	for _, client := range app.globalWebSocketClients() {
+		if err := app.withConnWrite(client, func(batch webSocketWriteBatch) error {
+			return batch.writeJSON(client, message)
+		}); err != nil {
+			if !errors.Is(err, errConnUnregistered) {
 				log.Printf("Failed to send device update to WebSocket client: %v", err)
-				app.removeGlobalWebSocketClient(client)
 			}
-		}
 
-		return nil
-	})
+			app.removeGlobalWebSocketClient(client)
+		}
+	}
 }
 
 // BroadcastDiscoveryStatus sends discovery progress updates to all connected WebSocket clients
@@ -771,7 +788,7 @@ func (app *WebApp) BroadcastDiscoveryStatus(status string, deviceCount int) {
 	}
 
 	_ = app.withDiscoveryStatusWrite(discoveryStatus, func(
-		batch webSocketWriteBatch,
+		_ webSocketWriteBatch,
 		clients []*websocket.Conn,
 	) error {
 		message := webtypes.WebSocketMessage{
@@ -780,8 +797,13 @@ func (app *WebApp) BroadcastDiscoveryStatus(status string, deviceCount int) {
 		}
 
 		for _, client := range clients {
-			if err := batch.writeJSON(client, message); err != nil {
-				log.Printf("Failed to send discovery status to WebSocket client: %v", err)
+			if err := app.withConnWrite(client, func(batch webSocketWriteBatch) error {
+				return batch.writeJSON(client, message)
+			}); err != nil {
+				if !errors.Is(err, errConnUnregistered) {
+					log.Printf("Failed to send discovery status to WebSocket client: %v", err)
+				}
+
 				app.removeGlobalWebSocketClient(client)
 			}
 		}
