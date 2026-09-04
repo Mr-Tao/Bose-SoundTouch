@@ -340,19 +340,7 @@ func (writer *deadlineBlockingWebSocketWriter) WriteMessage(int, []byte) error {
 func dialTestWebSocket(t *testing.T, app *WebApp) (remote *websocket.Conn, client *websocket.Conn, cleanup func()) {
 	t.Helper()
 
-	serverConnection := make(chan *websocket.Conn, 1)
-	releaseServer := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := app.Upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade test WebSocket: %v", err)
-
-			return
-		}
-		serverConnection <- conn
-		<-releaseServer
-		_ = conn.Close()
-	}))
+	server, serverConnection, release := newTestWebSocketServer(t, app)
 
 	client, response, err := websocket.DefaultDialer.Dial(
 		"ws"+strings.TrimPrefix(server.URL, "http"), nil,
@@ -361,7 +349,7 @@ func dialTestWebSocket(t *testing.T, app *WebApp) (remote *websocket.Conn, clien
 		_ = response.Body.Close()
 	}
 	if err != nil {
-		close(releaseServer)
+		release()
 		server.Close()
 		t.Fatalf("dial test WebSocket: %v", err)
 	}
@@ -369,10 +357,44 @@ func dialTestWebSocket(t *testing.T, app *WebApp) (remote *websocket.Conn, clien
 	remote = <-serverConnection
 
 	return remote, client, func() {
-		close(releaseServer)
+		release()
 		_ = client.Close()
 		server.Close()
 	}
+}
+
+// newTestWebSocketServer starts an httptest.Server that upgrades every
+// request through app.Upgrader and holds each connection open until
+// release is called. Shared by dialTestWebSocket (which always expects a
+// successful handshake) and tests that also need to exercise an *expected*
+// rejection (e.g. origin-policy tests), which is why the handshake failure
+// path here stays silent rather than failing the test.
+func newTestWebSocketServer(t *testing.T, app *WebApp) (
+	server *httptest.Server,
+	serverConnection <-chan *websocket.Conn,
+	release func(),
+) {
+	t.Helper()
+
+	// Buffered generously: some callers (e.g. table-driven origin-policy
+	// tests) dial the same server multiple times without draining
+	// serverConnection, and an unread successful upgrade must not block
+	// its own handler goroutine on this channel send.
+	conns := make(chan *websocket.Conn, 8)
+	releaseServer := make(chan struct{})
+	var releaseOnce sync.Once
+
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := app.Upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conns <- conn
+		<-releaseServer
+		_ = conn.Close()
+	}))
+
+	return server, conns, func() { releaseOnce.Do(func() { close(releaseServer) }) }
 }
 
 func TestConnWriteSerializesWritesToSameConnection(t *testing.T) {

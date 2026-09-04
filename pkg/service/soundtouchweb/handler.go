@@ -147,11 +147,12 @@ type DeviceEntry struct {
 
 // NewWebApp creates a new WebApp instance for SPA mode
 func NewWebApp() *WebApp {
-	// Leave Upgrader.CheckOrigin nil to use Gorilla's same-origin policy while
-	// retaining support for non-browser clients that omit the Origin header.
 	return &WebApp{
 		devices:   make(map[string]*webtypes.DeviceConnection),
 		WSClients: make(map[*websocket.Conn]*sync.Mutex),
+		Upgrader: websocket.Upgrader{
+			CheckOrigin: checkWebSocketOrigin,
+		},
 	}
 }
 

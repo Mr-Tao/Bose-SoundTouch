@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +20,54 @@ import (
 )
 
 const defaultWebSocketWriteTimeout = 2 * time.Second
+
+// checkWebSocketOrigin is gorilla's own same-origin default (fail the
+// handshake only when an Origin header is present and doesn't match the
+// request host), except the comparison ignores port -- see
+// sameHostIgnoringPort for why.
+func checkWebSocketOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+
+	return sameHostIgnoringPort(u.Host, r.Host)
+}
+
+// sameHostIgnoringPort reports whether a and b name the same hostname,
+// ignoring any port suffix.
+//
+// A reverse proxy commonly forwards a portless Host header regardless of
+// what public port it's listening on -- nginx's $host variable never
+// includes the port, unlike $http_host -- while a browser's Origin header
+// for a WebSocket handshake keeps an explicit, non-default port. Comparing
+// ports as well as host would reject that handshake whenever the proxy's
+// public listener uses a non-default port (e.g. :8443, a realistic shape
+// for multi-service hosting behind one proxy), even though the hostname
+// genuinely matches. This project's documented reverse-proxy config
+// (HTTPS-SETUP.md) relies on exactly that forwarding behavior.
+//
+// Trade-off: ignoring port also means two unrelated services sharing one
+// hostname on different ports would not be distinguished by this check
+// alone. Accepted here since gorilla's own default already doesn't check
+// scheme either, and the alternative is silently breaking the documented,
+// encouraged reverse-proxy deployment.
+func sameHostIgnoringPort(a, b string) bool {
+	if h, _, err := net.SplitHostPort(a); err == nil {
+		a = h
+	}
+
+	if h, _, err := net.SplitHostPort(b); err == nil {
+		b = h
+	}
+
+	return strings.EqualFold(a, b)
+}
 
 type webSocketWriter interface {
 	SetWriteDeadline(time.Time) error
