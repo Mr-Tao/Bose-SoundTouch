@@ -228,8 +228,8 @@ func newStereoPairView(group *models.Group, byDeviceID map[string][]deviceProjec
 
 	for _, role := range group.Roles.Roles {
 		member := stereoPairMemberView{
-			DeviceID:  role.DeviceID,
-			Role:      role.Role,
+			DeviceID:  strings.TrimSpace(role.DeviceID),
+			Role:      strings.ToUpper(strings.TrimSpace(role.Role)),
 			IPAddress: role.IPAddress,
 		}
 
