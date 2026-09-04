@@ -3,8 +3,10 @@ package soundtouchweb
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gesellix/bose-soundtouch/pkg/models"
@@ -43,32 +45,54 @@ func (batch webSocketWriteBatch) writeMessage(conn webSocketWriter, messageType 
 	return conn.WriteMessage(messageType, data)
 }
 
-// withGlobalWebSocketWrite is the single write seam for application-wide
-// browser WebSockets. The client registry has a separate lock so registration
-// and cleanup never hold a mutex across network I/O.
-func (app *WebApp) withGlobalWebSocketWrite(write func(webSocketWriteBatch) error) error {
-	app.webSocketWriteMu.Lock()
-	defer app.webSocketWriteMu.Unlock()
-
-	timeout := app.webSocketWriteTimeout
-	if timeout <= 0 {
-		timeout = defaultWebSocketWriteTimeout
+// writeTimeout returns the configured browser WebSocket write timeout, or
+// defaultWebSocketWriteTimeout when unset.
+func (app *WebApp) writeTimeout() time.Duration {
+	if app.webSocketWriteTimeout > 0 {
+		return app.webSocketWriteTimeout
 	}
 
-	return write(webSocketWriteBatch{timeout: timeout})
+	return defaultWebSocketWriteTimeout
+}
+
+// errConnUnregistered is returned by withConnWrite when conn is not (or is
+// no longer) present in WSClients -- e.g. it was concurrently removed.
+var errConnUnregistered = errors.New("websocket connection is not registered")
+
+// withConnWrite serializes writes to a single browser WebSocket connection.
+// Gorilla permits only one concurrent writer per connection (vendored
+// gorilla/websocket@v1.5.3 doc.go); this is the per-connection replacement
+// for the removed global write mutex, so a stalled client's writes never
+// block writes to any OTHER connection or unrelated HTTP handlers.
+func (app *WebApp) withConnWrite(conn *websocket.Conn, write func(webSocketWriteBatch) error) error {
+	app.WSMutex.RLock()
+	mu := app.WSClients[conn]
+	app.WSMutex.RUnlock()
+
+	if mu == nil {
+		return errConnUnregistered
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	return write(webSocketWriteBatch{timeout: app.writeTimeout()})
 }
 
 // withDiscoveryStatusWrite keeps the authoritative discovery state ordered
-// with the frame that publishes it to browser clients.
+// with the frame that publishes it to browser clients, across concurrent
+// publications. It is deliberately independent of connection registration
+// -- see discoveryPublishMu's doc comment on WebApp.
 func (app *WebApp) withDiscoveryStatusWrite(
 	status *webtypes.DiscoveryStatus,
 	write func(webSocketWriteBatch, []*websocket.Conn) error,
 ) error {
-	return app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
-		app.discoveryStatus.Store(status)
+	app.discoveryPublishMu.Lock()
+	defer app.discoveryPublishMu.Unlock()
 
-		return write(batch, app.globalWebSocketClients())
-	})
+	app.discoveryStatus.Store(status)
+
+	return write(webSocketWriteBatch{timeout: app.writeTimeout()}, app.globalWebSocketClients())
 }
 
 func (app *WebApp) globalWebSocketClients() []*websocket.Conn {
@@ -83,33 +107,54 @@ func (app *WebApp) globalWebSocketClients() []*websocket.Conn {
 	return clients
 }
 
+// removeGlobalWebSocketClient unregisters client and closes it, holding its
+// own write lock across Close() so this never races an in-flight or
+// about-to-start write to the same connection.
 func (app *WebApp) removeGlobalWebSocketClient(client *websocket.Conn) {
 	app.WSMutex.Lock()
-	delete(app.WSClients, client)
+
+	mu, ok := app.WSClients[client]
+	if ok {
+		delete(app.WSClients, client)
+	}
 	app.WSMutex.Unlock()
 
+	if !ok {
+		return
+	}
+
+	mu.Lock()
 	_ = client.Close()
+	mu.Unlock()
 }
 
+// registerGlobalWebSocket creates conn's write lock already held, inserts it
+// into WSClients, then sends its initial frames -- so a broadcast racing
+// right after insertion blocks on this connection's own lock until the
+// initial snapshot is complete, with no shared lock required.
 func (app *WebApp) registerGlobalWebSocket(conn *websocket.Conn) error {
-	return app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
-		app.WSMutex.Lock()
-		app.WSClients[conn] = true
-		app.WSMutex.Unlock()
+	connMu := &sync.Mutex{}
+	connMu.Lock()
+	defer connMu.Unlock()
 
-		if ds, ok := app.discoveryStatus.Load().(*webtypes.DiscoveryStatus); ok {
-			if err := batch.writeJSON(conn, webtypes.WebSocketMessage{
-				Type: "discovery_status",
-				Data: ds,
-			}); err != nil {
-				return err
-			}
+	app.WSMutex.Lock()
+	app.WSClients[conn] = connMu
+	app.WSMutex.Unlock()
+
+	batch := webSocketWriteBatch{timeout: app.writeTimeout()}
+
+	if ds, ok := app.discoveryStatus.Load().(*webtypes.DiscoveryStatus); ok {
+		if err := batch.writeJSON(conn, webtypes.WebSocketMessage{
+			Type: "discovery_status",
+			Data: ds,
+		}); err != nil {
+			return err
 		}
+	}
 
-		return batch.writeJSON(conn, webtypes.WebSocketMessage{
-			Type: "devices",
-			Data: app.deviceViewSnapshot(),
-		})
+	return batch.writeJSON(conn, webtypes.WebSocketMessage{
+		Type: "devices",
+		Data: app.deviceViewSnapshot(),
 	})
 }
 
@@ -160,13 +205,14 @@ func (app *WebApp) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Main loop for sending periodic updates
 	for range ticker.C {
-		if err := app.withGlobalWebSocketWrite(func(batch webSocketWriteBatch) error {
+		if err := app.withConnWrite(conn, func(batch webSocketWriteBatch) error {
 			if err := batch.writeMessage(conn, websocket.PingMessage, []byte{}); err != nil {
 				return err
 			}
 
-			// Capture after taking the writer lock so a newer broadcast cannot be
-			// followed by a periodic frame captured from older state.
+			// Capture after taking this connection's writer lock so a newer
+			// broadcast to this same connection cannot be followed by a
+			// periodic frame captured from older state.
 			for _, message := range app.periodicPlayerMessages() {
 				if err := batch.writeJSON(conn, message); err != nil {
 					return err

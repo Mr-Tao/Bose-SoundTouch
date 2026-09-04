@@ -326,14 +326,66 @@ func (writer *deadlineBlockingWebSocketWriter) WriteMessage(int, []byte) error {
 	return writer.WriteJSON(nil)
 }
 
-func TestGlobalWebSocketWriteSeamSerializesWriters(t *testing.T) {
+// dialTestWebSocket opens a real client/server WebSocket pair against app's
+// Upgrader. remote is the server-side *websocket.Conn (the one production
+// code operates on -- e.g. as a WSClients key); client is the dialer side,
+// for tests that need to read the frames production code writes to remote.
+// It does not register remote into app.WSClients; callers do that
+// themselves so each test controls its own per-connection lock.
+func dialTestWebSocket(t *testing.T, app *WebApp) (remote *websocket.Conn, client *websocket.Conn, cleanup func()) {
+	t.Helper()
+
+	serverConnection := make(chan *websocket.Conn, 1)
+	releaseServer := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := app.Upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade test WebSocket: %v", err)
+
+			return
+		}
+		serverConnection <- conn
+		<-releaseServer
+		_ = conn.Close()
+	}))
+
+	client, response, err := websocket.DefaultDialer.Dial(
+		"ws"+strings.TrimPrefix(server.URL, "http"), nil,
+	)
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	if err != nil {
+		close(releaseServer)
+		server.Close()
+		t.Fatalf("dial test WebSocket: %v", err)
+	}
+
+	remote = <-serverConnection
+
+	return remote, client, func() {
+		close(releaseServer)
+		_ = client.Close()
+		server.Close()
+	}
+}
+
+func TestConnWriteSerializesWritesToSameConnection(t *testing.T) {
 	app := NewWebApp()
+	remote, _, cleanup := dialTestWebSocket(t, app)
+	defer cleanup()
+
+	connMu := &sync.Mutex{}
+	app.WSMutex.Lock()
+	app.WSClients[remote] = connMu
+	app.WSMutex.Unlock()
+
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
 
 	go func() {
-		_ = app.withGlobalWebSocketWrite(func(webSocketWriteBatch) error {
+		_ = app.withConnWrite(remote, func(webSocketWriteBatch) error {
 			close(entered)
 			<-release
 
@@ -343,16 +395,121 @@ func TestGlobalWebSocketWriteSeamSerializesWriters(t *testing.T) {
 	}()
 
 	<-entered
-	if app.webSocketWriteMu.TryLock() {
-		app.webSocketWriteMu.Unlock()
-		t.Fatal("global WebSocket writer lock was not held across the write seam")
+	if connMu.TryLock() {
+		connMu.Unlock()
+		t.Fatal("connection writer lock was not held across the write seam")
 	}
 
 	close(release)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("global WebSocket writer lock was not released")
+		t.Fatal("connection writer lock was not released")
+	}
+}
+
+// TestConnWriteDoesNotBlockUnrelatedConnection is the money test for the
+// removed global write mutex: a write to one connection must never block a
+// write to a different connection.
+func TestConnWriteDoesNotBlockUnrelatedConnection(t *testing.T) {
+	app := NewWebApp()
+	remoteA, _, cleanupA := dialTestWebSocket(t, app)
+	defer cleanupA()
+	remoteB, _, cleanupB := dialTestWebSocket(t, app)
+	defer cleanupB()
+
+	app.WSMutex.Lock()
+	app.WSClients[remoteA] = &sync.Mutex{}
+	app.WSClients[remoteB] = &sync.Mutex{}
+	app.WSMutex.Unlock()
+
+	blockedA := make(chan struct{})
+	releaseA := make(chan struct{})
+
+	go func() {
+		_ = app.withConnWrite(remoteA, func(webSocketWriteBatch) error {
+			close(blockedA)
+			<-releaseA
+
+			return nil
+		})
+	}()
+	<-blockedA
+
+	done := make(chan error, 1)
+	go func() {
+		done <- app.withConnWrite(remoteB, func(webSocketWriteBatch) error {
+			return nil
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("write to unrelated connection failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("write to an unrelated connection blocked on a stalled connection's lock")
+	}
+
+	close(releaseA)
+}
+
+// TestBroadcastDeviceListSkipsStalledClientWithoutBlockingHealthyClient
+// encodes the HandleDeleteDevice failure scenario from the code review:
+// a stalled/backgrounded client must not delay a healthy client's OWN
+// periodic update (which runs on a separate goroutine, contending only on
+// that client's own connection lock) merely because BroadcastDeviceList --
+// possibly called synchronously from an HTTP handler -- is concurrently
+// stuck writing to the stalled client.
+func TestBroadcastDeviceListSkipsStalledClientWithoutBlockingHealthyClient(t *testing.T) {
+	app := NewWebApp()
+	remoteA, _, cleanupA := dialTestWebSocket(t, app)
+	defer cleanupA()
+	remoteB, _, cleanupB := dialTestWebSocket(t, app)
+	defer cleanupB()
+
+	app.WSMutex.Lock()
+	app.WSClients[remoteA] = &sync.Mutex{}
+	app.WSClients[remoteB] = &sync.Mutex{}
+	app.WSMutex.Unlock()
+
+	// Simulate client A's own in-flight write (e.g. its periodic ticker
+	// mid-write) by holding its connection lock directly.
+	app.WSMutex.RLock()
+	connMuA := app.WSClients[remoteA]
+	app.WSMutex.RUnlock()
+	connMuA.Lock()
+
+	broadcastDone := make(chan struct{})
+	go func() {
+		app.BroadcastDeviceList()
+		close(broadcastDone)
+	}()
+
+	// Client B's own periodic update path (a separate goroutine, exactly as
+	// HandleWebSocket's ticker loop does) must succeed immediately, whether
+	// or not BroadcastDeviceList's internal loop currently happens to be
+	// stuck waiting on A.
+	bDone := make(chan error, 1)
+	go func() {
+		bDone <- app.withConnWrite(remoteB, func(webSocketWriteBatch) error { return nil })
+	}()
+
+	select {
+	case err := <-bDone:
+		if err != nil {
+			t.Fatalf("healthy client's own update failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("healthy client's own update was blocked by an unrelated stalled client")
+	}
+
+	connMuA.Unlock()
+	select {
+	case <-broadcastDone:
+	case <-time.After(time.Second):
+		t.Fatal("BroadcastDeviceList did not complete after the stalled client's lock was released")
 	}
 }
 
@@ -427,44 +584,27 @@ func TestDiscoveryStatusStateAndFramesShareWriteOrder(t *testing.T) {
 	}
 }
 
-func TestDiscoveryPublicationBeforeRegistrationUsesNewInitialState(t *testing.T) {
+// TestRegistrationDuringDiscoveryPublicationIsNotBlockedAndSeesLatestState
+// replaces a prior version of this test that asserted registration BLOCKS
+// until an in-flight, unrelated discovery publication finishes. That
+// coupling was removed deliberately (see discoveryPublishMu's doc comment):
+// registration no longer shares any lock with publication. This proves the
+// weaker, now-true property instead: registration is never blocked by an
+// in-flight publication, yet still never observes a state older than what
+// was stored before that publication began -- because
+// withDiscoveryStatusWrite always calls discoveryStatus.Store() before
+// taking its client snapshot, so by the time the publication's write
+// callback is reached (clientsSelected below), the new status is already
+// the one any concurrent registration will read.
+func TestRegistrationDuringDiscoveryPublicationIsNotBlockedAndSeesLatestState(t *testing.T) {
 	app := NewWebApp()
 	oldStatus := &webtypes.DiscoveryStatus{Status: "starting", IsDiscovering: true}
 	newStatus := &webtypes.DiscoveryStatus{Status: "completed", DeviceCount: 3}
 	app.discoveryStatus.Store(oldStatus)
 
-	serverConnection := make(chan *websocket.Conn, 1)
-	releaseServer := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := app.Upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade test WebSocket: %v", err)
-
-			return
-		}
-		serverConnection <- conn
-		<-releaseServer
-		_ = conn.Close()
-	}))
-
-	client, response, err := websocket.DefaultDialer.Dial(
-		"ws"+strings.TrimPrefix(server.URL, "http"), nil,
-	)
-	if response != nil {
-		_ = response.Body.Close()
-	}
-	if err != nil {
-		close(releaseServer)
-		server.Close()
-		t.Fatalf("dial test WebSocket: %v", err)
-	}
-	remote := <-serverConnection
-	t.Cleanup(func() {
-		app.removeGlobalWebSocketClient(remote)
-		_ = client.Close()
-		close(releaseServer)
-		server.Close()
-	})
+	remote, client, cleanup := dialTestWebSocket(t, app)
+	defer cleanup()
+	t.Cleanup(func() { app.removeGlobalWebSocketClient(remote) })
 
 	clientsSelected := make(chan struct{})
 	releasePublication := make(chan struct{})
@@ -472,11 +612,8 @@ func TestDiscoveryPublicationBeforeRegistrationUsesNewInitialState(t *testing.T)
 	go func() {
 		published <- app.withDiscoveryStatusWrite(newStatus, func(
 			_ webSocketWriteBatch,
-			clients []*websocket.Conn,
+			_ []*websocket.Conn,
 		) error {
-			if len(clients) != 0 {
-				return errors.New("new client was registered before forced publication snapshot")
-			}
 			close(clientsSelected)
 			<-releasePublication
 
@@ -487,7 +624,7 @@ func TestDiscoveryPublicationBeforeRegistrationUsesNewInitialState(t *testing.T)
 	select {
 	case <-clientsSelected:
 	case <-time.After(time.Second):
-		t.Fatal("discovery publication did not select clients")
+		t.Fatal("discovery publication did not reach its write callback")
 	}
 
 	registered := make(chan error, 1)
@@ -495,14 +632,15 @@ func TestDiscoveryPublicationBeforeRegistrationUsesNewInitialState(t *testing.T)
 		registered <- app.registerGlobalWebSocket(remote)
 	}()
 
+	// Registration must complete WITHOUT waiting for the in-flight,
+	// unrelated publication to release releasePublication.
 	select {
 	case err := <-registered:
-		t.Fatalf("registration bypassed in-flight discovery publication: %v", err)
-	default:
-	}
-	close(releasePublication)
-	if err := <-published; err != nil {
-		t.Fatalf("publish discovery status: %v", err)
+		if err != nil {
+			t.Fatalf("register global WebSocket: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("registration blocked on an in-flight, unrelated discovery publication")
 	}
 
 	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -512,15 +650,17 @@ func TestDiscoveryPublicationBeforeRegistrationUsesNewInitialState(t *testing.T)
 	if err := client.ReadJSON(&discoveryMessage); err != nil {
 		t.Fatalf("read initial discovery frame: %v", err)
 	}
-	if err := <-registered; err != nil {
-		t.Fatalf("register global WebSocket: %v", err)
-	}
 	if discoveryMessage.Type != "discovery_status" {
 		t.Fatalf("initial frame type = %q, want discovery_status", discoveryMessage.Type)
 	}
 	data, ok := discoveryMessage.Data.(map[string]interface{})
 	if !ok || data["status"] != "completed" || data["deviceCount"] != float64(3) {
-		t.Fatalf("initial discovery frame = %#v, want new completed state", discoveryMessage.Data)
+		t.Fatalf("initial discovery frame = %#v, want new completed state (already stored before this publication reached its write callback)", discoveryMessage.Data)
+	}
+
+	close(releasePublication)
+	if err := <-published; err != nil {
+		t.Fatalf("publish discovery status: %v", err)
 	}
 }
 
