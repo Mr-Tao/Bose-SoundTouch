@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +67,42 @@ func TestProjectDeviceEntriesCollapsesStereoPairUnderMaster(t *testing.T) {
 
 	if _, ok := got["192.0.2.11"]; ok {
 		t.Error("physical right member must not be a second control target")
+	}
+}
+
+// TestProjectDeviceEntriesNormalizesMemberRoleAndDeviceID guards against
+// emitting raw, un-normalized Role/DeviceID into the frontend-facing JSON
+// while validMasterGroup/registeredMembersAgree/sameGroupClaim all
+// trim/uppercase those same fields for internal comparison.
+func TestProjectDeviceEntriesNormalizesMemberRoleAndDeviceID(t *testing.T) {
+	group := &models.Group{
+		ID:             "pair-1",
+		Name:           "Living Room + Living Room",
+		MasterDeviceID: "left-id",
+		Status:         "GROUP_OK",
+		Roles: models.GroupRoles{Roles: []models.GroupRole{
+			{DeviceID: " left-id ", Role: " left ", IPAddress: "192.0.2.10"},
+			{DeviceID: " right-id ", Role: " right ", IPAddress: "192.0.2.11"},
+		}},
+	}
+
+	got := projectDeviceEntries([]DeviceEntry{
+		projectionDevice("192.0.2.10", "left-id", "Living Room", true, group),
+		projectionDevice("192.0.2.11", "right-id", "Living Room", true, group),
+	})
+
+	pair := got["192.0.2.10"].StereoPair
+	if pair == nil || len(pair.Members) != 2 {
+		t.Fatalf("expected a projected pair with two members: %+v", got)
+	}
+
+	for _, member := range pair.Members {
+		if member.DeviceID != strings.TrimSpace(member.DeviceID) {
+			t.Errorf("member DeviceID = %q, want trimmed", member.DeviceID)
+		}
+		if member.Role != strings.ToUpper(member.Role) {
+			t.Errorf("member Role = %q, want upper-cased", member.Role)
+		}
 	}
 }
 
