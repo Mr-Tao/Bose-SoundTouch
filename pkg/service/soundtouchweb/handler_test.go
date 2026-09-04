@@ -163,6 +163,63 @@ func TestHandleAPIDevice(t *testing.T) {
 	}
 }
 
+func TestHandleAPIDevice_MasterIncludesStereoPairProjection(t *testing.T) {
+	app := NewWebApp()
+	group := testStereoGroup()
+	app.AddDevice("192.0.2.10", projectionDevice("192.0.2.10", "left-id", "Living Room", true, group).Device)
+	app.AddDevice("192.0.2.11", projectionDevice("192.0.2.11", "right-id", "Living Room", true, group).Device)
+
+	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.10", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.10"})
+	w := httptest.NewRecorder()
+
+	app.HandleAPIDevice(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status %d, got %d", http.StatusOK, w.Code)
+	}
+
+	var response webtypes.APIResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	data, ok := response.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("response.Data = %#v, want a map", response.Data)
+	}
+
+	if _, ok := data["stereoPair"]; !ok {
+		t.Fatalf("response.Data = %#v, want a stereoPair projection for the pair master", data)
+	}
+}
+
+func TestHandleAPIDevice_HiddenPairMemberNotFound(t *testing.T) {
+	app := NewWebApp()
+	group := testStereoGroup()
+	app.AddDevice("192.0.2.10", projectionDevice("192.0.2.10", "left-id", "Living Room", true, group).Device)
+	app.AddDevice("192.0.2.11", projectionDevice("192.0.2.11", "right-id", "Living Room", true, group).Device)
+
+	req := httptest.NewRequest("GET", "/api/control/devices/192.0.2.11", nil)
+	req = withChiParams(req, map[string]string{"id": "192.0.2.11"})
+	w := httptest.NewRecorder()
+
+	app.HandleAPIDevice(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("Expected status %d for a hidden pair member's own id, got %d", http.StatusNotFound, w.Code)
+	}
+
+	var response webtypes.APIResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if response.Success {
+		t.Fatal("Expected success=false for a hidden pair member's own id")
+	}
+}
+
 func TestHandleAPIControl_InvalidDevice(t *testing.T) {
 	app := createTestApp()
 

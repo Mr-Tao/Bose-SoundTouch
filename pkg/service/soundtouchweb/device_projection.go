@@ -76,6 +76,16 @@ func (app *WebApp) deviceViewSnapshot() map[string]deviceView {
 	return projectDeviceEntries(app.DeviceSnapshot())
 }
 
+// deviceViewForID projects the registry into a single logical control
+// target and reports whether id is currently visible in the player-facing
+// inventory. A hidden stereo-pair member is not visible under its own id --
+// only its pair's master key exposes it, via StereoPair.Members.
+func (app *WebApp) deviceViewForID(id string) (deviceView, bool) {
+	view, ok := app.deviceViewSnapshot()[id]
+
+	return view, ok
+}
+
 func projectDeviceEntries(snapshot []DeviceEntry) map[string]deviceView {
 	return projectCapturedDeviceEntries(captureDeviceProjectionEntries(snapshot))
 }
