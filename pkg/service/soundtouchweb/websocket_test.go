@@ -743,38 +743,9 @@ func TestSpeakerEventPublishesImmediateDeviceProjection(t *testing.T) {
 	})
 	app.AddDevice("speaker", device)
 
-	serverConnection := make(chan *websocket.Conn, 1)
-	releaseServer := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := app.Upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade test WebSocket: %v", err)
-
-			return
-		}
-		serverConnection <- conn
-		<-releaseServer
-		_ = conn.Close()
-	}))
-
-	client, response, err := websocket.DefaultDialer.Dial(
-		"ws"+strings.TrimPrefix(server.URL, "http"), nil,
-	)
-	if response != nil {
-		_ = response.Body.Close()
-	}
-	if err != nil {
-		close(releaseServer)
-		server.Close()
-		t.Fatalf("dial test WebSocket: %v", err)
-	}
-	remote := <-serverConnection
-	t.Cleanup(func() {
-		app.removeGlobalWebSocketClient(remote)
-		_ = client.Close()
-		close(releaseServer)
-		server.Close()
-	})
+	remote, client, cleanup := dialTestWebSocket(t, app)
+	defer cleanup()
+	t.Cleanup(func() { app.removeGlobalWebSocketClient(remote) })
 
 	if err := app.registerGlobalWebSocket(remote); err != nil {
 		t.Fatalf("register browser WebSocket: %v", err)
@@ -787,11 +758,17 @@ func TestSpeakerEventPublishesImmediateDeviceProjection(t *testing.T) {
 		t.Fatalf("read initial device projection: %v", err)
 	}
 
-	app.webSocketWriteMu.Lock()
+	// Simulate the browser fan-out being busy by holding this connection's
+	// own write lock directly (the per-connection replacement for the
+	// removed global webSocketWriteMu -- see withConnWrite).
+	app.WSMutex.RLock()
+	connMu := app.WSClients[remote]
+	app.WSMutex.RUnlock()
+	connMu.Lock()
 	writerLocked := true
 	defer func() {
 		if writerLocked {
-			app.webSocketWriteMu.Unlock()
+			connMu.Unlock()
 		}
 	}()
 
@@ -809,7 +786,7 @@ func TestSpeakerEventPublishesImmediateDeviceProjection(t *testing.T) {
 		t.Fatal("speaker event blocked on browser WebSocket I/O")
 	}
 
-	app.webSocketWriteMu.Unlock()
+	connMu.Unlock()
 	writerLocked = false
 
 	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -844,11 +821,24 @@ func TestSpeakerEventPublishesImmediateDeviceProjection(t *testing.T) {
 func TestQueuedDeviceBroadcastCoalescesBurst(t *testing.T) {
 	app := NewWebApp()
 
-	app.webSocketWriteMu.Lock()
+	// A registered connection whose write lock is held externally gives
+	// BroadcastDeviceList something to block on -- the per-connection
+	// replacement for holding the removed global webSocketWriteMu.
+	remote, _, cleanup := dialTestWebSocket(t, app)
+	defer cleanup()
+	t.Cleanup(func() { app.removeGlobalWebSocketClient(remote) })
+	if err := app.registerGlobalWebSocket(remote); err != nil {
+		t.Fatalf("register browser WebSocket: %v", err)
+	}
+
+	app.WSMutex.RLock()
+	connMu := app.WSClients[remote]
+	app.WSMutex.RUnlock()
+	connMu.Lock()
 	writerLocked := true
 	defer func() {
 		if writerLocked {
-			app.webSocketWriteMu.Unlock()
+			connMu.Unlock()
 		}
 	}()
 
@@ -879,7 +869,7 @@ func TestQueuedDeviceBroadcastCoalescesBurst(t *testing.T) {
 	}
 	app.deviceBroadcastMu.Unlock()
 
-	app.webSocketWriteMu.Unlock()
+	connMu.Unlock()
 	writerLocked = false
 
 	deadline = time.Now().Add(time.Second)
