@@ -159,18 +159,12 @@ func (app *WebApp) registerGlobalWebSocket(conn *websocket.Conn) error {
 	})
 }
 
-// applySpeakerStatusEvent stores one speaker event and immediately publishes
-// a fresh device projection when its dashboard-visible payload changed.
-func (app *WebApp) applySpeakerStatusEvent(
-	conn *webtypes.DeviceConnection,
-	mut func(*webtypes.DeviceStatus) bool,
-) bool {
-	changed := false
-
-	conn.ApplySpeakerEvent(func(status *webtypes.DeviceStatus) {
-		changed = mut(status)
-	})
-
+// queueBroadcastIfChanged schedules a device-list broadcast when an
+// apply-event/apply-poll call changed something dashboard-visible. Every
+// such call site (including Group's own, separately-ordered path) routes
+// through this so a future change to the shared policy has one place to
+// change.
+func (app *WebApp) queueBroadcastIfChanged(changed bool) bool {
 	if changed {
 		app.QueueDeviceListBroadcast()
 	}
@@ -178,11 +172,29 @@ func (app *WebApp) applySpeakerStatusEvent(
 	return changed
 }
 
+// applySpeakerStatusEvent stores one speaker event for field and immediately
+// publishes a fresh device projection when its dashboard-visible payload
+// changed. Ordering against a concurrent poll of the same field is handled
+// by ApplyFieldEvent; a different field's poll or event is never affected.
+func (app *WebApp) applySpeakerStatusEvent(
+	conn *webtypes.DeviceConnection,
+	field webtypes.StatusField,
+	mut func(*webtypes.DeviceStatus) bool,
+) bool {
+	changed := false
+
+	conn.ApplyFieldEvent(field, func(status *webtypes.DeviceStatus) {
+		changed = mut(status)
+	})
+
+	return app.queueBroadcastIfChanged(changed)
+}
+
 func (app *WebApp) applyNowPlayingEvent(
 	conn *webtypes.DeviceConnection,
 	nowPlaying *models.NowPlaying,
 ) bool {
-	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+	return app.applySpeakerStatusEvent(conn, webtypes.FieldNowPlaying, func(status *webtypes.DeviceStatus) bool {
 		changed := !reflect.DeepEqual(status.NowPlaying, nowPlaying)
 		status.NowPlaying = nowPlaying
 		status.LastActivity = time.Now()
@@ -195,7 +207,7 @@ func (app *WebApp) applyVolumeEvent(
 	conn *webtypes.DeviceConnection,
 	volume *models.Volume,
 ) bool {
-	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+	return app.applySpeakerStatusEvent(conn, webtypes.FieldVolume, func(status *webtypes.DeviceStatus) bool {
 		changed := !reflect.DeepEqual(status.Volume, volume)
 		status.Volume = volume
 		status.LastActivity = time.Now()
@@ -208,7 +220,7 @@ func (app *WebApp) applyConnectionStateEvent(
 	conn *webtypes.DeviceConnection,
 	connected bool,
 ) bool {
-	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+	return app.applySpeakerStatusEvent(conn, webtypes.FieldConnectivity, func(status *webtypes.DeviceStatus) bool {
 		changed := status.IsConnected != connected
 		status.IsConnected = connected
 		status.LastActivity = time.Now()
@@ -221,7 +233,7 @@ func (app *WebApp) applyPresetEvent(
 	conn *webtypes.DeviceConnection,
 	presets *models.Presets,
 ) bool {
-	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+	return app.applySpeakerStatusEvent(conn, webtypes.FieldPresets, func(status *webtypes.DeviceStatus) bool {
 		changed := !reflect.DeepEqual(status.Presets, presets)
 		status.Presets = presets
 		status.LastActivity = time.Now()
@@ -234,7 +246,7 @@ func (app *WebApp) applyBassEvent(
 	conn *webtypes.DeviceConnection,
 	bass *models.Bass,
 ) bool {
-	return app.applySpeakerStatusEvent(conn, func(status *webtypes.DeviceStatus) bool {
+	return app.applySpeakerStatusEvent(conn, webtypes.FieldBass, func(status *webtypes.DeviceStatus) bool {
 		changed := !reflect.DeepEqual(status.Bass, bass)
 		status.Bass = bass
 		status.LastActivity = time.Now()
@@ -496,18 +508,26 @@ func sleepOrDone(conn *webtypes.DeviceConnection, d time.Duration) bool {
 
 // UpdateDeviceStatus fetches current status from the device.
 //
-// Network calls run outside the atomic merge so the CAS loop in
-// UpdateStatus stays fast and doesn't retry slow IO. WebSocket event
-// handlers running concurrently are not lost: their UpdateStatus
-// runs against whichever snapshot they observe, and the merge below
-// sees their changes when it CAS-loops onto the latest status.
+// Network calls run outside any atomic merge so slow I/O never blocks a
+// concurrent CAS retry. Each field (NowPlaying/Volume/Presets/Sources/Bass,
+// plus derived connectivity) is merged and ordered independently via its own
+// StatusField generation (BeginFieldPoll/CompleteFieldPoll/ApplyFieldEvent in
+// webtypes) -- a real-time push event, or a concurrent poll, for one field
+// can supersede only that field. A slow-but-successful fetch for one field
+// is never discarded merely because a DIFFERENT field's event or poll
+// completion happened to land first.
 func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection) {
 	// Skip status update if client is not available (e.g., in tests)
 	if conn.Client == nil {
 		return
 	}
 
-	pollGeneration := conn.BeginStatusPoll()
+	nowPlayingGen := conn.BeginFieldPoll(webtypes.FieldNowPlaying)
+	volumeGen := conn.BeginFieldPoll(webtypes.FieldVolume)
+	presetsGen := conn.BeginFieldPoll(webtypes.FieldPresets)
+	sourcesGen := conn.BeginFieldPoll(webtypes.FieldSources)
+	bassGen := conn.BeginFieldPoll(webtypes.FieldBass)
+	connectivityGen := conn.BeginFieldPoll(webtypes.FieldConnectivity)
 
 	// /getGroup must be gated to ST10 models -- see Client.GetGroup's doc
 	// comment (verified against real hardware: a ST20 never replies at all,
@@ -537,45 +557,65 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 		group, groupErr = conn.Client.GetGroup()
 	}
 
-	// Phase 2: fast merge. Only fields we successfully fetched
-	// overwrite; everything else keeps the value other goroutines may
-	// have just written.
-	conn.CompleteStatusPoll(pollGeneration, func(s *webtypes.DeviceStatus) {
-		statusUpdated := false
+	// Phase 2: fast, independently-ordered merges. Each field applies only
+	// if this round's fetch succeeded AND no newer poll or push event has
+	// already applied for that specific field.
+	anyFetchSucceeded := false
 
-		if nowPlayingErr == nil {
+	if nowPlayingErr == nil {
+		anyFetchSucceeded = true
+
+		conn.CompleteFieldPoll(webtypes.FieldNowPlaying, nowPlayingGen, func(s *webtypes.DeviceStatus) {
 			s.NowPlaying = nowPlaying
-			statusUpdated = true
-		}
+			s.LastActivity = time.Now()
+		})
+	}
 
-		if volumeErr == nil {
+	if volumeErr == nil {
+		anyFetchSucceeded = true
+
+		conn.CompleteFieldPoll(webtypes.FieldVolume, volumeGen, func(s *webtypes.DeviceStatus) {
 			s.Volume = volume
-			statusUpdated = true
-		}
+			s.LastActivity = time.Now()
+		})
+	}
 
-		if presetsErr == nil {
+	if presetsErr == nil {
+		anyFetchSucceeded = true
+
+		conn.CompleteFieldPoll(webtypes.FieldPresets, presetsGen, func(s *webtypes.DeviceStatus) {
 			s.Presets = presets
-			statusUpdated = true
-		}
+			s.LastActivity = time.Now()
+		})
+	}
 
-		if sourcesErr == nil {
+	if sourcesErr == nil {
+		anyFetchSucceeded = true
+
+		conn.CompleteFieldPoll(webtypes.FieldSources, sourcesGen, func(s *webtypes.DeviceStatus) {
 			s.Sources = sources
-			statusUpdated = true
-		}
+			s.LastActivity = time.Now()
+		})
+	}
 
-		if bassErr == nil {
+	if bassErr == nil {
+		anyFetchSucceeded = true
+
+		conn.CompleteFieldPoll(webtypes.FieldBass, bassGen, func(s *webtypes.DeviceStatus) {
 			s.Bass = bass
-			statusUpdated = true
-		}
+			s.LastActivity = time.Now()
+		})
+	}
 
-		// Mark as connected if we successfully got at least one status
-		// from this round. Mirrors prior behaviour: deliberately does NOT
-		// fold groupErr in here. GetGroup is gated to stereo-capable
-		// models and trivially succeeds even when a device is otherwise
-		// struggling (an empty <group/> is a near-guaranteed reply), so
-		// counting it would let a device report connected while every
-		// substantive status fetch above actually failed this round.
-		s.IsConnected = statusUpdated
+	// Mark as connected if we successfully got at least one status from
+	// this round. Mirrors prior behaviour: deliberately does NOT fold
+	// groupErr in here. GetGroup is gated to stereo-capable models and
+	// trivially succeeds even when a device is otherwise struggling (an
+	// empty <group/> is a near-guaranteed reply), so counting it would let
+	// a device report connected while every substantive status fetch above
+	// actually failed this round.
+	conn.CompleteFieldPoll(webtypes.FieldConnectivity, connectivityGen, func(s *webtypes.DeviceStatus) {
+		s.IsConnected = anyFetchSucceeded
 		s.LastActivity = time.Now()
 	})
 
@@ -588,12 +628,7 @@ func (app *WebApp) applyGroupUpdatedEvent(
 	conn *webtypes.DeviceConnection,
 	event *models.GroupUpdatedEvent,
 ) bool {
-	changed := conn.ApplyGroupEvent(&event.Group, time.Now())
-	if changed {
-		app.QueueDeviceListBroadcast()
-	}
-
-	return changed
+	return app.queueBroadcastIfChanged(conn.ApplyGroupEvent(&event.Group, time.Now()))
 }
 
 // HandleDeviceWebSocket handles individual device WebSocket connections for real-time device-specific updates

@@ -47,11 +47,13 @@ type DeviceConnection struct {
 
 	status atomic.Pointer[DeviceStatus]
 
-	statusOrderMu             sync.Mutex
-	nextStatusPollGeneration  uint64
-	lastStatusPollGeneration  uint64
-	speakerEventGeneration    uint64
-	statusPollEventGeneration map[uint64]uint64
+	// fieldGenMu guards fieldGen, the per-field generation ordering used by
+	// BeginFieldPoll/CompleteFieldPoll/ApplyFieldEvent. Each StatusField gets
+	// its own (issued, applied) pair so an event or a poll completion for
+	// one field can never invalidate a different field's in-flight result --
+	// see StatusField's doc comment.
+	fieldGenMu sync.Mutex
+	fieldGen   [numStatusFields]struct{ issued, applied uint64 }
 
 	// groupMu orders polled /getGroup responses against real-time
 	// groupUpdated events. groupGeneration is the highest generation
@@ -85,6 +87,27 @@ type DeviceStatus struct {
 	IsConnected  bool               `json:"isConnected"`
 	LastActivity time.Time          `json:"lastActivity"`
 }
+
+// StatusField identifies one independently-racing field of DeviceStatus for
+// BeginFieldPoll/CompleteFieldPoll/ApplyFieldEvent's generation ordering.
+// FieldConnectivity covers IsConnected, which is derived by a poll (from
+// whether any of the other fields' fetches succeeded) but set directly by a
+// real-time connectionStateUpdated event, so it races the same way the other
+// fields do. Group has its own, pre-existing pair-aware ordering
+// (groupMu/groupGeneration/groupAppliedGeneration below) and is not part of
+// this set.
+type StatusField int
+
+// The StatusField values.
+const (
+	FieldNowPlaying StatusField = iota
+	FieldVolume
+	FieldPresets
+	FieldSources
+	FieldBass
+	FieldConnectivity
+	numStatusFields
+)
 
 // NewDeviceConnection creates a fully-initialised connection. The
 // status starts with IsConnected=false and LastActivity set to now;
@@ -141,64 +164,50 @@ func (c *DeviceConnection) SetStatus(s *DeviceStatus) {
 	c.status.Store(s)
 }
 
-// BeginStatusPoll reserves an ordering generation before a status poll starts
-// network I/O. CompleteStatusPoll uses it to reject an older poll after either
-// a newer poll or a real-time speaker event has supplied fresher state.
-func (c *DeviceConnection) BeginStatusPoll() uint64 {
-	c.statusOrderMu.Lock()
-	defer c.statusOrderMu.Unlock()
+// BeginFieldPoll reserves a generation for an asynchronous fetch of field,
+// before any network I/O starts. Pass the returned value to CompleteFieldPoll
+// once the fetch completes.
+func (c *DeviceConnection) BeginFieldPoll(field StatusField) uint64 {
+	c.fieldGenMu.Lock()
+	defer c.fieldGenMu.Unlock()
 
-	c.nextStatusPollGeneration++
-	if c.statusPollEventGeneration == nil {
-		c.statusPollEventGeneration = make(map[uint64]uint64)
-	}
+	c.fieldGen[field].issued++
 
-	c.statusPollEventGeneration[c.nextStatusPollGeneration] = c.speakerEventGeneration
-
-	return c.nextStatusPollGeneration
+	return c.fieldGen[field].issued
 }
 
-// ApplySpeakerEvent serializes a real-time speaker event against status-poll
-// completion. Even a duplicate event invalidates polls that started before it:
-// the event is newer evidence than their fetched payload.
-func (c *DeviceConnection) ApplySpeakerEvent(mut func(*DeviceStatus)) {
-	c.statusOrderMu.Lock()
-	defer c.statusOrderMu.Unlock()
+// CompleteFieldPoll applies mut only if generation is strictly newer than
+// whatever last actually applied -- poll or event -- for field. A poll for
+// one field losing this race never affects any other field: an unrelated
+// field's event, or an unrelated field's poll completing first, cannot
+// discard this field's fresh, successful data.
+func (c *DeviceConnection) CompleteFieldPoll(field StatusField, generation uint64, mut func(*DeviceStatus)) bool {
+	c.fieldGenMu.Lock()
 
-	c.speakerEventGeneration++
-	c.UpdateStatus(mut)
-}
+	if generation <= c.fieldGen[field].applied {
+		c.fieldGenMu.Unlock()
 
-// CompleteStatusPoll applies a poll result only when no newer poll has already
-// completed and no speaker event arrived after this poll began.
-func (c *DeviceConnection) CompleteStatusPoll(
-	generation uint64,
-	mut func(*DeviceStatus),
-) bool {
-	c.statusOrderMu.Lock()
-	defer c.statusOrderMu.Unlock()
-
-	eventGeneration, knownGeneration := c.statusPollEventGeneration[generation]
-	delete(c.statusPollEventGeneration, generation)
-
-	if generation <= c.lastStatusPollGeneration {
 		return false
 	}
 
-	c.lastStatusPollGeneration = generation
-	for olderGeneration := range c.statusPollEventGeneration {
-		if olderGeneration < generation {
-			delete(c.statusPollEventGeneration, olderGeneration)
-		}
-	}
-
-	if !knownGeneration || eventGeneration != c.speakerEventGeneration {
-		return false
-	}
+	c.fieldGen[field].applied = generation
+	c.fieldGenMu.Unlock()
 
 	c.UpdateStatus(mut)
 
 	return true
+}
+
+// ApplyFieldEvent always applies mut -- a real-time push event is
+// authoritative evidence for field -- and invalidates any poll for field
+// that began before it, without touching any other field's ordering.
+func (c *DeviceConnection) ApplyFieldEvent(field StatusField, mut func(*DeviceStatus)) {
+	c.fieldGenMu.Lock()
+	c.fieldGen[field].issued++
+	c.fieldGen[field].applied = c.fieldGen[field].issued
+	c.fieldGenMu.Unlock()
+
+	c.UpdateStatus(mut)
 }
 
 // UpdateStatus atomically applies mut to a copy of the current status
