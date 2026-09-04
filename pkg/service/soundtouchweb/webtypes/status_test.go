@@ -163,6 +163,45 @@ func TestGroupEventSupersedesInFlightPoll(t *testing.T) {
 	}
 }
 
+// TestPolledGroupAppliesAfterNewerRefreshStartFailsToApply guards against
+// invalidating by start order: a second poll starting (and never applying,
+// e.g. its own GetGroup failed) must not discard an earlier poll's
+// still-arriving successful result.
+func TestPolledGroupAppliesAfterNewerRefreshStartFailsToApply(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	genA := conn.BeginGroupRefresh()
+	_ = conn.BeginGroupRefresh() // a second poll starts but never calls ApplyPolledGroup
+
+	if !conn.ApplyPolledGroup(genA, &models.Group{ID: "pair-1", MasterDeviceID: "master"}) {
+		t.Fatal("an older poll's successful result must still apply when nothing newer ever actually applied")
+	}
+
+	if got := conn.Status().Group; got == nil || got.ID != "pair-1" {
+		t.Fatalf("Group = %+v, want pair-1 applied", got)
+	}
+}
+
+// TestOlderPolledGroupRejectedAfterNewerPollApplies guards the original
+// protection this mechanism exists for: a genuinely newer successful poll
+// must not be clobbered by an older one arriving late.
+func TestOlderPolledGroupRejectedAfterNewerPollApplies(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	genA := conn.BeginGroupRefresh()
+	genB := conn.BeginGroupRefresh()
+
+	if !conn.ApplyPolledGroup(genB, &models.Group{ID: "pair-new", MasterDeviceID: "master"}) {
+		t.Fatal("newer poll result should apply")
+	}
+
+	if conn.ApplyPolledGroup(genA, &models.Group{ID: "pair-stale", MasterDeviceID: "master"}) {
+		t.Fatal("an older poll's result arriving after a newer one already applied must be rejected")
+	}
+
+	if got := conn.Status().Group; got == nil || got.ID != "pair-new" {
+		t.Fatalf("Group = %+v, want pair-new preserved", got)
+	}
+}
+
 func TestEmptyGroupClearsCurrentClaim(t *testing.T) {
 	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
 	conn.SetStatus(&DeviceStatus{Group: &models.Group{ID: "pair-1"}})

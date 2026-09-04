@@ -48,10 +48,17 @@ type DeviceConnection struct {
 	status atomic.Pointer[DeviceStatus]
 
 	// groupMu orders polled /getGroup responses against real-time
-	// groupUpdated events. Starting a newer refresh or receiving an event
-	// invalidates any older in-flight poll.
-	groupMu         sync.Mutex
-	groupGeneration uint64
+	// groupUpdated events. groupGeneration is the highest generation
+	// issued (by BeginGroupRefresh or ApplyGroupEvent);
+	// groupAppliedGeneration is the highest generation whose result was
+	// actually applied. Invalidation keys off completion order via
+	// groupAppliedGeneration, not merely "a newer refresh has started" —
+	// otherwise a later poll that starts but never applies (e.g. its own
+	// GetGroup fails) would still discard an earlier poll's still-arriving
+	// successful result.
+	groupMu                sync.Mutex
+	groupGeneration        uint64
+	groupAppliedGeneration uint64
 
 	// done is closed by Close when the device is removed from the
 	// registry, signalling its background goroutines (the status poller
@@ -164,26 +171,31 @@ func (c *DeviceConnection) BeginGroupRefresh() uint64 {
 	return c.groupGeneration
 }
 
-// ApplyPolledGroup stores a /getGroup result only when no newer poll or
-// groupUpdated event superseded it. Empty groups clear the current claim.
+// ApplyPolledGroup stores a /getGroup result only if no strictly newer
+// result (poll or event) has already applied. Empty groups clear the
+// current claim.
 func (c *DeviceConnection) ApplyPolledGroup(generation uint64, group *models.Group) bool {
 	c.groupMu.Lock()
 	defer c.groupMu.Unlock()
 
-	if generation != c.groupGeneration {
+	if generation <= c.groupAppliedGeneration {
 		return false
 	}
+
+	c.groupAppliedGeneration = generation
 
 	return c.replaceGroup(normalizeGroup(group), time.Time{})
 }
 
 // ApplyGroupEvent stores the newest groupUpdated event and invalidates all
-// in-flight /getGroup requests. Empty teardown events clear the current claim.
+// in-flight /getGroup requests, including ones that have not started yet.
+// Empty teardown events clear the current claim.
 func (c *DeviceConnection) ApplyGroupEvent(group *models.Group, activity time.Time) bool {
 	c.groupMu.Lock()
 	defer c.groupMu.Unlock()
 
 	c.groupGeneration++
+	c.groupAppliedGeneration = c.groupGeneration
 
 	return c.replaceGroup(normalizeGroup(group), activity)
 }
