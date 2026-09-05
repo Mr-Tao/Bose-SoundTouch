@@ -1,4 +1,4 @@
-.PHONY: all build build-cli test test-coverage test-browser test-http-client test-http-client-rotate check fmt vet lint clean dev help screenshots build-stockholm-image prepare-stockholm update-static-deps dev-docs dev-docs-tidy hugo
+.PHONY: all build build-cli test test-coverage test-browser test-frontend test-http-client test-http-client-rotate check fmt vet lint clean dev help screenshots build-stockholm-image prepare-stockholm update-static-deps dev-docs dev-docs-tidy hugo
 
 # Load .env if present (simple KEY=VALUE format, no shell quoting)
 -include .env
@@ -155,6 +155,14 @@ test-coverage:
 test-browser:
 	@echo "Running browser-level compatibility tests..."
 	$(GOTEST) -tags browsertest -v ./pkg/service/soundtouchweb/...
+
+# Unit tests for the embedded player's static JS modules (see
+# pkg/service/soundtouchweb/frontend_test/), run via Node's built-in test
+# runner. Not part of `test`/`check`, since they need a Node binary matching
+# package.json's engines field, same reasoning as test-browser needing Chrome.
+test-frontend:
+	@echo "Running frontend unit tests..."
+	node --test pkg/service/soundtouchweb/frontend_test/*.test.mjs
 
 check: fmt vet test test-http-client
 
@@ -516,6 +524,7 @@ help:
 	@echo "  test          - Run tests"
 	@echo "  test-coverage - Run tests with coverage report"
 	@echo "  test-browser             - Run browser-level (chromedp) player compatibility tests"
+	@echo "  test-frontend            - Run player static JS unit tests (Node's test runner)"
 	@echo "  test-http-client         - Run .http integration tests via Docker Compose"
 	@echo "  test-http-client-rotate  - Archive tests/integration/testdata/ before a fresh run (non-destructive)"
 	@echo "  check         - Run fmt, vet, and tests"
