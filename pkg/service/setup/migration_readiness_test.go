@@ -252,3 +252,27 @@ func assertPresetSnapshotUnchanged(t *testing.T, path string, want []byte) {
 		t.Fatalf("readiness preflight rewrote Presets.xml\n got: %s\nwant: %s", after, want)
 	}
 }
+
+// TestMigrationDataReadinessAllowsUnpairedSpeaker: a factory-reset speaker has
+// no account data to preserve, and the admin UI migrates before it pairs, so
+// refusing here would make onboarding impossible. Data Sync could not unblock
+// it either: an account-less device is filed under "default", which never
+// matches an empty live account.
+func TestMigrationDataReadinessAllowsUnpairedSpeaker(t *testing.T) {
+	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/info" {
+			_, _ = fmt.Fprintf(w, `<info deviceID="%s"><name>Fresh Speaker</name><margeAccountUUID></margeAccountUUID></info>`, readinessDevice)
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer speaker.Close()
+
+	m := NewManager("http://aftertouch.example:8000", datastore.NewDataStore(t.TempDir()), nil)
+
+	if err := m.checkMigrationDataReady(strings.TrimPrefix(speaker.URL, "http://")); err != nil {
+		t.Fatalf("unpaired speaker was refused migration: %v", err)
+	}
+}
