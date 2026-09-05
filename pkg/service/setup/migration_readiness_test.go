@@ -331,3 +331,48 @@ func TestMigrationDataReadinessExplainsPresetsDroppedByFull(t *testing.T) {
 		t.Errorf("action = %q, want it to point at the missing source", notReady.Action)
 	}
 }
+
+// TestMigrationSummaryReportsDataReadiness: the pre-flight panel must show a
+// refusal before the user commits, rather than showing all-green and failing
+// with a 409 at Apply.
+func TestMigrationSummaryReportsDataReadiness(t *testing.T) {
+	t.Run("refusal", func(t *testing.T) {
+		m, _, deviceIP := newMigrationReadinessFixture(t, `<presets/>`)
+
+		// No persisted snapshot, so the check refuses.
+		summary, err := m.GetMigrationSummary(deviceIP, "http://aftertouch.example:8000", "", nil)
+		if err != nil {
+			t.Fatalf("GetMigrationSummary: %v", err)
+		}
+
+		if summary.DataReadyError == "" {
+			t.Error("summary hid a refusal that Apply would hit")
+		}
+	})
+
+	t.Run("warning", func(t *testing.T) {
+		m, ds, deviceIP := newMigrationReadinessFixture(t, `<presets/>`)
+		if err := ds.SavePresets(readinessAccount, readinessDevice, nil); err != nil {
+			t.Fatalf("SavePresets: %v", err)
+		}
+		if err := ds.SaveDeviceInfo(readinessAccount, "SIBLING01", &models.ServiceDeviceInfo{
+			DeviceID:  "SIBLING01",
+			AccountID: readinessAccount,
+			Name:      "Sibling Speaker",
+		}); err != nil {
+			t.Fatalf("SaveDeviceInfo sibling: %v", err)
+		}
+
+		summary, err := m.GetMigrationSummary(deviceIP, "http://aftertouch.example:8000", "", nil)
+		if err != nil {
+			t.Fatalf("GetMigrationSummary: %v", err)
+		}
+
+		if summary.DataReadyError != "" {
+			t.Errorf("summary reported a refusal for a shared account: %q", summary.DataReadyError)
+		}
+		if len(summary.DataReadyWarnings) != 1 {
+			t.Errorf("warnings = %v, want one about the device count", summary.DataReadyWarnings)
+		}
+	})
+}

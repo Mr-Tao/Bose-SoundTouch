@@ -80,6 +80,12 @@ type MigrationSummary struct {
 	CurrentResolvConf        string      `json:"current_resolv_conf,omitempty"`
 	PlannedResolv            string      `json:"planned_resolv,omitempty"`
 	IsMigrated               bool        `json:"is_migrated"`
+	// Data readiness, so the pre-flight panel can show a refusal before the
+	// user commits to Apply instead of only surfacing it as a 409 afterwards.
+	// DataReadyError is the reason migration will be refused; empty means it
+	// will proceed. DataReadyWarnings are advisory and do not block.
+	DataReadyError    string   `json:"data_ready_error,omitempty"`
+	DataReadyWarnings []string `json:"data_ready_warnings,omitempty"`
 	// Per-axis migration signals — IsMigrated is the OR of these. The UI
 	// displays them individually so users can see partial states (e.g.
 	// URLs flipped via telnet but the on-disk XML hasn't caught up, or
@@ -301,6 +307,13 @@ func (m *Manager) GetMigrationSummary(deviceIP, targetURL, proxyURL string, opti
 
 	summary := &MigrationSummary{
 		SSHSuccess: false,
+	}
+
+	// Same read-only check MigrateSpeaker runs, reported rather than enforced.
+	if warnings, err := m.checkMigrationDataReady(deviceIP); err != nil {
+		summary.DataReadyError = err.Error()
+	} else {
+		summary.DataReadyWarnings = warnings
 	}
 
 	// Run the telnet preflight in parallel with the SSH-based probes below.
