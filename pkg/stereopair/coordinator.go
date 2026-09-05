@@ -806,6 +806,21 @@ func (c *Coordinator) Dissolve(req DissolveRequest) (Result, error) {
 		}
 	}
 
+	if !allVerified(states) && compensateDissolve(states) {
+		verifyDissolved(states)
+
+		if removalReverificationPending(states) {
+			for _, delay := range c.uncertainOutcomeDelays {
+				time.Sleep(delay)
+				verifyDissolved(states)
+
+				if !removalReverificationPending(states) {
+					break
+				}
+			}
+		}
+	}
+
 	if allVerified(states) {
 		result.Group = &models.Group{}
 		if cleanupErr := c.cleanupGeneration(&result, generationRef(states, current)); cleanupErr == nil {
@@ -818,6 +833,26 @@ func (c *Coordinator) Dissolve(req DissolveRequest) (Result, error) {
 	}
 
 	return finish(result, states)
+}
+
+// compensateDissolve retries RemoveGroup on any member that hasn't yet
+// verified empty, giving a transient partial failure (one member's removal
+// races the topology check, or a firmware retry is needed) a chance to
+// converge instead of settling for StatusDegraded on the first pass.
+func compensateDissolve(states []memberState) bool {
+	attempted := false
+
+	for i := range states {
+		if states[i].result.Verified {
+			continue
+		}
+
+		attempted = true
+		states[i].result.MutationAttempted = true
+		states[i].result.MutationError = wrapUnavailable("remove group during dissolve compensation", states[i].client.RemoveGroup())
+	}
+
+	return attempted
 }
 
 func applyDissolve(states []memberState, current *models.Group) {
