@@ -75,7 +75,9 @@ func (m *Manager) checkMigrationDataReady(deviceIP string) ([]string, error) {
 
 	persistedInfo, err := m.DataStore.GetExactDeviceInfo(accountID, deviceID)
 	if err != nil {
-		return nil, migrationDataNotReadyf("DeviceInfo.xml is not persisted under account %q and device %q", accountID, deviceID)
+		// Report the cause: a malformed file or an I/O error is not a missing
+		// sync, and Data Sync is then the wrong remedy to suggest.
+		return nil, migrationDataNotReadyf("cannot read DeviceInfo.xml under account %q and device %q: %v", accountID, deviceID, err)
 	}
 
 	if persistedInfo.DeviceID != deviceID {
