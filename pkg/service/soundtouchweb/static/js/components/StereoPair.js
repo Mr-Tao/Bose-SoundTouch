@@ -163,8 +163,15 @@ export function StereoPair({ deviceId, device, devices, onChanged, notify }) {
             setShowPicker(false);
             onSuccess?.();
             notify?.(successMessage);
-            await onChanged?.();
-            await refresh();
+            try {
+                await onChanged?.();
+                await refresh();
+            } catch (_) {
+                // The mutation itself already succeeded and was notified
+                // above; a failure here only means the device list/local
+                // view didn't refresh, not that the operation failed.
+                notify?.('Stereo pair updated, but the device list failed to refresh');
+            }
         } catch (_) {
             if (isCurrentMutation()) {
                 await recoverFromFailure('Stereo-pair operation failed');
