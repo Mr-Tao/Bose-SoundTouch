@@ -596,6 +596,32 @@ func TestUnrelatedFieldEventDoesNotInvalidateInFlightPoll(t *testing.T) {
 	}
 }
 
+// TestTransportStateObservationDoesNotFenceFieldConnectivityPoll guards
+// against routing ObserveEventStreamTransport through
+// ApplyFieldEvent(FieldConnectivity, ...): that would unconditionally bump
+// FieldConnectivity's applied generation past whatever an in-flight HTTP
+// poll already reserved, so a transient WebSocket transport blip could
+// silently discard a concurrently-completing, genuinely successful poll's
+// IsConnected merge.
+func TestTransportStateObservationDoesNotFenceFieldConnectivityPoll(t *testing.T) {
+	conn := NewDeviceConnection(nil, &models.DeviceInfo{Name: "test"})
+	connectivityPoll := conn.BeginFieldPoll(FieldConnectivity)
+
+	if !conn.ObserveEventStreamTransport(1, false, time.Now()) {
+		t.Fatal("first transport observation should be accepted")
+	}
+
+	if !conn.CompleteFieldPoll(FieldConnectivity, connectivityPoll, func(status *DeviceStatus) {
+		status.IsConnected = true
+	}) {
+		t.Fatal("a transport-state observation must not invalidate an in-flight FieldConnectivity poll")
+	}
+
+	if !conn.Status().IsConnected {
+		t.Fatal("FieldConnectivity poll result was discarded by an unrelated transport-state observation")
+	}
+}
+
 func TestStatusSnapshotIsolation(t *testing.T) {
 	// A snapshot returned by Status() must NOT change when a later
 	// UpdateStatus replaces a pointer field. This proves the atomic
