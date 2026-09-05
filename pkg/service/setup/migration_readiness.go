@@ -153,6 +153,15 @@ func migrationPresetIdentities(presets []models.ServicePreset) []migrationPreset
 			slot = presets[i].ID
 		}
 
+		// Clearing a slot through the Marge API leaves a zero-value entry in
+		// the list (RemovePreset assigns models.ServicePreset{}), persisted as
+		// <preset id="">. The rendered /full drops it, so counting it here
+		// would report a mismatch for a datastore that is perfectly in sync.
+		// An empty slot carries no identity to compare either way.
+		if slot == "" {
+			continue
+		}
+
 		result = append(result, migrationPresetIdentity{
 			Slot:     slot,
 			Name:     presets[i].Name,
