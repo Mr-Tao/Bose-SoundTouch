@@ -303,3 +303,31 @@ func TestMigrationDataReadinessIgnoresClearedPresetSlots(t *testing.T) {
 		t.Fatalf("a cleared preset slot blocked migration: %v", err)
 	}
 }
+
+// TestMigrationDataReadinessExplainsPresetsDroppedByFull: a preset whose music
+// service source is missing from the account is omitted from the rendered
+// /full on purpose. Telling the user to run Data Sync sends them in a loop,
+// since syncing cannot bring the source back.
+func TestMigrationDataReadinessExplainsPresetsDroppedByFull(t *testing.T) {
+	kept := readinessPreset("1", "Kept Station", "http://radio.example/kept")
+
+	dropped := readinessPreset("2", "Spotify Mix", "spotify:playlist:x")
+	dropped.Source = "SPOTIFY"
+	dropped.SourceID = "99999"
+	dropped.SourceAccount = "someone"
+
+	m, ds, deviceIP := newMigrationReadinessFixture(t, livePresetsXML(kept, dropped))
+	if err := ds.SavePresets(readinessAccount, readinessDevice, []models.ServicePreset{kept, dropped}); err != nil {
+		t.Fatalf("SavePresets: %v", err)
+	}
+
+	_, err := m.checkMigrationDataReady(deviceIP)
+	notReady := requireMigrationNotReady(t, err)
+
+	if strings.Contains(notReady.Action, "Run Data Sync") {
+		t.Errorf("action = %q, want it not to prescribe a sync that cannot help", notReady.Action)
+	}
+	if !strings.Contains(notReady.Action, "source") {
+		t.Errorf("action = %q, want it to point at the missing source", notReady.Action)
+	}
+}

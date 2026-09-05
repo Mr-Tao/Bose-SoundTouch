@@ -128,12 +128,12 @@ func (m *Manager) checkMigrationDataReady(deviceIP string) ([]string, error) {
 	persisted := migrationPresetIdentities(snapshot.Presets)
 	live := migrationPresetIdentities(livePresets)
 
-	if mismatch := compareMigrationPresets("persisted snapshot", persisted, "rendered /full", fullPresets); mismatch != "" {
-		return nil, migrationDataNotReadyf("%s", mismatch)
+	if mismatch := compareMigrationPresets("persisted snapshot", persisted, "rendered /full", fullPresets); mismatch != nil {
+		return nil, mismatch.err()
 	}
 
-	if mismatch := compareMigrationPresets("live /presets", live, "rendered /full", fullPresets); mismatch != "" {
-		return nil, migrationDataNotReadyf("%s", mismatch)
+	if mismatch := compareMigrationPresets("live /presets", live, "rendered /full", fullPresets); mismatch != nil {
+		return nil, mismatch.err()
 	}
 
 	return warnings, nil
@@ -208,33 +208,64 @@ func migrationFullPresets(fullXML []byte, deviceID string) ([]migrationPresetIde
 	return nil, len(full.Devices), fmt.Errorf("target device %q is missing", deviceID)
 }
 
-func compareMigrationPresets(leftName string, left []migrationPresetIdentity, rightName string, right []migrationPresetIdentity) string {
+// migrationPresetMismatch describes why two preset views disagree.
+type migrationPresetMismatch struct {
+	Reason string
+	// DroppedByFull marks the case where the speaker's own view holds a slot
+	// the rendered /full does not. mapPresetsToFullResponse omits a preset
+	// whose source is absent from the account's configured sources and cannot
+	// be synthesised, so this is not a stale snapshot and re-syncing cannot
+	// fix it: the source itself has to come back.
+	DroppedByFull bool
+}
+
+func (m *migrationPresetMismatch) err() error {
+	if !m.DroppedByFull {
+		return migrationDataNotReadyf("%s", m.Reason)
+	}
+
+	return &MigrationDataNotReadyError{
+		Reason: m.Reason,
+		Action: "The rendered account omits a preset whose music service source is missing, so Data Sync cannot restore it. " +
+			"Re-link or repopulate that source for this account, then retry migration.",
+	}
+}
+
+func compareMigrationPresets(leftName string, left []migrationPresetIdentity, rightName string, right []migrationPresetIdentity) *migrationPresetMismatch {
 	if len(left) != len(right) {
-		return fmt.Sprintf("%s has %d preset(s), but %s has %d", leftName, len(left), rightName, len(right))
+		return &migrationPresetMismatch{
+			Reason:        fmt.Sprintf("%s has %d preset(s), but %s has %d", leftName, len(left), rightName, len(right)),
+			DroppedByFull: len(left) > len(right),
+		}
 	}
 
 	leftBySlot, problem := indexMigrationPresets(leftName, left)
 	if problem != "" {
-		return problem
+		return &migrationPresetMismatch{Reason: problem}
 	}
 
 	rightBySlot, problem := indexMigrationPresets(rightName, right)
 	if problem != "" {
-		return problem
+		return &migrationPresetMismatch{Reason: problem}
 	}
 
 	for slot, leftPreset := range leftBySlot {
 		rightPreset, ok := rightBySlot[slot]
 		if !ok {
-			return fmt.Sprintf("preset slot %s from %s is missing from %s", slot, leftName, rightName)
+			return &migrationPresetMismatch{
+				Reason:        fmt.Sprintf("preset slot %s from %s is missing from %s", slot, leftName, rightName),
+				DroppedByFull: true,
+			}
 		}
 
 		if leftPreset.Name != rightPreset.Name || leftPreset.Location != rightPreset.Location {
-			return fmt.Sprintf("preset slot %s differs between %s and %s", slot, leftName, rightName)
+			return &migrationPresetMismatch{
+				Reason: fmt.Sprintf("preset slot %s differs between %s and %s", slot, leftName, rightName),
+			}
 		}
 	}
 
-	return ""
+	return nil
 }
 
 func indexMigrationPresets(name string, presets []migrationPresetIdentity) (map[string]migrationPresetIdentity, string) {
