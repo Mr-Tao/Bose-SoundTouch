@@ -965,15 +965,20 @@ func (s *Server) HandleMargeDeleteGroup(w http.ResponseWriter, r *http.Request) 
 	_, _ = w.Write([]byte(constants.XMLHeader + `<status>Group deleted successfully</status>`))
 }
 
-// HandleMargeDeleteAccountGroups acknowledges legacy speaker teardown
-// callbacks that carry no group ID. Such a request cannot identify a group
-// generation safely, so it is deliberately non-mutating. Generation-aware
-// callers use HandleMargeDeleteGroup instead.
+// HandleMargeDeleteAccountGroups handles legacy speaker teardown callbacks
+// that carry no group ID (e.g. factory reset). It deletes every stored group
+// for the account, mirroring the real firmware expectation that this call
+// clears all group state so a later Create isn't blocked by a stale record.
 func (s *Server) HandleMargeDeleteAccountGroups(w http.ResponseWriter, r *http.Request) {
 	account := chi.URLParam(r, "account")
 
 	if !validatePathID(account) {
 		http.Error(w, "Invalid account ID", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.ds.DeleteAllGroupsForAccount(account); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 

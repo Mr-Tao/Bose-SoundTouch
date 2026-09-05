@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -210,14 +211,20 @@ func TestMargeDeviceGroupReturns500ForMalformedOrUnreadableData(t *testing.T) {
 	}
 }
 
-func TestMargeDeleteAccountGroupsAcknowledgesWithoutDeleting(t *testing.T) {
+func TestMargeDeleteAccountGroupsDeletesAllGroupsForAccount(t *testing.T) {
 	ds := datastore.NewDataStore(t.TempDir())
 	handler := margeLifecycleRouter(ds)
 	const account = "ACCOUNT1"
+	const otherAccount = "ACCOUNT2"
 
 	group := margeLifecycleGroup("MASTER", "MASTER", "SLAVE", "Current pair")
 	if _, err := ds.AddGroup(account, &group); err != nil {
 		t.Fatalf("add group: %v", err)
+	}
+
+	otherGroup := margeLifecycleGroup("OTHER-MASTER", "OTHER-MASTER", "OTHER-SLAVE", "Other account pair")
+	if _, err := ds.AddGroup(otherAccount, &otherGroup); err != nil {
+		t.Fatalf("add group in other account: %v", err)
 	}
 
 	response := margeLifecycleRequest(t, handler, http.MethodDelete,
@@ -226,8 +233,12 @@ func TestMargeDeleteAccountGroupsAcknowledgesWithoutDeleting(t *testing.T) {
 		t.Fatalf("DELETE status = %d, want 200; body=%s", response.Code, response.Body.String())
 	}
 
-	if current, err := ds.GetGroupForDevice(account, "MASTER"); err != nil || current.ID != group.ID {
-		t.Fatalf("generation-less teardown changed stored group: group=%#v err=%v", current, err)
+	if _, err := ds.GetGroupForDevice(account, "MASTER"); !errors.Is(err, datastore.ErrGroupNotFound) {
+		t.Fatalf("generation-less teardown did not delete stored group: err=%v", err)
+	}
+
+	if current, err := ds.GetGroupForDevice(otherAccount, "OTHER-MASTER"); err != nil || current.ID != otherGroup.ID {
+		t.Fatalf("teardown affected a different account's group: group=%#v err=%v", current, err)
 	}
 }
 
