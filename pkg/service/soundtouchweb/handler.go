@@ -1368,11 +1368,16 @@ func (app *WebApp) HandleGetZoneCandidates(w http.ResponseWriter, r *http.Reques
 	candidates := make(map[string]zoneCandidate)
 
 	for _, entry := range app.DeviceSnapshot() {
-		if entry.Device == nil || entry.Device.DeviceInfo == nil {
+		if entry.Device == nil {
 			continue
 		}
 
-		candidates[entry.ID] = zoneCandidate{Info: entry.Device.DeviceInfo}
+		info := entry.Device.Info()
+		if info == nil {
+			continue
+		}
+
+		candidates[entry.ID] = zoneCandidate{Info: info}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
