@@ -262,6 +262,39 @@ func (c *DeviceConnection) ApplyPolledGroup(generation uint64, group *models.Gro
 	return c.replaceGroup(normalizeGroup(group), time.Time{})
 }
 
+// GroupGeneration reports the generation of the most recently applied group
+// result (poll or event). Callers use this to snapshot a baseline before
+// starting an async /getGroup read they only want to apply if nothing else
+// has changed group state in the meantime.
+func (c *DeviceConnection) GroupGeneration() uint64 {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	return c.groupAppliedGeneration
+}
+
+// ApplyPolledGroupIfBaseline stores a /getGroup result only if the applied
+// group generation is still exactly baseline, i.e. no poll or event has
+// applied since the caller captured that baseline via GroupGeneration. Unlike
+// ApplyPolledGroup, a caller here never minted its own generation up front,
+// so it cannot rely on "strictly newer" to detect a stale read -- an
+// unconditionally-incrementing generation would always look newer than a
+// baseline captured earlier, even when the read itself raced a fresher
+// event or poll to completion first.
+func (c *DeviceConnection) ApplyPolledGroupIfBaseline(baseline uint64, group *models.Group) bool {
+	c.groupMu.Lock()
+	defer c.groupMu.Unlock()
+
+	if c.groupAppliedGeneration != baseline {
+		return false
+	}
+
+	c.groupGeneration++
+	c.groupAppliedGeneration = c.groupGeneration
+
+	return c.replaceGroup(normalizeGroup(group), time.Time{})
+}
+
 // ApplyGroupEvent stores the newest groupUpdated event and invalidates all
 // in-flight /getGroup requests, including ones that have not started yet.
 // Empty teardown events clear the current claim.

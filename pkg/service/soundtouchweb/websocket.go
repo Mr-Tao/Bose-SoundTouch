@@ -631,7 +631,22 @@ func sleepOrDone(conn *webtypes.DeviceConnection, d time.Duration) bool {
 // can supersede only that field. A slow-but-successful fetch for one field
 // is never discarded merely because a DIFFERENT field's event or poll
 // completion happened to land first.
-func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection) {
+func (app *WebApp) UpdateDeviceStatus(deviceID string, conn *webtypes.DeviceConnection) {
+	app.updateDeviceStatus(deviceID, conn, nil)
+}
+
+// refreshDeviceStatusAfterStereoPairMutation behaves like UpdateDeviceStatus,
+// but only applies its /getGroup read if the device's applied group
+// generation is still exactly groupBaseline -- i.e. nothing (no push event,
+// no other poll) has changed group state since the caller captured that
+// baseline immediately after applying its own lifecycle projection. This
+// stops a slow, now-stale follow-up read from clobbering a fresher result
+// that already landed while it was in flight.
+func (app *WebApp) refreshDeviceStatusAfterStereoPairMutation(deviceID string, conn *webtypes.DeviceConnection, groupBaseline uint64) {
+	app.updateDeviceStatus(deviceID, conn, &groupBaseline)
+}
+
+func (app *WebApp) updateDeviceStatus(_ string, conn *webtypes.DeviceConnection, groupBaseline *uint64) {
 	// Skip status update if client is not available (e.g., in tests)
 	if conn.Client == nil {
 		return
@@ -650,7 +665,7 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	stereoCapable := stereoPairCapable(conn.DeviceInfo)
 
 	var groupGeneration uint64
-	if stereoCapable {
+	if stereoCapable && groupBaseline == nil {
 		groupGeneration = conn.BeginGroupRefresh()
 	}
 
@@ -735,7 +750,11 @@ func (app *WebApp) UpdateDeviceStatus(_ string, conn *webtypes.DeviceConnection)
 	})
 
 	if stereoCapable && groupErr == nil {
-		conn.ApplyPolledGroup(groupGeneration, group)
+		if groupBaseline != nil {
+			conn.ApplyPolledGroupIfBaseline(*groupBaseline, group)
+		} else {
+			conn.ApplyPolledGroup(groupGeneration, group)
+		}
 	}
 }
 
