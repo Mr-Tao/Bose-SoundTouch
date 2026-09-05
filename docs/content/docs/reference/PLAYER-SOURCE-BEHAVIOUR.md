@@ -106,7 +106,10 @@ seconds later, surfacing as a transition to an error source
 - **Bounded readbacks** at 2s, 5s and 10s are the fallback for a speaker whose
   events are not arriving. They stop as soon as a confirmation arrives *and*
   the readback reports a live event stream, so a confirmed selection normally
-  costs one request rather than three.
+  costs one request rather than three. That signal is `webSocketConnected`,
+  which reports the service's own socket to the speaker; it is opened lazily
+  on first fetch or control of a device, so the very first click after
+  loading one can still take all three.
 - Readbacks use `GET /devices/{id}/now-playing`, which refreshes only
   `/now_playing`. The full device fetch runs a complete status poll: six
   sequential speaker calls plus `/getGroup` on a stereo-capable model, to
