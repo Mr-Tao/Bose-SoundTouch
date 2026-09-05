@@ -1098,6 +1098,41 @@ func TestDissolveReverifiesLateRemovalWithoutReplay(t *testing.T) {
 	}
 }
 
+// TestDissolveCompensatesMemberThatNeverConverges covers a partial failure
+// that plain reverification (as in TestDissolveReverifiesLateRemovalWithoutReplay)
+// cannot resolve on its own: LEFT's group genuinely never empties after its
+// first RemoveGroup call, so Dissolve must retry the removal (compensateDissolve)
+// rather than settling for StatusDegraded. See i655 code-review finding #2.
+func TestDissolveCompensatesMemberThatNeverConverges(t *testing.T) {
+	group := configuredGroup("Pair")
+	left := readyClient(leftID, "Left")
+	right := readyClient(rightID, "Right")
+	left.group = cloneGroup(group)
+	right.group = cloneGroup(group)
+	left.getGroup = func(_ int, _ *models.Group) *models.Group {
+		if left.removeCalls >= 2 {
+			return &models.Group{}
+		}
+
+		return cloneGroup(group)
+	}
+	coordinator := New(factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}))
+	coordinator.uncertainOutcomeDelays = []time.Duration{0}
+
+	result, err := coordinator.Dissolve(DissolveRequest{
+		MemberIPAddress: rightIP, ExpectedGroupID: "PAIR-ID",
+	})
+	if err != nil || result.Status != StatusSucceeded {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+	if left.removeCalls != 2 {
+		t.Fatalf("LEFT remove calls = %d, want exactly 2 (initial + compensation retry)", left.removeCalls)
+	}
+	if right.removeCalls != 1 {
+		t.Fatalf("RIGHT remove calls = %d, want exactly 1", right.removeCalls)
+	}
+}
+
 func TestDissolveSkipsRemoveOnMemberAlreadyReportingEmpty(t *testing.T) {
 	left := readyClient(leftID, "Left")
 	right := readyClient(rightID, "Right")
