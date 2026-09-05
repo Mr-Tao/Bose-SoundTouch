@@ -1307,11 +1307,13 @@ func (c *Client) getWithHTTPClient(httpClient *http.Client, endpoint string, res
 	return nil
 }
 
-// mutatingGet performs a firmware-required state-changing GET exactly once at
-// the HTTP transport layer, unmarshaling the response into result. A fresh
-// connection prevents net/http from automatically replaying the request
-// after an ambiguous failure on a reused connection.
-func (c *Client) mutatingGet(endpoint string, result interface{}) error {
+// newOneShotHTTPClient clones the client's transport with keep-alives
+// disabled, so a firmware-required state-changing GET runs exactly once at
+// the HTTP transport layer instead of risking an automatic replay by
+// net/http after an ambiguous failure on a reused connection. The caller
+// owns the returned transport's lifetime and must close its idle
+// connections once done (defer oneShotTransport.CloseIdleConnections()).
+func (c *Client) newOneShotHTTPClient() (client *http.Client, oneShotTransport *http.Transport, err error) {
 	baseTransport := c.httpClient.Transport
 	if baseTransport == nil {
 		baseTransport = http.DefaultTransport
@@ -1319,21 +1321,31 @@ func (c *Client) mutatingGet(endpoint string, result interface{}) error {
 
 	transport, ok := baseTransport.(*http.Transport)
 	if !ok {
-		return errors.New("state-changing GET requires a cloneable HTTP transport")
+		return nil, nil, errors.New("state-changing GET requires a cloneable HTTP transport")
 	}
 
-	oneShotTransport := transport.Clone()
-
+	oneShotTransport = transport.Clone()
 	oneShotTransport.DisableKeepAlives = true
-	defer oneShotTransport.CloseIdleConnections()
 
-	oneShotClient := &http.Client{
+	return &http.Client{
 		Transport: oneShotTransport,
 		Timeout:   c.httpClient.Timeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+	}, oneShotTransport, nil
+}
+
+// mutatingGet performs a firmware-required state-changing GET exactly once at
+// the HTTP transport layer, unmarshaling the response into result. A fresh
+// connection prevents net/http from automatically replaying the request
+// after an ambiguous failure on a reused connection.
+func (c *Client) mutatingGet(endpoint string, result interface{}) error {
+	oneShotClient, oneShotTransport, err := c.newOneShotHTTPClient()
+	if err != nil {
+		return err
 	}
+	defer oneShotTransport.CloseIdleConnections()
 
 	return c.getWithHTTPClient(oneShotClient, endpoint, result)
 }
@@ -1343,28 +1355,11 @@ func (c *Client) mutatingGet(endpoint string, result interface{}) error {
 // body to unmarshal -- confirmation instead comes from the device echoing
 // back <status>{endpoint}</status>.
 func (c *Client) mutatingGetConfirmStatus(endpoint string) error {
-	baseTransport := c.httpClient.Transport
-	if baseTransport == nil {
-		baseTransport = http.DefaultTransport
+	oneShotClient, oneShotTransport, err := c.newOneShotHTTPClient()
+	if err != nil {
+		return err
 	}
-
-	transport, ok := baseTransport.(*http.Transport)
-	if !ok {
-		return errors.New("state-changing GET requires a cloneable HTTP transport")
-	}
-
-	oneShotTransport := transport.Clone()
-
-	oneShotTransport.DisableKeepAlives = true
 	defer oneShotTransport.CloseIdleConnections()
-
-	oneShotClient := &http.Client{
-		Transport: oneShotTransport,
-		Timeout:   c.httpClient.Timeout,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
 
 	req, err := http.NewRequest(http.MethodGet, c.baseURL+endpoint, nil)
 	if err != nil {
