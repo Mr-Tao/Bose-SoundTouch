@@ -58,7 +58,16 @@ func (m *Manager) checkMigrationDataReady(deviceIP string) error {
 	}
 
 	if accountID == "" {
-		return migrationDataNotReadyf("live /info has no paired margeAccountUUID")
+		// An unpaired speaker, typically factory-reset, has no account data to
+		// preserve, so there is nothing for this check to compare and nothing
+		// to lose. Refusing here would also break the documented onboarding
+		// order: the admin UI migrates first and pairs afterwards (see the
+		// "Pairing runs after the URL flip" comment in the setup page), and
+		// MIGRATION-GUIDE.md tells the user to Generate an account ID on a
+		// factory-reset device. Data Sync cannot unblock it either, since it
+		// files an account-less device under "default", which never matches an
+		// empty live account.
+		return nil
 	}
 
 	if !datastore.IsSafeIdentifier(accountID) || !datastore.IsSafeIdentifier(deviceID) {
