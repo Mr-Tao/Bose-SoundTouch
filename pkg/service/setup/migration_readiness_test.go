@@ -79,6 +79,8 @@ func livePresetsXML(presets ...models.ServicePreset) string {
 	return xml.String()
 }
 
+func discardWarnings(_ []string, err error) error { return err }
+
 func requireMigrationNotReady(t *testing.T, err error) *MigrationDataNotReadyError {
 	t.Helper()
 	if err == nil {
@@ -126,7 +128,7 @@ func TestMigrationDataReadinessBlocksPartialAndFilteredPresets(t *testing.T) {
 			t.Fatalf("SavePresets: %v", err)
 		}
 
-		requireMigrationNotReady(t, m.checkMigrationDataReady(deviceIP))
+		requireMigrationNotReady(t, discardWarnings(m.checkMigrationDataReady(deviceIP)))
 	})
 
 	t.Run("preset filtered from full", func(t *testing.T) {
@@ -138,13 +140,13 @@ func TestMigrationDataReadinessBlocksPartialAndFilteredPresets(t *testing.T) {
 			t.Fatalf("SavePresets: %v", err)
 		}
 
-		notReady := requireMigrationNotReady(t, m.checkMigrationDataReady(deviceIP))
+		notReady := requireMigrationNotReady(t, discardWarnings(m.checkMigrationDataReady(deviceIP)))
 		if !strings.Contains(notReady.Reason, "rendered /full") {
 			t.Fatalf("reason = %q, want rendered /full mismatch", notReady.Reason)
 		}
 	})
 
-	t.Run("shared account", func(t *testing.T) {
+	t.Run("shared account warns but does not refuse", func(t *testing.T) {
 		m, ds, deviceIP := newMigrationReadinessFixture(t, `<presets/>`)
 		if err := ds.SavePresets(readinessAccount, readinessDevice, nil); err != nil {
 			t.Fatalf("SavePresets: %v", err)
@@ -158,27 +160,23 @@ func TestMigrationDataReadinessBlocksPartialAndFilteredPresets(t *testing.T) {
 			t.Fatalf("SaveDeviceInfo sibling: %v", err)
 		}
 
-		notReady := requireMigrationNotReady(t, m.checkMigrationDataReady(deviceIP))
-		if !strings.Contains(notReady.Reason, "2 devices") {
-			t.Fatalf("reason = %q, want shared-account device count", notReady.Reason)
+		warnings, err := m.checkMigrationDataReady(deviceIP)
+		if err != nil {
+			t.Fatalf("shared account refused migration: %v", err)
 		}
-		if !strings.Contains(notReady.Action, "dedicated account") {
-			t.Fatalf("action = %q, want dedicated-account guidance", notReady.Action)
-		}
-		if !strings.Contains(notReady.Action, "Data Sync") {
-			t.Fatalf("action = %q, want Data Sync guidance", notReady.Action)
+
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "2 devices") {
+			t.Fatalf("warnings = %v, want one naming the device count", warnings)
 		}
 	})
-}
 
-func TestMigrationDataReadinessAllowsValidEmptyAndSyncedPresets(t *testing.T) {
 	t.Run("valid empty", func(t *testing.T) {
 		m, ds, deviceIP := newMigrationReadinessFixture(t, `<presets/>`)
 		if err := ds.SavePresets(readinessAccount, readinessDevice, nil); err != nil {
 			t.Fatalf("SavePresets: %v", err)
 		}
 
-		if err := m.checkMigrationDataReady(deviceIP); err != nil {
+		if _, err := m.checkMigrationDataReady(deviceIP); err != nil {
 			t.Fatalf("checkMigrationDataReady: %v", err)
 		}
 	})
@@ -190,7 +188,7 @@ func TestMigrationDataReadinessAllowsValidEmptyAndSyncedPresets(t *testing.T) {
 			t.Fatalf("SavePresets: %v", err)
 		}
 
-		if err := m.checkMigrationDataReady(deviceIP); err != nil {
+		if _, err := m.checkMigrationDataReady(deviceIP); err != nil {
 			t.Fatalf("checkMigrationDataReady: %v", err)
 		}
 	})
@@ -209,13 +207,13 @@ func TestMigrationDataReadinessDoesNotRewritePresetSnapshots(t *testing.T) {
 			t.Fatalf("read target snapshot: %v", err)
 		}
 
-		if err = m.checkMigrationDataReady(deviceIP); err != nil {
+		if _, err = m.checkMigrationDataReady(deviceIP); err != nil {
 			t.Fatalf("checkMigrationDataReady: %v", err)
 		}
 		assertPresetSnapshotUnchanged(t, targetPath, before)
 	})
 
-	t.Run("rejected shared account", func(t *testing.T) {
+	t.Run("shared account leaves a sibling snapshot alone", func(t *testing.T) {
 		m, ds, deviceIP := newMigrationReadinessFixture(t, `<presets/>`)
 		if err := ds.SavePresets(readinessAccount, readinessDevice, nil); err != nil {
 			t.Fatalf("SavePresets target: %v", err)
@@ -236,7 +234,17 @@ func TestMigrationDataReadinessDoesNotRewritePresetSnapshots(t *testing.T) {
 			t.Fatalf("write legacy sibling snapshot: %v", err)
 		}
 
-		requireMigrationNotReady(t, m.checkMigrationDataReady(deviceIP))
+		// Reading the sibling's account to count devices must not canonicalise
+		// its legacy Presets.xml, which is the point of this case; the shared
+		// account itself is only a warning.
+		warnings, err := m.checkMigrationDataReady(deviceIP)
+		if err != nil {
+			t.Fatalf("shared account refused migration: %v", err)
+		}
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "2 devices") {
+			t.Fatalf("warnings = %v, want one naming the device count", warnings)
+		}
+
 		assertPresetSnapshotUnchanged(t, siblingPath, legacy)
 	})
 }
@@ -272,7 +280,7 @@ func TestMigrationDataReadinessAllowsUnpairedSpeaker(t *testing.T) {
 
 	m := NewManager("http://aftertouch.example:8000", datastore.NewDataStore(t.TempDir()), nil)
 
-	if err := m.checkMigrationDataReady(strings.TrimPrefix(speaker.URL, "http://")); err != nil {
+	if _, err := m.checkMigrationDataReady(strings.TrimPrefix(speaker.URL, "http://")); err != nil {
 		t.Fatalf("unpaired speaker was refused migration: %v", err)
 	}
 }
