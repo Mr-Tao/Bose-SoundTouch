@@ -266,9 +266,26 @@ func (app *WebApp) completeStereoPairMutation(
 	operationErr error,
 ) {
 	app.applyStereoPairProjection(result)
+	baselines := app.stereoPairGroupBaselines(result)
 	app.awaitPriorGlobalWebSocketWrites()
 	app.writeStereoPairResult(w, info, result, operationErr)
-	app.refreshStereoPairMembersAsync(result)
+	app.refreshStereoPairMembersAsync(result, baselines)
+}
+
+// stereoPairGroupBaselines captures each member's just-applied group
+// generation immediately after applyStereoPairProjection, so the async
+// follow-up refresh can tell "nothing changed since our projection landed"
+// apart from "a fresher event or poll already superseded it."
+func (app *WebApp) stereoPairGroupBaselines(result stereopair.Result) map[string]uint64 {
+	baselines := make(map[string]uint64, len(result.Members))
+
+	for i := range result.Members {
+		if conn, ok := app.deviceByStereoPairIPAddress(result.Members[i].IPAddress); ok && conn != nil {
+			baselines[result.Members[i].IPAddress] = conn.GroupGeneration()
+		}
+	}
+
+	return baselines
 }
 
 // applyStereoPairProjection publishes the coordinator's final fresh group
@@ -297,7 +314,7 @@ func (app *WebApp) applyStereoPairProjection(result stereopair.Result) {
 	}
 }
 
-func (app *WebApp) refreshStereoPairMembersAsync(result stereopair.Result) {
+func (app *WebApp) refreshStereoPairMembersAsync(result stereopair.Result, baselines map[string]uint64) {
 	go func() {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -305,14 +322,16 @@ func (app *WebApp) refreshStereoPairMembersAsync(result stereopair.Result) {
 			}
 		}()
 
-		app.refreshStereoPairMembers(result)
+		app.refreshStereoPairMembers(result, baselines)
 	}()
 }
 
-func (app *WebApp) refreshStereoPairMembers(result stereopair.Result) {
+func (app *WebApp) refreshStereoPairMembers(result stereopair.Result, baselines map[string]uint64) {
 	for i := range result.Members {
-		if conn, ok := app.deviceByStereoPairIPAddress(result.Members[i].IPAddress); ok && conn != nil {
-			app.UpdateDeviceStatus(result.Members[i].IPAddress, conn)
+		ipAddress := result.Members[i].IPAddress
+
+		if conn, ok := app.deviceByStereoPairIPAddress(ipAddress); ok && conn != nil {
+			app.refreshDeviceStatusAfterStereoPairMutation(ipAddress, conn, baselines[ipAddress])
 		}
 	}
 
