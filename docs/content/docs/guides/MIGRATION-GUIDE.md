@@ -179,12 +179,14 @@ account and device and verifies that its rendered account data preserves every
 live preset slot. If the migration page asks for Data Sync, sync the device and
 retry instead of bypassing the check.
 
-Migration is also refused while the rendered account contains another device.
-Some speaker firmware wipes its presets after a reboot-triggered resync of a
-shared account even when `/full` contains the correct data. Move the speaker to
-a dedicated account, run Data Sync for it, and then retry migration. Merely
-removing the other devices is not sufficient because discovery can add them
-again before the speaker fetches `/full` after reboot.
+If the account already contains other devices, migration proceeds but the log
+says so. Some speaker firmware has been reported to wipe its presets after a
+reboot-triggered resync of a shared account even when `/full` contains the
+correct data (see issue #614, where the root cause is still open). One account
+holding every speaker in the household is the normal arrangement, so this is a
+warning rather than a refusal; if you do hit the preset wipe, moving that
+speaker to a dedicated account and running Data Sync for it is the known
+workaround.
 
 ---
 

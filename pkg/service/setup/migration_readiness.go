@@ -30,31 +30,30 @@ func migrationDataNotReadyf(format string, args ...any) error {
 	return &MigrationDataNotReadyError{Reason: fmt.Sprintf(format, args...)}
 }
 
-func migrationDataNotReadyWithAction(reason, action string) error {
-	return &MigrationDataNotReadyError{Reason: reason, Action: action}
-}
-
 // checkMigrationDataReady proves that redirecting the speaker to this service
 // will not replace its live presets with missing, stale, or filtered account
 // data. Every operation in this check is read-only.
-func (m *Manager) checkMigrationDataReady(deviceIP string) error {
+//
+// It returns warnings for conditions worth telling the user about but not
+// worth refusing over, and an error only for the ones it can actually prove.
+func (m *Manager) checkMigrationDataReady(deviceIP string) ([]string, error) {
 	if m.DataStore == nil {
 		// CLI callers do not own the service datastore and cannot enforce this
 		// check. ExecuteInitPlan is a separate onboarding flow which establishes
 		// account state only after its intentional URL rewrite.
-		return nil
+		return nil, nil
 	}
 
 	info, err := m.GetLiveDeviceInfo(deviceIP)
 	if err != nil {
-		return migrationDataNotReadyf("cannot read live /info: %v", err)
+		return nil, migrationDataNotReadyf("cannot read live /info: %v", err)
 	}
 
 	deviceID := strings.TrimSpace(info.DeviceID)
 	accountID := strings.TrimSpace(info.MargeAccountUUID)
 
 	if deviceID == "" {
-		return migrationDataNotReadyf("live /info has no deviceID")
+		return nil, migrationDataNotReadyf("live /info has no deviceID")
 	}
 
 	if accountID == "" {
@@ -67,69 +66,77 @@ func (m *Manager) checkMigrationDataReady(deviceIP string) error {
 		// factory-reset device. Data Sync cannot unblock it either, since it
 		// files an account-less device under "default", which never matches an
 		// empty live account.
-		return nil
+		return nil, nil
 	}
 
 	if !datastore.IsSafeIdentifier(accountID) || !datastore.IsSafeIdentifier(deviceID) {
-		return migrationDataNotReadyf("live /info contains an invalid account or device identifier")
+		return nil, migrationDataNotReadyf("live /info contains an invalid account or device identifier")
 	}
 
 	persistedInfo, err := m.DataStore.GetExactDeviceInfo(accountID, deviceID)
 	if err != nil {
-		return migrationDataNotReadyf("DeviceInfo.xml is not persisted under account %q and device %q", accountID, deviceID)
+		return nil, migrationDataNotReadyf("DeviceInfo.xml is not persisted under account %q and device %q", accountID, deviceID)
 	}
 
 	if persistedInfo.DeviceID != deviceID {
-		return migrationDataNotReadyf("persisted DeviceInfo.xml identifies device %q instead of %q", persistedInfo.DeviceID, deviceID)
+		return nil, migrationDataNotReadyf("persisted DeviceInfo.xml identifies device %q instead of %q", persistedInfo.DeviceID, deviceID)
 	}
 
 	snapshot, err := m.DataStore.ReadPresetSnapshot(accountID, deviceID)
 	if err != nil {
-		return migrationDataNotReadyf("cannot read the persisted preset snapshot: %v", err)
+		return nil, migrationDataNotReadyf("cannot read the persisted preset snapshot: %v", err)
 	}
 
 	if snapshot.State != datastore.PresetSnapshotValid {
-		return migrationDataNotReadyf("persisted Presets.xml is %s", snapshot.State)
+		return nil, migrationDataNotReadyf("persisted Presets.xml is %s", snapshot.State)
 	}
 
 	if snapshot.NeedsRewrite {
-		return migrationDataNotReadyf("persisted Presets.xml uses a legacy format that must be refreshed")
+		return nil, migrationDataNotReadyf("persisted Presets.xml uses a legacy format that must be refreshed")
 	}
 
 	livePresets, err := m.fetchLivePresets(deviceIP)
 	if err != nil {
-		return migrationDataNotReadyf("cannot read live /presets: %v", err)
+		return nil, migrationDataNotReadyf("cannot read live /presets: %v", err)
 	}
 
 	fullXML, err := marge.AccountFullToXMLReadOnly(m.DataStore, accountID)
 	if err != nil {
-		return migrationDataNotReadyf("cannot render account /full: %v", err)
+		return nil, migrationDataNotReadyf("cannot render account /full: %v", err)
 	}
 
 	fullPresets, accountDeviceCount, err := migrationFullPresets(fullXML, deviceID)
 	if err != nil {
-		return migrationDataNotReadyf("rendered account /full is incomplete: %v", err)
+		return nil, migrationDataNotReadyf("rendered account /full is incomplete: %v", err)
 	}
 
+	var warnings []string
+
+	// Not a refusal. One account holding every speaker in the household is the
+	// normal Bose topology, so blocking it would block most setups, and issue
+	// #614 concluded the shared-account preset wipe is empirical rather than a
+	// proven mechanism with an open root cause. A stale duplicate entry left
+	// by a failed /info read or a DHCP lease change would also trip it on a
+	// genuinely single-speaker setup. Say what was found and let the user
+	// decide.
 	if accountDeviceCount != 1 {
-		return migrationDataNotReadyWithAction(
-			fmt.Sprintf("rendered account /full contains %d devices; shared-account firmware resync can wipe presets after reboot", accountDeviceCount),
-			"Move this speaker to a dedicated account, run Data Sync for it, then retry migration.",
-		)
+		warnings = append(warnings, fmt.Sprintf(
+			"migrating into an account that contains %d devices; some firmware has been reported to wipe presets after a reboot-triggered resync of a shared account (issue #614, root cause open)",
+			accountDeviceCount))
 	}
 
 	persisted := migrationPresetIdentities(snapshot.Presets)
 	live := migrationPresetIdentities(livePresets)
 
 	if mismatch := compareMigrationPresets("persisted snapshot", persisted, "rendered /full", fullPresets); mismatch != "" {
-		return migrationDataNotReadyf("%s", mismatch)
+		return nil, migrationDataNotReadyf("%s", mismatch)
 	}
 
 	if mismatch := compareMigrationPresets("live /presets", live, "rendered /full", fullPresets); mismatch != "" {
-		return migrationDataNotReadyf("%s", mismatch)
+		return nil, migrationDataNotReadyf("%s", mismatch)
 	}
 
-	return nil
+	return warnings, nil
 }
 
 type migrationPresetIdentity struct {

@@ -873,8 +873,16 @@ func (m *Manager) firstCACertBodyLine() (string, bool) {
 
 // MigrateSpeaker configures the speaker at the given IP to use this service.
 func (m *Manager) MigrateSpeaker(deviceIP, targetURL, proxyURL string, options map[string]string, method MigrationMethod) (string, error) {
-	if err := m.checkMigrationDataReady(deviceIP); err != nil {
+	readinessWarnings, err := m.checkMigrationDataReady(deviceIP)
+	if err != nil {
 		return "", err
+	}
+
+	// Surfaced in the migration log the UI shows, alongside the other
+	// "Warning:" lines, so an advisory reaches the user without blocking them.
+	var preflightLogs string
+	for _, warning := range readinessWarnings {
+		preflightLogs += fmt.Sprintf("Warning: %s\n", warning)
 	}
 
 	if targetURL == "" {
@@ -890,10 +898,12 @@ func (m *Manager) MigrateSpeaker(deviceIP, targetURL, proxyURL string, options m
 	// rooted via remote_services.
 	if method == MigrationMethodTelnet {
 		urls := telnetURLsFromOptions(targetURL, options)
-		return m.migrateViaTelnet(deviceIP, targetURL, urls)
+		telnetLogs, telnetErr := m.migrateViaTelnet(deviceIP, targetURL, urls)
+
+		return preflightLogs + telnetLogs, telnetErr
 	}
 
-	var logs string
+	logs := preflightLogs
 
 	// 0. Off-device backup for safety
 	if backupErr := m.BackupConfigOffDevice(deviceIP); backupErr != nil {
