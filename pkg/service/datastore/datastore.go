@@ -3422,6 +3422,13 @@ func stereoRoleDevices(group *models.Group) (left, right string, ok bool) {
 	return left, right, left != "" && right != ""
 }
 
+// sameStereoPair stays a distinct, ID-agnostic and IP-agnostic
+// implementation from sameGroupGenerationTopology: AddGroup's idempotency
+// reuse check needs to recognize a retried create (which supplies no
+// pre-existing group ID and may carry a since-changed IP) as "the same
+// pair," not just an exact topology match. See i655 code-review finding #10
+// (and the separately-tracked finding #4 about this reuse potentially
+// returning a stale IP).
 func sameStereoPair(a, b *models.Group) bool {
 	if len(a.Roles.Roles) != 2 || len(b.Roles.Roles) != 2 || a.MasterDeviceID != b.MasterDeviceID {
 		return false
@@ -3433,38 +3440,16 @@ func sameStereoPair(a, b *models.Group) bool {
 	return aOK && bOK && aLeft == bLeft && aRight == bRight
 }
 
+// sameGroupGenerationTopology delegates its per-role comparison to
+// models.SameGroupRoles, the shared topology-equality core also used by
+// pkg/stereopair -- see i655 code-review finding #10 (three independent,
+// subtly different implementations used to coexist).
 func sameGroupGenerationTopology(a, b *models.Group) bool {
-	if a == nil || b == nil || a.ID != b.ID ||
-		a.MasterDeviceID != b.MasterDeviceID || len(a.Roles.Roles) != len(b.Roles.Roles) {
+	if a == nil || b == nil || a.ID != b.ID || a.MasterDeviceID != b.MasterDeviceID {
 		return false
 	}
 
-	roles := make(map[string]models.GroupRole, len(a.Roles.Roles))
-	for i := range a.Roles.Roles {
-		role := a.Roles.Roles[i]
-		if _, duplicate := roles[role.Role]; duplicate {
-			return false
-		}
-
-		roles[role.Role] = role
-	}
-
-	seen := make(map[string]struct{}, len(b.Roles.Roles))
-	for i := range b.Roles.Roles {
-		role := b.Roles.Roles[i]
-		if _, duplicate := seen[role.Role]; duplicate {
-			return false
-		}
-
-		seen[role.Role] = struct{}{}
-
-		other, found := roles[role.Role]
-		if !found || other.DeviceID != role.DeviceID || other.IPAddress != role.IPAddress {
-			return false
-		}
-	}
-
-	return true
+	return models.SameGroupRoles(a.Roles.Roles, b.Roles.Roles)
 }
 
 func groupDeviceIDs(group *models.Group) map[string]struct{} {

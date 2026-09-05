@@ -1502,24 +1502,11 @@ func sameGroupTopology(a, b *models.Group) bool {
 		sameRoles(a.Roles.Roles, b.Roles.Roles)
 }
 
+// sameRoles delegates to models.SameGroupRoles, the shared topology-equality
+// core also used by pkg/service/datastore -- see i655 code-review finding
+// #10 (three independent, subtly different implementations used to coexist).
 func sameRoles(a, b []models.GroupRole) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	byRole := make(map[string]models.GroupRole, len(a))
-	for i := range a {
-		byRole[a[i].Role] = a[i]
-	}
-
-	for i := range b {
-		other, ok := byRole[b[i].Role]
-		if !ok || other.DeviceID != b[i].DeviceID || !sameIP(other.IPAddress, b[i].IPAddress) {
-			return false
-		}
-	}
-
-	return true
+	return models.SameGroupRoles(a, b)
 }
 
 func groupContainsDevice(group *models.Group, deviceID string) bool {
