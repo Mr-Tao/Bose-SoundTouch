@@ -284,3 +284,22 @@ func TestMigrationDataReadinessAllowsUnpairedSpeaker(t *testing.T) {
 		t.Fatalf("unpaired speaker was refused migration: %v", err)
 	}
 }
+
+// TestMigrationDataReadinessIgnoresClearedPresetSlots: clearing a slot through
+// the Marge API leaves a zero-value entry that /full drops. Counting it would
+// refuse migration for a datastore that is otherwise perfectly in sync.
+func TestMigrationDataReadinessIgnoresClearedPresetSlots(t *testing.T) {
+	kept := readinessPreset("1", "Kept Station", "http://radio.example/kept")
+
+	m, ds, deviceIP := newMigrationReadinessFixture(t, livePresetsXML(kept))
+	if err := ds.SavePresets(readinessAccount, readinessDevice, []models.ServicePreset{
+		kept,
+		{}, // slot 2, cleared through RemovePreset
+	}); err != nil {
+		t.Fatalf("SavePresets: %v", err)
+	}
+
+	if _, err := m.checkMigrationDataReady(deviceIP); err != nil {
+		t.Fatalf("a cleared preset slot blocked migration: %v", err)
+	}
+}
