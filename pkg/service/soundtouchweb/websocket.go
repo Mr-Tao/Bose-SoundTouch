@@ -541,6 +541,7 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 		wsClient.OnVolumeUpdated(func(event *models.VolumeUpdatedEvent) {
 			activity := time.Now()
+
 			app.applyVolumeEvent(conn, &event.Volume)
 			conn.MarkEventStreamActivity(activity)
 		})
@@ -562,12 +563,14 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 
 		wsClient.OnPresetUpdated(func(event *models.PresetUpdatedEvent) {
 			activity := time.Now()
+
 			app.applyPresetEvent(conn, &event.Presets)
 			conn.MarkEventStreamActivity(activity)
 		})
 
 		wsClient.OnBassUpdated(func(event *models.BassUpdatedEvent) {
 			activity := time.Now()
+
 			app.applyBassEvent(conn, &event.Bass)
 			conn.MarkEventStreamActivity(activity)
 		})
@@ -582,15 +585,18 @@ func (app *WebApp) ConnectDeviceWebSocket(deviceID string, conn *webtypes.Device
 		})
 
 		wsClient.OnTransportState(func(connected bool, generation uint64) {
+			// ObserveEventStreamTransport already derives status.IsConnected
+			// (via applyConnectivityLocked, alongside Connectivity/
+			// HTTPReachable/WebSocketConnected) from this same call. Do NOT
+			// also route it through applyConnectionStateEvent/
+			// ApplyFieldEvent(FieldConnectivity, ...): that unconditionally
+			// bumps FieldConnectivity's applied generation past whatever an
+			// in-flight HTTP poll already reserved, so a transient transport
+			// blip would silently discard a concurrently-completing,
+			// genuinely successful poll's IsConnected=true merge.
 			if !conn.ObserveEventStreamTransport(generation, connected, time.Now()) {
 				return
 			}
-
-			// Drives the same FieldConnectivity fencing the old inline
-			// connect/disconnect sites used to update directly -- ordered by
-			// ObserveEventStreamTransport's own generation check above, so a
-			// reordered transport callback can no longer apply here either.
-			app.applyConnectionStateEvent(conn, connected)
 
 			if connected {
 				if generation > 1 {
