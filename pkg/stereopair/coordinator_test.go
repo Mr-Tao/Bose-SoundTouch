@@ -192,12 +192,6 @@ func TestCreateRejectsInvalidPreflightWithoutMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "different Marge accounts",
-			mutate: func(_ *fakeClient, right *fakeClient) {
-				right.info.MargeAccountUUID = "ACCOUNT2"
-			},
-		},
-		{
 			name: "different Marge backends",
 			mutate: func(_ *fakeClient, right *fakeClient) {
 				right.info.MargeURL = "http://other-aftertouch.example"
@@ -235,6 +229,24 @@ func TestCreateRejectsInvalidPreflightWithoutMutation(t *testing.T) {
 				t.Fatal("addGroup called after failed preflight")
 			}
 		})
+	}
+}
+
+// TestCreateAllowsDifferingMargeAccounts guards against reintroducing an
+// unjustified same-Marge-account requirement: a real, working cross-account
+// stereo pair (created pre-lifecycle-API via the CLI's direct /addGroup
+// calls, which never checked Marge accounts) must remain creatable through
+// this API too. See i655 code-review finding #0.
+func TestCreateAllowsDifferingMargeAccounts(t *testing.T) {
+	left, right, coordinator := newCreateCoordinator()
+	right.info.MargeAccountUUID = "ACCOUNT2"
+
+	result, err := coordinator.Create(CreateRequest{LeftIPAddress: leftIP, RightIPAddress: rightIP, Name: "Pair"})
+	if err != nil || result.Status != StatusSucceeded {
+		t.Fatalf("result = %+v, err = %v; want succeeded despite differing Marge accounts", result, err)
+	}
+	if left.addRequest == nil || right.addRequest == nil {
+		t.Fatal("addGroup not called for a valid cross-account pair")
 	}
 }
 
@@ -734,56 +746,64 @@ func TestRenamePersistsVerifiedGeneration(t *testing.T) {
 	}
 }
 
-func TestRenameRejectsSplitMargeOwnershipWithoutMutation(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		mutate func(*models.DeviceInfo)
-	}{
-		{
-			name: "account",
-			mutate: func(info *models.DeviceInfo) {
-				info.MargeAccountUUID = "OTHER-ACCOUNT"
-			},
+func TestRenameRejectsSplitMargeBackendWithoutMutation(t *testing.T) {
+	group := configuredGroup("Old Name")
+	left := readyClient(leftID, "Left")
+	right := readyClient(rightID, "Right")
+	left.group = cloneGroup(group)
+	right.group = cloneGroup(group)
+	right.info.MargeURL = "http://other-aftertouch.example"
+	persistenceCalls := 0
+	coordinator := NewWithGenerationLifecyclePersistence(
+		factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}),
+		nil,
+		nil,
+		func(_ GenerationRef, _ string) error {
+			persistenceCalls++
+			return nil
 		},
-		{
-			name: "backend",
-			mutate: func(info *models.DeviceInfo) {
-				info.MargeURL = "http://other-aftertouch.example"
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			group := configuredGroup("Old Name")
-			left := readyClient(leftID, "Left")
-			right := readyClient(rightID, "Right")
-			left.group = cloneGroup(group)
-			right.group = cloneGroup(group)
-			test.mutate(right.info)
-			persistenceCalls := 0
-			coordinator := NewWithGenerationLifecyclePersistence(
-				factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}),
-				nil,
-				nil,
-				func(_ GenerationRef, _ string) error {
-					persistenceCalls++
-					return nil
-				},
-			)
+	)
 
-			result, err := coordinator.Rename(RenameRequest{
-				MemberIPAddress: leftIP, ExpectedGroupID: "PAIR-ID", Name: "New Name",
-			})
-			if err == nil || result.Status != StatusFailed {
-				t.Fatalf("result = %+v, err = %v; want failed ownership preflight", result, err)
-			}
-			if left.updateRequest != nil || right.updateRequest != nil || persistenceCalls != 0 {
-				t.Fatalf("ownership mismatch mutated pair: left=%+v right=%+v persistence=%d",
-					left.updateRequest, right.updateRequest, persistenceCalls)
-			}
-			if len(result.Members) != 2 || !errors.Is(result.Members[1].PreflightError, ErrConflict) {
-				t.Fatalf("members = %+v; want peer ownership conflict", result.Members)
-			}
-		})
+	result, err := coordinator.Rename(RenameRequest{
+		MemberIPAddress: leftIP, ExpectedGroupID: "PAIR-ID", Name: "New Name",
+	})
+	if err == nil || result.Status != StatusFailed {
+		t.Fatalf("result = %+v, err = %v; want failed ownership preflight", result, err)
+	}
+	if left.updateRequest != nil || right.updateRequest != nil || persistenceCalls != 0 {
+		t.Fatalf("ownership mismatch mutated pair: left=%+v right=%+v persistence=%d",
+			left.updateRequest, right.updateRequest, persistenceCalls)
+	}
+	if len(result.Members) != 2 || !errors.Is(result.Members[1].PreflightError, ErrConflict) {
+		t.Fatalf("members = %+v; want peer ownership conflict", result.Members)
+	}
+}
+
+// TestRenameAllowsDifferingMargeAccounts guards against reintroducing an
+// unjustified same-Marge-account requirement into the shared loadPair
+// preflight used by Rename/Dissolve. See i655 code-review finding #0.
+func TestRenameAllowsDifferingMargeAccounts(t *testing.T) {
+	group := configuredGroup("Old Name")
+	left := readyClient(leftID, "Left")
+	right := readyClient(rightID, "Right")
+	left.group = cloneGroup(group)
+	right.group = cloneGroup(group)
+	right.info.MargeAccountUUID = "OTHER-ACCOUNT"
+	coordinator := NewWithGenerationLifecyclePersistence(
+		factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}),
+		nil,
+		nil,
+		func(_ GenerationRef, _ string) error { return nil },
+	)
+
+	result, err := coordinator.Rename(RenameRequest{
+		MemberIPAddress: leftIP, ExpectedGroupID: "PAIR-ID", Name: "New Name",
+	})
+	if err != nil || result.Status != StatusSucceeded {
+		t.Fatalf("result = %+v, err = %v; want succeeded despite differing Marge accounts", result, err)
+	}
+	if left.updateRequest == nil || right.updateRequest == nil {
+		t.Fatal("updateGroup not called for a valid cross-account pair")
 	}
 }
 
