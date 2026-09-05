@@ -489,11 +489,6 @@ func validateCreateCandidates(states []memberState) {
 		setPreflightError(&states[1], fmt.Errorf("%w: LEFT and RIGHT device IDs must be distinct", ErrInvalidRequest))
 	}
 
-	if strings.TrimSpace(states[0].info.MargeAccountUUID) == "" ||
-		states[0].info.MargeAccountUUID != states[1].info.MargeAccountUUID {
-		setPreflightError(&states[1], fmt.Errorf("%w: LEFT and RIGHT speakers must use the same Marge account", ErrConflict))
-	}
-
 	if !SameMargeBackend(states[0].info.MargeURL, states[1].info.MargeURL) {
 		setPreflightError(&states[1], fmt.Errorf("%w: LEFT and RIGHT speakers must use the same Marge backend", ErrConflict))
 	}
