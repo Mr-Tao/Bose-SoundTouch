@@ -879,9 +879,9 @@ Create and manage a persistent LEFT/RIGHT pair of two SoundTouch 10 speakers.
 This is distinct from a temporary multi-room zone. Both speakers must be
 online, stereo-capable, and outside any existing stereo group. Pair creation
 accepts either two standalone speakers or two speakers whose fresh zone views
-agree on the same temporary zone and include both device IDs; the speaker
-firmware performs the zone-to-stereo transition without a CLI-side zone
-remove/re-add. Pair creation also requires both speakers to use the same Marge
+agree on the same temporary zone made up of exactly those two speakers (a zone
+with a third speaker, as master or member, is refused); the speaker firmware
+performs the zone-to-stereo transition without a CLI-side zone remove/re-add. Pair creation also requires both speakers to use the same Marge
 backend, though they need not share a Marge account. Rename and remove still
 require both members to be outside any temporary zone. Run lifecycle commands
 from the site containing both speakers; site-relative Marge names such as
@@ -915,9 +915,9 @@ the CLI verifies both speakers' empty physical group state and compatible zone
 topology, queries their current Marge backend for stale group records, then
 repeats the physical and zone checks before mutation. It refuses to mutate
 either speaker while any stale group record remains or if the zone views drift.
-After create, fresh group reads remain authoritative; a failed or differing
-zone readback is reported as degraded without tearing down an otherwise
-verified stereo pair. After verified physical cleanup, the CLI removes the
+After create, fresh group reads remain authoritative; a zone readback that
+still fails or differs after the settle retries is reported as degraded without
+tearing down an otherwise verified stereo pair, and the pair's ID is printed. After verified physical cleanup, the CLI removes the
 exact group ID through the Marge URL and account freshly read from the speaker.
 A backend cleanup failure is therefore visible as a degraded result instead of
 leaving an apparently successful stale generation.

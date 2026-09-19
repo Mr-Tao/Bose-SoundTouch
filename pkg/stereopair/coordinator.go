@@ -558,6 +558,16 @@ func validateCreateZones(states []memberState) {
 			return
 		}
 	}
+
+	// Only a zone of exactly the two candidates is known to transition
+	// cleanly. A third speaker (as master or member) is never contacted or
+	// re-read here, so a reference it keeps after the transition would go
+	// unnoticed; fail closed until that shape has been tried on hardware.
+	if len(topologies[0].devices) != len(states) {
+		err := fmt.Errorf("%w: temporary zone contains speakers other than the stereo-pair candidates", ErrConflict)
+		setPreflightError(&states[0], err)
+		setPreflightError(&states[1], err)
+	}
 }
 
 // parseCreateZone reads one speaker's zone view. It is the single definition

@@ -247,24 +247,31 @@ func TestCreateTransitionsConsistentTemporaryZoneToStereoPair(t *testing.T) {
 	}
 }
 
-func TestCreateTransitionsCandidatesFromLargerZoneWithThirdMaster(t *testing.T) {
-	left, right, coordinator := newCreateCoordinator()
-	left.zone = temporaryZone("THIRD-ID", leftID, rightID)
-	right.zone = temporaryZone("THIRD-ID", leftID, rightID)
-	left.getZone = transitionToStandalone(leftID)
-	right.getZone = transitionToStandalone(rightID)
+func TestCreateRejectsTemporaryZoneWithAThirdSpeakerWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		zone *models.ZoneInfo
+	}{
+		{name: "third master", zone: temporaryZone("THIRD-ID", leftID, rightID)},
+		{name: "third member", zone: temporaryZone(leftID, leftID, rightID, "THIRD-ID")},
+	}
 
-	result, err := coordinator.Create(CreateRequest{
-		LeftIPAddress: leftIP, RightIPAddress: rightIP, Name: "Living Room Pair",
-	})
-	if err != nil || result.Status != StatusSucceeded {
-		t.Fatalf("result = %+v, err = %v", result, err)
-	}
-	if left.addRequest == nil || right.addRequest == nil {
-		t.Fatal("same larger-zone candidates were not mutated")
-	}
-	if left.zoneCalls != 2 || right.zoneCalls != 2 {
-		t.Fatalf("fresh zone reads LEFT=%d RIGHT=%d, want 2/2", left.zoneCalls, right.zoneCalls)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			left, right, coordinator := newCreateCoordinator()
+			left.zone = cloneZone(test.zone)
+			right.zone = cloneZone(test.zone)
+
+			result, err := coordinator.Create(CreateRequest{
+				LeftIPAddress: leftIP, RightIPAddress: rightIP, Name: "Living Room Pair",
+			})
+			if err == nil || result.Status != StatusFailed {
+				t.Fatalf("result = %+v, err = %v", result, err)
+			}
+			if left.addRequest != nil || right.addRequest != nil {
+				t.Fatal("addGroup called for a temporary zone with a third speaker")
+			}
+		})
 	}
 }
 
