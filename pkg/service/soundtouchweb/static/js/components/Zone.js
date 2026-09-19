@@ -146,32 +146,45 @@ export function Zone({ deviceId, devices, onSelectMember }) {
         const member = resolved.member;
         const metadata = zoneMemberMetadata(member);
         const isStereoPair = member?.kind === 'stereoPair';
+        // Only a row that leads somewhere is a button: the member must be in
+        // the inventory, and the page already open is not a destination.
+        const openable = Boolean(onSelectMember) && resolved.controlId !== deviceId &&
+            Boolean(devices?.[resolved.controlId]);
+        const identity = html`
+            <span class="device-indicator ${metadata.connectivity}" role="status"
+                  title=${metadata.connectivityLabel}
+                  aria-label=${metadata.statusAriaLabel}></span>
+            <div class="zone-logical-identity">
+                <div class="zone-logical-name">
+                    ${metadata.name}
+                    ${isMaster ? html`<span class="zone-badge master">Master</span>` : null}
+                </div>
+                <div class="zone-logical-metadata">
+                    <span>${metadata.modelType}</span>
+                    ${metadata.ip ? html`<span class="zone-logical-ip">${metadata.ip}</span>` : null}
+                    <span>${metadata.kind}</span>
+                </div>
+            </div>
+        `;
 
         return html`
             <div class="zone-logical-member" key=${resolved.controlId}>
-                <button class="zone-logical-header zone-member-open" type="button"
-                        aria-label=${`Open details for ${metadata.name}`}
-                        onClick=${() => onSelectMember?.(resolved.controlId)}>
-                    <span class="device-indicator ${metadata.connectivity}" role="status"
-                          title=${metadata.connectivityLabel}
-                          aria-label=${metadata.statusAriaLabel}></span>
-                    <div class="zone-logical-identity">
-                        <div class="zone-logical-name">
-                            ${metadata.name}
-                            ${isMaster ? html`<span class="zone-badge master">Master</span>` : null}
-                        </div>
-                        <div class="zone-logical-metadata">
-                            <span>${metadata.modelType}</span>
-                            ${metadata.ip ? html`<span class="zone-logical-ip">${metadata.ip}</span>` : null}
-                            <span>${metadata.kind}</span>
-                        </div>
+                ${openable ? html`
+                    <button class="zone-logical-header zone-member-open" type="button"
+                            aria-label=${`Open details for ${metadata.name}`}
+                            onClick=${() => onSelectMember(resolved.controlId)}>
+                        ${identity}
+                        <svg class="zone-member-open-icon" width="18" height="18" viewBox="0 0 24 24"
+                             fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                             stroke-linejoin="round" aria-hidden="true">
+                            <path d="m9 18 6-6-6-6" />
+                        </svg>
+                    </button>
+                ` : html`
+                    <div class="zone-logical-header">
+                        ${identity}
                     </div>
-                    <svg class="zone-member-open-icon" width="18" height="18" viewBox="0 0 24 24"
-                         fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                         stroke-linejoin="round" aria-hidden="true">
-                        <path d="m9 18 6-6-6-6" />
-                    </svg>
-                </button>
+                `}
 
                 ${isStereoPair ? html`
                     <div class="zone-physical-members">

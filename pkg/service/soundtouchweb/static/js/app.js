@@ -18,6 +18,7 @@ import { Announcements } from './components/Announcements.js';
 import { ContentPlaybackCommand } from './components/ContentPlaybackCommand.js';
 import { api } from './api.js';
 import { isSoundTouch10StereoPair } from './stereoPresentation.mjs';
+import { previousDetailTarget } from './devicePresentation.js';
 import { removeDeviceAndRefresh } from './deviceRemoval.js';
 import {
     DISCRETE_COMMAND_READBACK_DELAYS_MS,
@@ -105,63 +106,19 @@ export function mergeStatusUpdate(previous, deviceId, status) {
     });
 }
 
-export function mergeSelectedMemberStatus(previous, deviceId, status) {
-    if (previous?.controlId !== deviceId) {
-        return previous;
-    }
-
-    const currentStatus = previous.device?.status || previous.pendingStatus;
-    if (currentStatus && !acceptsNewerStatus(currentStatus, status)) {
-        return previous;
-    }
-
-    if (!previous.device) {
-        return { ...previous, pendingStatus: status };
-    }
-
-    return {
-        ...previous,
-        pendingStatus: null,
-        device: {
-            ...previous.device,
-            status,
-        },
-    };
-}
-
-export function completeSelectedMemberLoad(previous, controlId, originId, device) {
-    if (previous?.controlId !== controlId || previous.originId !== originId) {
-        return previous;
-    }
-
-    const currentStatus = previous.device?.status || previous.pendingStatus;
-    const status = currentStatus && !acceptsNewerStatus(currentStatus, device.status)
-        ? currentStatus
-        : device.status;
-
-    return {
-        ...previous,
-        device: { ...device, status },
-        pendingStatus: null,
-        loading: false,
-    };
-}
-
 export function DeviceDetail({
     deviceId,
-    device: selectedDevice,
     devices,
     onBack,
     onDevicesChanged,
     onSelectZoneMember,
-    loading = false,
     notify,
     onRemove,
     onStatusReadback,
     onNavigate,
     commandReadbackDelays = DISCRETE_COMMAND_READBACK_DELAYS_MS,
 }) {
-    const device = selectedDevice || devices[deviceId];
+    const device = devices[deviceId];
     const status = device?.status;
     const {
         command,
@@ -277,7 +234,7 @@ export function DeviceDetail({
             <div class="page-header">
                 <button class="back-btn" onClick=${onBack}>← Back</button>
             </div>
-            ${loading ? html`<div class="loading-bar"></div>` : html`<p>Device not found.</p>`}
+            <p>Device not found.</p>
         `;
     }
 
@@ -378,7 +335,9 @@ function App() {
     const [devices, setDevices] = useState({});
     const [page, setPage] = useState('devices');
     const [selectedId, setSelectedId] = useState(null);
-    const [selectedMember, setSelectedMember] = useState(null);
+    // Device-detail pages opened from a zone's member rows, most recent
+    // last, so Back retraces them instead of dropping to the device list.
+    const [detailOrigins, setDetailOrigins] = useState([]);
     const [toast, setToast] = useState(null);
     const [version, setVersion] = useState(null);
     const [isDiscovering, setIsDiscovering] = useState(false);
@@ -388,16 +347,11 @@ function App() {
     const [contentPlaybackRequest, setContentPlaybackRequest] = useState(null);
     const [contentPlaybackBusy, setContentPlaybackBusy] = useState(false);
     const contentPlaybackRef = useRef({ generation: 0, busy: false });
-    const memberRequestGeneration = useRef(0);
-
-    const selectedDevice = selectedMember?.controlId === selectedId
-        ? selectedMember.device
-        : devices[selectedId];
 
     const getPageTitle = () => {
         if (page === 'devices') return 'Devices';
         if (page === 'device') {
-            const device = selectedDevice;
+            const device = devices[selectedId];
             const name = device?.info?.name || selectedId || 'Device Detail';
             const ip = device?.info?.ip_address;
             if (ip) {
@@ -452,8 +406,6 @@ function App() {
                 }
             } else if (msg.type === 'status_update' && msg.deviceId) {
                 setDevices(previous => mergeStatusUpdate(previous, msg.deviceId, msg.data));
-                setSelectedMember(previous =>
-                    mergeSelectedMemberStatus(previous, msg.deviceId, msg.data));
             }
         };
 
@@ -500,11 +452,11 @@ function App() {
     }, []);
 
     useEffect(() => {
-        if (selectedId && !devices[selectedId] && selectedMember?.controlId !== selectedId) {
+        if (selectedId && !devices[selectedId]) {
             setSelectedId(null);
             if (page === 'device') setPage('devices');
         }
-    }, [devices, selectedId, selectedMember, page]);
+    }, [devices, selectedId, page]);
 
     function showToast(msg) {
         setToast(null);
@@ -513,65 +465,31 @@ function App() {
     }
 
     const navigate = useCallback((p, id = null) => {
-        memberRequestGeneration.current++;
-        setSelectedMember(null);
+        setDetailOrigins([]);
         setPage(p);
         setSelectedId(id);
     }, []);
 
-    async function openZoneMember(controlId) {
-        if (!controlId) return;
+    function openZoneMember(controlId) {
+        // A zone member is an ordinary inventory entry, so open its live
+        // entry; the row of the page already open is not a navigation.
+        if (!controlId || controlId === selectedId || !devices[controlId]) return;
 
-        const originId = selectedId;
-        const logicalMember = devices[originId]?.zone?.members?.find(member =>
-            member.controlId === controlId);
-        const generation = ++memberRequestGeneration.current;
-        let device = devices[controlId] || null;
-
-        setSelectedMember({ controlId, originId, device, loading: !device });
+        setDetailOrigins(origins => [...origins, selectedId]);
         setSelectedId(controlId);
         setPage('device');
-
-        if (device) return;
-
-        try {
-            const resp = await api.device(controlId);
-            if (generation !== memberRequestGeneration.current) return;
-            if (!resp?.success || !resp.data) {
-                setSelectedMember({ controlId, originId, device: null, loading: false });
-                showToast(resp?.error || 'Failed to load device');
-                return;
-            }
-
-            device = {
-                ...resp.data,
-                info: {
-                    ...resp.data.info,
-                    name: logicalMember?.name || resp.data.info?.name,
-                    type: logicalMember?.type || resp.data.info?.type,
-                },
-                stereoPair: logicalMember?.stereoPair,
-            };
-            setSelectedMember(current =>
-                completeSelectedMemberLoad(current, controlId, originId, device));
-        } catch (_) {
-            if (generation === memberRequestGeneration.current) {
-                setSelectedMember({ controlId, originId, device: null, loading: false });
-                showToast('Failed to load device');
-            }
-        }
     }
 
     function backFromDevice() {
-        const originId = selectedMember?.originId;
-        if (originId && devices[originId]) {
-            memberRequestGeneration.current++;
-            setSelectedMember(null);
-            setSelectedId(originId);
-            setPage('device');
+        const { id, origins } = previousDetailTarget(detailOrigins, devices);
+        if (!id) {
+            navigate('devices');
             return;
         }
-        navigate('devices');
+
+        setDetailOrigins(origins);
+        setSelectedId(id);
+        setPage('device');
     }
 
     async function discover() {
@@ -594,16 +512,6 @@ function App() {
                 return previous;
             }
             return mergeStatusUpdate(previous, deviceId, status);
-        });
-
-        setSelectedMember(previous => {
-            if (readbackInfo?.device_id &&
-                previous?.controlId === deviceId &&
-                previous.device?.info?.device_id &&
-                previous.device.info.device_id !== readbackInfo.device_id) {
-                return previous;
-            }
-            return mergeSelectedMemberStatus(previous, deviceId, status);
         });
     }
 
@@ -740,12 +648,10 @@ function App() {
                     <${DeviceDetail}
                         key=${`device-detail:${selectedId}`}
                         deviceId=${selectedId}
-                        device=${selectedDevice}
                         devices=${devices}
                         onBack=${backFromDevice}
                         onDevicesChanged=${refreshDevices}
                         onSelectZoneMember=${openZoneMember}
-                        loading=${selectedMember?.controlId === selectedId && selectedMember.loading}
                         notify=${showToast}
                         onRemove=${removeDevice}
                         onStatusReadback=${mergeDeviceReadback}

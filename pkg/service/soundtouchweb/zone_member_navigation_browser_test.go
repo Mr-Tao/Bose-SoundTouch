@@ -57,43 +57,56 @@ func TestZoneMembersOpenFullDeviceDetailWithoutTopologyMutation(t *testing.T) {
 	}
 }
 
-func TestZoneMemberDetailKeepsNewerStatusAcrossDelayedLoad(t *testing.T) {
+func TestZoneMemberNavigationFollowsSiblingsAndRetracesBack(t *testing.T) {
 	app := newZoneMemberNavigationApp(t)
-	server, _ := newZoneMemberNavigationServer(t, app)
+	server, zoneMutations := newZoneMemberNavigationServer(t, app)
 	ctx := newHeadlessChromeContext(t)
 
-	var result struct {
-		PendingTrack string `json:"pendingTrack"`
-		LoadedTrack  string `json:"loadedTrack"`
-		Revision     int    `json:"revision"`
-	}
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(server.URL+"/app"),
-		chromedp.Evaluate(`window.__zoneMemberFenceResult = null;
-        import('/app/static/js/app.js').then(({ completeSelectedMemberLoad, mergeSelectedMemberStatus }) => {
-            const selected = {
-                controlId: 'member', originId: 'zone', device: null, loading: true,
-            };
-            const pending = mergeSelectedMemberStatus(selected, 'member', {
-                epoch: 3, revision: 7, nowPlaying: { Track: 'new event' },
-            });
-            const loaded = completeSelectedMemberLoad(pending, 'member', 'zone', {
-                info: { name: 'Member' },
-                status: { epoch: 3, revision: 6, nowPlaying: { Track: 'old REST' } },
-            });
-            window.__zoneMemberFenceResult = {
-                pendingTrack: pending.pendingStatus?.nowPlaying?.Track,
-                loadedTrack: loaded.device?.status?.nowPlaying?.Track,
-                revision: loaded.device?.status?.revision,
-            };
-        })`, nil),
-		chromedp.Poll(`window.__zoneMemberFenceResult !== null`, nil),
-		chromedp.Evaluate(`window.__zoneMemberFenceResult`, &result),
+		chromedp.WaitVisible(".zone-card", chromedp.ByQuery),
+		chromedp.Click(".zone-card", chromedp.ByQuery),
+		chromedp.WaitVisible(".zone-member-details > summary", chromedp.ByQuery),
+		chromedp.Click(".zone-member-details > summary", chromedp.ByQuery),
+		chromedp.Poll(`!document.querySelector('button.zone-member-open[aria-label="Open details for Atrium"]')`, nil),
 	); err != nil {
-		t.Fatalf("evaluate selected-member status fence: %v", err)
+		t.Fatalf("open zone detail without a self row button: %v", err)
 	}
-	if result.PendingTrack != "new event" || result.LoadedTrack != "new event" || result.Revision != 7 {
-		t.Fatalf("selected-member status fence = %+v, want newer event revision 7", result)
+
+	openZoneMemberAndWait(t, ctx, "Breakfast Room", `document.querySelector('.zone-member-details > summary') !== null`)
+	if err := chromedp.Run(ctx,
+		chromedp.Click(".zone-member-details > summary", chromedp.ByQuery),
+		chromedp.Poll(`document.querySelector('button.zone-member-open[aria-label="Open details for Living Pair"]') &&
+			!document.querySelector('button.zone-member-open[aria-label="Open details for Breakfast Room"]')`, nil),
+	); err != nil {
+		t.Fatalf("member page did not offer its siblings: %v", err)
+	}
+
+	// A healthy pair reached from a sibling must look like the same pair
+	// reached from the master: its live entry, not a recovery prompt.
+	openZoneMemberAndWait(t, ctx, "Living Pair", `document.querySelectorAll('.stereo-pair-member').length === 2 &&
+		!document.body.textContent.includes('Continue cleanup') &&
+		!Array.from(document.querySelectorAll('button')).some(button =>
+			button.textContent.includes('Remove from AfterTouch'))`)
+
+	for _, want := range []string{"Breakfast Room", "Atrium"} {
+		if err := chromedp.Run(ctx,
+			chromedp.Click(".device-detail .back-btn", chromedp.ByQuery),
+			chromedp.Poll(fmt.Sprintf(`document.querySelector('.page-title')?.textContent.includes(%q)`, want), nil),
+		); err != nil {
+			t.Fatalf("back did not return to %q: %v", want, err)
+		}
+	}
+
+	if err := chromedp.Run(ctx,
+		chromedp.Click(".device-detail .back-btn", chromedp.ByQuery),
+		chromedp.Poll(`document.querySelector('.page-title')?.textContent.trim() === 'Devices'`, nil),
+	); err != nil {
+		t.Fatalf("back from the first detail page did not return to the device list: %v", err)
+	}
+
+	if got := zoneMutations.Load(); got != 0 {
+		t.Fatalf("device-detail navigation sent %d zone mutation request(s)", got)
 	}
 }
 
@@ -215,6 +228,17 @@ func newZoneMemberNavigationServer(t *testing.T, app *WebApp) (*httptest.Server,
 				"isMaster":            true,
 				"isSlave":             false,
 				"isStandalone":        false,
+			}})
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/zone") &&
+			strings.HasPrefix(path, "/api/control/devices/"):
+			writeZoneNavigationJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
+				"masterIp":     zone.MasterControlID,
+				"masterHwId":   zone.MasterDeviceID,
+				"masterName":   zone.Members[0].Name,
+				"members":      []interface{}{},
+				"isMaster":     false,
+				"isSlave":      true,
+				"isStandalone": false,
 			}})
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/zone/candidates"):
 			writeZoneNavigationJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{}})

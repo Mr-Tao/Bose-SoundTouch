@@ -5,6 +5,7 @@ import {
     connectivityLabel,
     connectivityState,
     nowPlayingFreshness,
+    previousDetailTarget,
     currentZoneMember,
     resolvedZoneMember,
     sortDeviceEntries,
@@ -107,4 +108,20 @@ test('now playing is presented as live only while the speaker is online', () => 
     const offline = nowPlayingFreshness({ status: { isConnected: false } });
     assert.equal(offline.live, false);
     assert.match(offline.title, /went offline/);
+});
+
+test('back from a zone member retraces the pages that are still in the inventory', () => {
+    const devices = { master: {}, member: {} };
+
+    assert.deepEqual(previousDetailTarget(['master', 'member'], devices), {
+        id: 'member',
+        origins: ['master'],
+    });
+    assert.deepEqual(previousDetailTarget(['master', 'gone'], devices), {
+        id: 'master',
+        origins: [],
+    });
+    assert.deepEqual(previousDetailTarget(['gone'], devices), { id: null, origins: [] });
+    assert.deepEqual(previousDetailTarget([], devices), { id: null, origins: [] });
+    assert.deepEqual(previousDetailTarget(['__proto__'], {}), { id: null, origins: [] });
 });
