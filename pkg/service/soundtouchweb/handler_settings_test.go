@@ -1609,3 +1609,23 @@ func TestSourceDependentSettingsReportUnreadableSourcesAsReadError(t *testing.T)
 		})
 	}
 }
+
+func TestHandleSetClockDisplayTreatsBlankTimeZoneAsNoChange(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+
+	app.HandleSetClockDisplay(recorder, settingsRequest(http.MethodPatch,
+		"/api/control/devices/speaker/settings/clock-display", `{"enabled":true,"timeZone":"   "}`))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s; want the enable change confirmed", recorder.Code, recorder.Body.String())
+	}
+	if response := decodeSettingsResponse(t, recorder); !response.Success || response.Outcome == "unverified" {
+		t.Fatalf("blank timezone made a verified change look uncertain: %+v", response)
+	}
+	if !fixture.clockEnabled || fixture.clockTimeZone != "Europe/Prague" {
+		t.Fatalf("clock display = enabled %t timezone %q, want enabled with the timezone kept",
+			fixture.clockEnabled, fixture.clockTimeZone)
+	}
+}

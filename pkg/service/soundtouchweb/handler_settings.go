@@ -936,6 +936,10 @@ func (app *WebApp) HandleSetClockDisplay(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Trim once, so the support check, the request and the readback
+	// comparison all see the same value; a blank timezone is no change.
+	body.TimeZone = strings.TrimSpace(body.TimeZone)
+
 	request := models.NewClockDisplayRequest()
 	if body.Enabled != nil {
 		request.SetEnabled(*body.Enabled)
@@ -954,7 +958,7 @@ func (app *WebApp) HandleSetClockDisplay(w http.ResponseWriter, r *http.Request)
 	}
 
 	if body.TimeZone != "" {
-		request.SetTimeZone(strings.TrimSpace(body.TimeZone))
+		request.SetTimeZone(body.TimeZone)
 	}
 
 	if !request.HasChanges() {
