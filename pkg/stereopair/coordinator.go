@@ -560,6 +560,9 @@ func validateCreateZones(states []memberState) {
 	}
 }
 
+// parseCreateZone reads one speaker's zone view. It is the single definition
+// of "standalone" for create, rename and dissolve: an empty zone, or a zone
+// that lists only the speaker itself as master.
 func parseCreateZone(zone *models.ZoneInfo, deviceID string) (createZoneTopology, bool, error) {
 	topology := createZoneTopology{}
 	if zone == nil {
@@ -1305,7 +1308,22 @@ func (c *Coordinator) preflightStandaloneZone(state *memberState) {
 	state.result.Reachable = true
 	if zone == nil {
 		setPreflightError(state, wrapUnavailable("get zone", errors.New("nil response")))
-	} else if !zone.IsStandalone() {
+
+		return
+	}
+
+	// Use the same reading of a zone view as create, so a pair that create
+	// accepts is also one that rename and dissolve accept.
+	deviceID := ""
+	if state.info != nil {
+		deviceID = state.info.DeviceID
+	}
+
+	_, standalone, err := parseCreateZone(zone, deviceID)
+	switch {
+	case err != nil:
+		setPreflightError(state, fmt.Errorf("%w: invalid zone view: %w", ErrConflict, err))
+	case !standalone:
 		setPreflightError(state, fmt.Errorf("%w: speaker is currently in a zone", ErrConflict))
 	}
 }

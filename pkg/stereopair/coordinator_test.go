@@ -1875,3 +1875,61 @@ func factoryFor(clients map[string]*fakeClient) ClientFactory {
 		return client, nil
 	}
 }
+
+func TestRenameAndDissolveShareCreatesStandaloneDefinition(t *testing.T) {
+	tests := []struct {
+		name       string
+		zone       func(deviceID string) *models.ZoneInfo
+		standalone bool
+	}{
+		{
+			name:       "empty zone",
+			zone:       func(string) *models.ZoneInfo { return &models.ZoneInfo{} },
+			standalone: true,
+		},
+		{
+			name: "zone listing only the speaker itself",
+			zone: func(deviceID string) *models.ZoneInfo {
+				return temporaryZone(deviceID, deviceID)
+			},
+			standalone: true,
+		},
+		{
+			name:       "zone mastered by another speaker without members",
+			zone:       func(string) *models.ZoneInfo { return &models.ZoneInfo{Master: "OTHER-ID"} },
+			standalone: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, operation := range []string{"rename", "dissolve"} {
+				group := configuredGroup("Pair")
+				left := readyClient(leftID, "Left")
+				right := readyClient(rightID, "Right")
+				left.group = cloneGroup(group)
+				right.group = cloneGroup(group)
+				left.zone = test.zone(leftID)
+				coordinator := New(factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}))
+				coordinator.uncertainOutcomeDelays = nil
+
+				var result Result
+				if operation == "rename" {
+					result, _ = coordinator.Rename(RenameRequest{
+						MemberIPAddress: leftIP, ExpectedGroupID: "PAIR-ID", Name: "New Name",
+					})
+				} else {
+					result, _ = coordinator.Dissolve(DissolveRequest{
+						MemberIPAddress: leftIP, ExpectedGroupID: "PAIR-ID",
+					})
+				}
+
+				rejected := result.Members[0].PreflightError != nil
+				if rejected == test.standalone {
+					t.Fatalf("%s with %s: preflight error = %v, want standalone=%v",
+						operation, test.name, result.Members[0].PreflightError, test.standalone)
+				}
+			}
+		})
+	}
+}
