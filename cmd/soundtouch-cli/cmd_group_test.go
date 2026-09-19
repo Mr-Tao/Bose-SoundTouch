@@ -253,3 +253,42 @@ func TestCLIStereoPairGenerationPersistenceSkipsWritesButAttemptsRead(t *testing
 		t.Fatalf("external GET calls = %d, want exactly 1 (preflight must still attempt the read)", getCalls)
 	}
 }
+
+func TestPrintGroupResultDetailsKeepsAVerifiedPairVisible(t *testing.T) {
+	result := stereopair.Result{
+		Operation: stereopair.OperationCreate,
+		Status:    stereopair.StatusDegraded,
+		Group: &models.Group{
+			ID:             "PAIR-ID",
+			Name:           "Pair",
+			MasterDeviceID: "LEFT-ID",
+		},
+		Members: []stereopair.MemberResult{
+			{IPAddress: "192.0.2.10", DeviceID: "LEFT-ID", Verified: true},
+			{
+				IPAddress:         "192.0.2.11",
+				DeviceID:          "RIGHT-ID",
+				Verified:          true,
+				VerificationError: errors.New("get zone after verified group mutation: i/o timeout"),
+			},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		printGroupResultDetails(result)
+		printPreservedCreatedGroup(result)
+	})
+
+	for _, expected := range []string{
+		"192.0.2.11 (RIGHT-ID) is paired, but a follow-up check failed: get zone after verified group mutation: i/o timeout",
+		"The stereo pair exists (id=PAIR-ID)",
+		"ID:        PAIR-ID",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Errorf("output missing %q:\n%s", expected, output)
+		}
+	}
+	if strings.Contains(output, "verification failed") {
+		t.Errorf("a verified member was reported as a failed verification:\n%s", output)
+	}
+}
