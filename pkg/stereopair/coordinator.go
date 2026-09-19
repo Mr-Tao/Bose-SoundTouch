@@ -412,7 +412,7 @@ func (c *Coordinator) Create(req CreateRequest) (Result, error) {
 
 	if pairVerified(states) {
 		result.Group = cloneGroup(states[0].group)
-		if !verifyCreatedPairZones(states) {
+		if !c.settleCreatedPairZones(states) {
 			result.Status = StatusDegraded
 
 			return finish(result, states)
@@ -1517,10 +1517,33 @@ func verifyPair(states []memberState, verify func(*models.Group) error) {
 	}
 }
 
+// settleCreatedPairZones verifies that both members left any temporary zone.
+// A zone view that lags behind a zone-to-stereo transition, or a single failed
+// read, is expected right after the mutation, so the check is repeated
+// through the same settle delays as every other verification here before a
+// verified pair is reported as degraded.
+func (c *Coordinator) settleCreatedPairZones(states []memberState) bool {
+	if verifyCreatedPairZones(states) {
+		return true
+	}
+
+	for _, delay := range c.uncertainOutcomeDelays {
+		time.Sleep(delay)
+
+		if verifyCreatedPairZones(states) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func verifyCreatedPairZones(states []memberState) bool {
 	verified := true
 
 	for i := range states {
+		states[i].result.VerificationError = nil
+
 		zone, err := states[i].client.GetZone()
 
 		states[i].zone = cloneZone(zone)

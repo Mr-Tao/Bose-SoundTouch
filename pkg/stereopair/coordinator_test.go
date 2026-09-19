@@ -76,7 +76,13 @@ func (f *fakeClient) GetZone() (*models.ZoneInfo, error) {
 	defer f.mu.Unlock()
 	f.zoneCalls++
 	if f.getZone != nil {
-		f.zone, f.zoneErr = f.getZone(f.zoneCalls, f.zone)
+		// A hook's error answers this call only; keep the zone it replaced,
+		// so a transient failure does not stick to every later read.
+		zone, err := f.getZone(f.zoneCalls, f.zone)
+		if err != nil {
+			return nil, err
+		}
+		f.zone = zone
 	}
 	if f.zoneErr != nil {
 		return nil, f.zoneErr
@@ -849,6 +855,7 @@ func TestCreateRevalidatesZoneTopologyAfterGenerationPreflight(t *testing.T) {
 
 func TestCreatePreservesVerifiedPairWhenPostMutationZoneReadbackDiffers(t *testing.T) {
 	left, right, coordinator := newCreateCoordinator()
+	coordinator.uncertainOutcomeDelays = nil
 	right.getZone = func(call int, current *models.ZoneInfo) (*models.ZoneInfo, error) {
 		if call == 2 {
 			return temporaryZone(leftID, rightID), nil
@@ -872,6 +879,31 @@ func TestCreatePreservesVerifiedPairWhenPostMutationZoneReadbackDiffers(t *testi
 	}
 	if result.CompensationAttempted || left.removeCalls != 0 || right.removeCalls != 0 {
 		t.Fatalf("verified pair was compensated after zone-only mismatch: %+v", result)
+	}
+}
+
+func TestCreateSettlesTransientPostMutationZoneRead(t *testing.T) {
+	_, right, coordinator := newCreateCoordinator()
+	coordinator.uncertainOutcomeDelays = []time.Duration{0, 0}
+	right.getZone = func(call int, current *models.ZoneInfo) (*models.ZoneInfo, error) {
+		if call == 2 {
+			return nil, errors.New("i/o timeout")
+		}
+
+		return current, nil
+	}
+
+	result, err := coordinator.Create(CreateRequest{
+		LeftIPAddress: leftIP, RightIPAddress: rightIP, Name: "Pair",
+	})
+	if err != nil || result.Status != StatusSucceeded {
+		t.Fatalf("result = %+v, err = %v; want the transient zone read settled", result, err)
+	}
+	if result.Members[1].VerificationError != nil {
+		t.Fatalf("settled zone read left a stale verification error: %+v", result.Members[1])
+	}
+	if right.zoneCalls != 3 {
+		t.Fatalf("RIGHT zone reads = %d, want preflight, failed read and one retry", right.zoneCalls)
 	}
 }
 
