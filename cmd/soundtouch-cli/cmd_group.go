@@ -63,6 +63,7 @@ func createGroup(c *cli.Context) error {
 	if err != nil {
 		PrintError(fmt.Sprintf("Failed to create stereo pair: %v", err))
 		printGroupResultDetails(result)
+		printPreservedCreatedGroup(result)
 
 		return err
 	}
@@ -258,7 +259,12 @@ func printGroupResultDetails(result stereopair.Result) {
 		}
 
 		if member.VerificationError != nil {
-			PrintError(fmt.Sprintf("%s verification failed: %v", label, member.VerificationError))
+			if member.Verified {
+				PrintWarning(fmt.Sprintf("%s is paired, but a follow-up check failed: %v",
+					label, member.VerificationError))
+			} else {
+				PrintError(fmt.Sprintf("%s verification failed: %v", label, member.VerificationError))
+			}
 		}
 
 		if member.CompensationError != nil {
@@ -279,6 +285,19 @@ func printGroupResultDetails(result stereopair.Result) {
 	if result.PersistenceError != nil {
 		PrintError(fmt.Sprintf("Persistent group generation update failed: %v", result.PersistenceError))
 	}
+}
+
+// printPreservedCreatedGroup shows a pair that exists although create reported
+// a problem (for example a zone check that failed after both members verified
+// the group), so its ID is at hand for rename or dissolve.
+func printPreservedCreatedGroup(result stereopair.Result) {
+	if result.Group == nil {
+		return
+	}
+
+	PrintWarning(fmt.Sprintf("The stereo pair exists (id=%s); use this ID to rename or dissolve it",
+		result.Group.ID))
+	printGroup(result.Group)
 }
 
 func groupMemberLabel(index int, member *stereopair.MemberResult) string {
