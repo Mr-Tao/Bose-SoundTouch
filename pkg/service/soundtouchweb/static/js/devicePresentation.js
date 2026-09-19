@@ -80,3 +80,19 @@ export function resolvedZoneMember(projection, member) {
         name: current?.name || member?.name || controlID || '',
     };
 }
+
+// previousDetailTarget picks where Back leads from a device-detail page that
+// was opened from a zone's member rows: the most recent origin that is still
+// in the inventory. Origins that disappeared meanwhile are skipped. An empty
+// id means Back returns to the device list.
+export function previousDetailTarget(origins, devices) {
+    const remaining = [...(origins || [])];
+    while (remaining.length > 0) {
+        const id = remaining.pop();
+        if (id && devices && Object.prototype.hasOwnProperty.call(devices, id)) {
+            return { id, origins: remaining };
+        }
+    }
+
+    return { id: null, origins: [] };
+}
