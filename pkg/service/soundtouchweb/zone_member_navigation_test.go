@@ -9,7 +9,7 @@ import (
 	"github.com/gesellix/bose-soundtouch/pkg/models"
 )
 
-func TestHandleAPIDeviceKeepsCollapsedZoneMemberAddressable(t *testing.T) {
+func TestHandleAPIDeviceReportsZoneRoles(t *testing.T) {
 	app := NewWebApp()
 	zone := &models.ZoneInfo{
 		Master: "master-id",
@@ -25,12 +25,25 @@ func TestHandleAPIDeviceKeepsCollapsedZoneMemberAddressable(t *testing.T) {
 		app.AddDevice(entry.ID, entry.Device)
 	}
 
-	if _, visible := app.deviceViewSnapshot()["192.0.2.11"]; visible {
-		t.Fatal("zone member remained visible as a separate inventory card")
+	member := apiDeviceDetail(t, app, "192.0.2.11")
+	if member.Info == nil || member.Info.Name != "Breakfast Room" {
+		t.Fatalf("member detail = %+v, want the logical zone member", member)
+	}
+	if member.ZoneMembership == nil || member.ZoneMembership.MasterControlID != "192.0.2.10" {
+		t.Fatalf("member detail lost its zone membership: %+v", member.ZoneMembership)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/control/devices/192.0.2.11", nil)
-	req = withChiParams(req, map[string]string{"id": "192.0.2.11"})
+	master := apiDeviceDetail(t, app, "192.0.2.10")
+	if master.Zone == nil || master.Zone.MemberCount != 2 {
+		t.Fatalf("master detail lost its zone: %+v", master.Zone)
+	}
+}
+
+func apiDeviceDetail(t *testing.T, app *WebApp, id string) deviceView {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/control/devices/"+id, nil)
+	req = withChiParams(req, map[string]string{"id": id})
 	response := httptest.NewRecorder()
 	app.HandleAPIDevice(response, req)
 
@@ -39,12 +52,11 @@ func TestHandleAPIDeviceKeepsCollapsedZoneMemberAddressable(t *testing.T) {
 		Data    deviceView `json:"data"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		t.Fatalf("decode member detail: %v", err)
+		t.Fatalf("decode detail for %s: %v", id, err)
 	}
 	if response.Code != http.StatusOK || !payload.Success {
-		t.Fatalf("member detail status=%d payload=%+v", response.Code, payload)
+		t.Fatalf("detail for %s: status=%d payload=%+v", id, response.Code, payload)
 	}
-	if payload.Data.Info == nil || payload.Data.Info.Name != "Breakfast Room" {
-		t.Fatalf("member detail = %+v, want the logical zone member", payload.Data)
-	}
+
+	return payload.Data
 }
