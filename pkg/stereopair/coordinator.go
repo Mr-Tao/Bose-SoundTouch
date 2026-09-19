@@ -1089,12 +1089,17 @@ func verifyCompensationZone(expected, actual *models.ZoneInfo, deviceID string) 
 		return fmt.Errorf("invalid zone after compensation: %w", err)
 	}
 
-	if expectedStandalone || actualStandalone {
-		if expectedStandalone && actualStandalone {
-			return nil
-		}
+	// Standalone is the clean end state of a rollback. In the same-zone flow
+	// the firmware dissolves the temporary zone while forming the pair, and
+	// compensation only removes the group; it never recreates that zone, so
+	// requiring it back would fail every same-zone rollback and, with it,
+	// the generation cleanup that is gated on compensation.
+	if actualStandalone {
+		return nil
+	}
 
-		return errors.New("compensation did not restore the pre-pairing zone topology")
+	if expectedStandalone {
+		return errors.New("speaker joined a zone during compensation")
 	}
 
 	if !sameCreateZone(expectedTopology, actualTopology) {

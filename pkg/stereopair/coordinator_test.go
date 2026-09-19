@@ -444,12 +444,13 @@ func TestCreatePartialFailureIsCompensatedAndReported(t *testing.T) {
 	}
 }
 
-func TestCreateSameZonePartialFailureRequiresZoneTopologyRestoration(t *testing.T) {
-	left, right, coordinator := newCreateCoordinator()
+func TestCreateSameZonePartialFailureRollsBackToStandaloneAndRetiresGeneration(t *testing.T) {
+	left, right, _ := newCreateCoordinator()
 	left.zone = temporaryZone(leftID, leftID, rightID)
 	right.zone = temporaryZone(leftID, leftID, rightID)
 	right.addErr = errors.New("right add failed")
-	coordinator.uncertainOutcomeDelays = nil
+	// The firmware dissolved the temporary zone while forming the pair, so
+	// LEFT reads back standalone after the rollback.
 	left.getZone = func(call int, current *models.ZoneInfo) (*models.ZoneInfo, error) {
 		if call == 2 {
 			return &models.ZoneInfo{Master: leftID}, nil
@@ -458,23 +459,32 @@ func TestCreateSameZonePartialFailureRequiresZoneTopologyRestoration(t *testing.
 		return current, nil
 	}
 
+	var cleaned GenerationRef
+	coordinator := NewWithGenerationCleanup(factoryFor(map[string]*fakeClient{leftIP: left, rightIP: right}),
+		func(ref GenerationRef) error {
+			cleaned = ref
+
+			return nil
+		})
+	coordinator.uncertainOutcomeDelays = nil
+
 	result, err := coordinator.Create(CreateRequest{
 		LeftIPAddress: leftIP, RightIPAddress: rightIP, Name: "Pair",
 	})
-	if err == nil || result.Status != StatusDegraded || result.CompensationComplete {
-		t.Fatalf("result = %+v, err = %v; want degraded rollback proof", result, err)
+	if err == nil || result.Status != StatusFailed || !result.CompensationComplete {
+		t.Fatalf("result = %+v, err = %v; want a completed rollback", result, err)
 	}
 	if left.removeCalls != 1 || right.removeCalls != 0 {
 		t.Fatalf("remove calls LEFT=%d RIGHT=%d, want 1/0", left.removeCalls, right.removeCalls)
 	}
-	if result.Members[0].CompensationVerified || result.Members[0].CompensationError == nil {
-		t.Fatalf("changed LEFT zone topology was accepted: %+v", result.Members[0])
+	if !result.Members[0].CompensationVerified || result.Members[0].CompensationError != nil {
+		t.Fatalf("standalone LEFT after rollback was not accepted: %+v", result.Members[0])
 	}
 	if !result.Members[1].CompensationVerified {
 		t.Fatalf("unchanged RIGHT zone topology was not verified: %+v", result.Members[1])
 	}
-	if left.zoneCalls != 2 || right.zoneCalls != 2 {
-		t.Fatalf("fresh compensation zone reads LEFT=%d RIGHT=%d, want 2/2", left.zoneCalls, right.zoneCalls)
+	if cleaned.GroupID != "PAIR-ID" || cleaned.DeviceID != leftID {
+		t.Fatalf("persisted generation was not retired after the rollback: %+v", cleaned)
 	}
 }
 
@@ -488,6 +498,16 @@ func TestCreateCompensationRejectsUnprovenZonePostcondition(t *testing.T) {
 			getZone: func(call int, current *models.ZoneInfo) (*models.ZoneInfo, error) {
 				if call == 2 {
 					return nil, errors.New("zone unavailable")
+				}
+
+				return current, nil
+			},
+		},
+		{
+			name: "joined another zone",
+			getZone: func(call int, current *models.ZoneInfo) (*models.ZoneInfo, error) {
+				if call == 2 {
+					return temporaryZone("OTHER-ID", "OTHER-ID", leftID), nil
 				}
 
 				return current, nil
