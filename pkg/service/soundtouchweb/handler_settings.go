@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/models"
@@ -1314,6 +1316,32 @@ type sourceNameSettingsRequest struct {
 	Name          string `json:"name"`
 }
 
+// maxSourceNameRunes caps a source name. The firmware's own limit is not
+// known; this is a conservative bound so an oversized name is a clear client
+// error rather than a write that reads back differently.
+const maxSourceNameRunes = 64
+
+// validateSourceName rejects names the speaker could not store as sent:
+// control characters, which the XML encoder would replace, and oversized
+// names. Either would otherwise surface only as an "unverified" readback.
+func validateSourceName(name string) error {
+	if !utf8.ValidString(name) {
+		return errors.New("must be valid UTF-8")
+	}
+
+	if utf8.RuneCountInString(name) > maxSourceNameRunes {
+		return fmt.Errorf("must be at most %d characters", maxSourceNameRunes)
+	}
+
+	for _, r := range name {
+		if unicode.IsControl(r) || r == '\uFFFE' || r == '\uFFFF' {
+			return errors.New("must not contain control characters")
+		}
+	}
+
+	return nil
+}
+
 // HandleSetSourceName renames a supported source and verifies the new name.
 func (app *WebApp) HandleSetSourceName(w http.ResponseWriter, r *http.Request) {
 	device, targetIdentity, release, ok := app.settingsDevice(w, r)
@@ -1332,6 +1360,12 @@ func (app *WebApp) HandleSetSourceName(w http.ResponseWriter, r *http.Request) {
 	body.Name = strings.TrimSpace(body.Name)
 	if body.Name == "" {
 		app.sendError(w, "Source name must not be empty", http.StatusBadRequest)
+
+		return
+	}
+
+	if err := validateSourceName(body.Name); err != nil {
+		app.sendError(w, "Invalid source name: "+err.Error(), http.StatusBadRequest)
 
 		return
 	}

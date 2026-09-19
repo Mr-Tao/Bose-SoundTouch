@@ -1629,3 +1629,36 @@ func TestHandleSetClockDisplayTreatsBlankTimeZoneAsNoChange(t *testing.T) {
 			fixture.clockEnabled, fixture.clockTimeZone)
 	}
 }
+
+func TestHandleSetSourceNameRejectsUnstorableNamesBeforeWrite(t *testing.T) {
+	tests := map[string]string{
+		"control character": `{"source":"AUX","sourceAccount":"AUX1","name":"Line\u0001in"}`,
+		"too long":          `{"source":"AUX","sourceAccount":"AUX1","name":"` + strings.Repeat("x", maxSourceNameRunes+1) + `"}`,
+	}
+
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			fixture := newSettingsSpeakerFixture(t, true)
+			app := settingsTestApp(fixture)
+			recorder := httptest.NewRecorder()
+
+			app.HandleSetSourceName(recorder, settingsRequest(http.MethodPatch,
+				"/api/control/devices/speaker/settings/source-name", body))
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			if fixture.sourceName != "Line in" {
+				t.Fatalf("source name changed to %q", fixture.sourceName)
+			}
+		})
+	}
+}
+
+func TestValidateSourceNameAcceptsOrdinaryNames(t *testing.T) {
+	for _, name := range []string{"Turntable", "Küche", "Plattenspieler 2", strings.Repeat("x", maxSourceNameRunes)} {
+		if err := validateSourceName(name); err != nil {
+			t.Errorf("validateSourceName(%q) = %v", name, err)
+		}
+	}
+}
