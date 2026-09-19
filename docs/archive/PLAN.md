@@ -781,7 +781,7 @@ docker compose up  # Mock devices + web app
 
 - [Bose SoundTouch Web API Documentation](https://assets.bosecreative.com/m/496577402d128874/original/SoundTouch-Web-API.pdf)
 - [Go WebAssembly](https://github.com/golang/go/wiki/WebAssembly)
-- [UPnP Device Architecture](http://upnp.org/specs/arch/UPnP-arch-DeviceArchitecture-v1.0.pdf)
+- [UPnP Device Architecture](https://web.archive.org/web/20260907161620/http://upnp.org/specs/arch/UPnP-arch-DeviceArchitecture-v1.0.pdf)
 - [Go Embed Directive](https://pkg.go.dev/embed)
 - [Gorilla WebSocket](https://github.com/gorilla/websocket)
 - [PROJECT-PATTERNS.md](../content/docs/appendix/PROJECT-PATTERNS.md) - Detailed pattern documentation
