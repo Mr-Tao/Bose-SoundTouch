@@ -815,12 +815,23 @@ func (app *WebApp) requireSetting(
 	targetIdentity string,
 	predicate func(settingsSupport) bool,
 	name string,
+	supportReadKeys ...string,
 ) (*deviceSettingsSnapshot, bool) {
 	snapshot, err := app.readDeviceSettings(device, targetIdentity)
 	if err != nil {
 		app.sendError(w, err.Error(), settingsReadErrorStatus(err))
 
 		return nil, false
+	}
+
+	// Support derived from a read that failed is unknown, not absent: answer
+	// with the read error, which is worth retrying, instead of "not supported".
+	for _, key := range supportReadKeys {
+		if readErr := snapshot.Errors[key]; readErr != "" && !predicate(snapshot.Support) {
+			app.sendError(w, name+" support could not be read: "+readErr, http.StatusBadGateway)
+
+			return nil, false
+		}
 	}
 
 	if !predicate(snapshot.Support) {
@@ -1180,7 +1191,8 @@ func (app *WebApp) HandleEnterBluetoothPairing(w http.ResponseWriter, r *http.Re
 	defer release()
 
 	if _, supported := app.requireSetting(
-		w, device, targetIdentity, func(s settingsSupport) bool { return s.BluetoothPair }, "Bluetooth pairing"); !supported {
+		w, device, targetIdentity, func(s settingsSupport) bool { return s.BluetoothPair }, "Bluetooth pairing",
+		"sources"); !supported {
 		return
 	}
 
@@ -1246,7 +1258,8 @@ func (app *WebApp) HandleClearBluetoothPairings(w http.ResponseWriter, r *http.R
 	}
 
 	if _, supported := app.requireSetting(
-		w, device, targetIdentity, func(s settingsSupport) bool { return s.BluetoothClear }, "Bluetooth paired-device clearing"); !supported {
+		w, device, targetIdentity, func(s settingsSupport) bool { return s.BluetoothClear }, "Bluetooth paired-device clearing",
+		"sources"); !supported {
 		return
 	}
 
@@ -1320,7 +1333,8 @@ func (app *WebApp) HandleSetSourceName(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, supported := app.requireSetting(
-		w, device, targetIdentity, func(s settingsSupport) bool { return s.SourceNaming }, "Source naming"); !supported {
+		w, device, targetIdentity, func(s settingsSupport) bool { return s.SourceNaming }, "Source naming",
+		"sources"); !supported {
 		return
 	}
 

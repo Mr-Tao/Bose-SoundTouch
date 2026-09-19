@@ -49,6 +49,7 @@ type settingsSpeakerFixture struct {
 	timeoutMutationReject bool
 	languageReadFail      bool
 	syncReadFail          bool
+	sourcesReadFail       bool
 	infoStarted           chan struct{}
 	infoRelease           chan struct{}
 
@@ -147,6 +148,11 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 			}
 			_, _ = io.WriteString(w, `</supportedURLs>`)
 		case "/sources":
+			if fixture.sourcesReadFail {
+				http.Error(w, "sources unavailable", http.StatusInternalServerError)
+
+				return
+			}
 			_, _ = fmt.Fprintf(w, `<sources><sourceItem source="BLUETOOTH" status="READY">Bluetooth</sourceItem>`+
 				`<sourceItem source="AUX" sourceAccount="AUX1" status="READY" isLocal="true">%s</sourceItem></sources>`, fixture.sourceName)
 		case "/clockDisplay":
@@ -1550,5 +1556,56 @@ func TestHandleClearBluetoothPairingsFailsTypedMutationError(t *testing.T) {
 	}
 	if fixture.clearGets.Load() != 1 {
 		t.Fatalf("clear GET count = %d, want 1", fixture.clearGets.Load())
+	}
+}
+
+func TestSourceDependentSettingsReportUnreadableSourcesAsReadError(t *testing.T) {
+	tests := []struct {
+		name   string
+		handle func(*WebApp, http.ResponseWriter, *http.Request)
+		method string
+		path   string
+		body   string
+	}{
+		{
+			name:   "Bluetooth pairing",
+			handle: (*WebApp).HandleEnterBluetoothPairing,
+			method: http.MethodPost,
+			path:   "/api/control/devices/speaker/settings/bluetooth/pair",
+		},
+		{
+			name:   "Bluetooth paired-device clearing",
+			handle: (*WebApp).HandleClearBluetoothPairings,
+			method: http.MethodDelete,
+			path:   "/api/control/devices/speaker/settings/bluetooth/pairings?confirmed=true",
+		},
+		{
+			name:   "Source naming",
+			handle: (*WebApp).HandleSetSourceName,
+			method: http.MethodPatch,
+			path:   "/api/control/devices/speaker/settings/source-name",
+			body:   `{"source":"AUX","sourceAccount":"AUX1","name":"Turntable"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSettingsSpeakerFixture(t, true)
+			fixture.sourcesReadFail = true
+			app := settingsTestApp(fixture)
+			recorder := httptest.NewRecorder()
+
+			test.handle(app, recorder, settingsRequest(test.method, test.path, test.body))
+
+			if recorder.Code != http.StatusBadGateway ||
+				!strings.Contains(recorder.Body.String(), "support could not be read") {
+				t.Fatalf("status = %d, body = %s; want a read error, not \"not supported\"",
+					recorder.Code, recorder.Body.String())
+			}
+			if fixture.sourceName != "Line in" || fixture.clearGets.Load() != 0 || fixture.pairingGets.Load() != 0 {
+				t.Fatalf("speaker was mutated despite unknown support: name=%q clear=%d pair=%d",
+					fixture.sourceName, fixture.clearGets.Load(), fixture.pairingGets.Load())
+			}
+		})
 	}
 }
