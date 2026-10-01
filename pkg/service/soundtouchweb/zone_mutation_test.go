@@ -1,6 +1,8 @@
 package soundtouchweb
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -387,7 +389,8 @@ func TestRunZoneMutationRejectsSupersededReadback(t *testing.T) {
 	close(releaseMasterRead)
 	err := <-result
 
-	if _, ok := err.(*zoneMutationVerificationError); !ok || !strings.Contains(err.Error(), "stale") {
+	var unverified *zoneMutationVerificationError
+	if !errors.As(err, &unverified) || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("superseded readback error = %v", err)
 	}
 }
@@ -413,7 +416,8 @@ func TestRunZoneMutationReportsPartialReadbackAfterApplyingMaster(t *testing.T) 
 	readbacks := app.prepareZoneMutationReadbacks(affected, expectations, fallback)
 
 	err := app.runZoneMutation(readbacks, func() error { return nil })
-	if _, ok := err.(*zoneMutationVerificationError); !ok || !strings.Contains(err.Error(), "SLAVE") {
+	var unverified *zoneMutationVerificationError
+	if !errors.As(err, &unverified) || !strings.Contains(err.Error(), "SLAVE") {
 		t.Fatalf("partial readback error = %v", err)
 	}
 	if zone := master.Status().Zone; zone == nil || !zone.IsMember("SLAVE") {
@@ -444,7 +448,8 @@ func TestRunZoneMutationRejectsUnrelatedCachedMasterReadback(t *testing.T) {
 	}}
 
 	err := app.runZoneMutation(readbacks, func() error { return nil })
-	if _, ok := err.(*zoneMutationVerificationError); !ok {
+	var unverified *zoneMutationVerificationError
+	if !errors.As(err, &unverified) {
 		t.Fatalf("unrelated readback error = %v", err)
 	}
 	if got := connection.Status().Zone; got == nil || got.Master != "CACHED" {
@@ -484,7 +489,10 @@ func TestRunZoneMutationPublishesMasterBeforeSlowMember(t *testing.T) {
 	webSocketServer := httptest.NewServer(http.HandlerFunc(app.HandleWebSocket))
 	defer webSocketServer.Close()
 	webSocketURL := "ws" + strings.TrimPrefix(webSocketServer.URL, "http")
-	webSocketClient, _, err := websocket.DefaultDialer.Dial(webSocketURL, nil)
+	webSocketClient, response, err := websocket.DefaultDialer.Dial(webSocketURL, nil)
+	if response != nil {
+		defer response.Body.Close()
+	}
 	if err != nil {
 		t.Fatalf("connect player WebSocket: %v", err)
 	}
@@ -526,5 +534,20 @@ func TestRunZoneMutationPublishesMasterBeforeSlowMember(t *testing.T) {
 	releaseSlaveOnce.Do(func() { close(releaseSlaveRead) })
 	if err := <-result; err != nil {
 		t.Fatalf("mutation result = %v", err)
+	}
+}
+
+func TestSendZoneMutationResponsePreservesWrappedVerificationFailure(t *testing.T) {
+	app := NewWebApp()
+	response := httptest.NewRecorder()
+	err := fmt.Errorf("zone request: %w", &zoneMutationVerificationError{problems: []string{"SLAVE: readback failed"}})
+
+	app.sendZoneMutationResponse(response, err, "Zone changed")
+
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("wrapped verification status = %d, want %d", response.Code, http.StatusBadGateway)
+	}
+	if !strings.Contains(response.Body.String(), "SLAVE: readback failed") {
+		t.Fatalf("verification detail lost: %s", response.Body.String())
 	}
 }

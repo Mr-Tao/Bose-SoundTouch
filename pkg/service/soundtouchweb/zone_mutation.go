@@ -1,6 +1,7 @@
 package soundtouchweb
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -22,6 +23,7 @@ func (app *WebApp) beginZoneMutation(w http.ResponseWriter) bool {
 		app.sendError(w, "Another zone change is in progress; refresh before retrying", http.StatusConflict)
 		return false
 	}
+
 	return true
 }
 
@@ -31,10 +33,12 @@ func (app *WebApp) revalidateZoneMutation(w http.ResponseWriter, connection *web
 		app.sendError(w, "Cannot recheck zone before changing it: "+err.Error(), http.StatusBadGateway)
 		return false
 	}
+
 	if baseline == nil || current == nil || !models.SameZone(baseline, current) {
 		app.sendError(w, "Zone changed while preparing the request; refresh before retrying", http.StatusConflict)
 		return false
 	}
+
 	return true
 }
 
@@ -45,7 +49,9 @@ func zoneMutationMaster(zone *models.ZoneInfo, deviceID string) bool {
 	if zone == nil || deviceID == "" {
 		return false
 	}
+
 	master := strings.TrimSpace(zone.Master)
+
 	return master == deviceID || (master == "" && len(zone.Members) == 0)
 }
 
@@ -76,7 +82,8 @@ func (e *zoneMutationVerificationError) Error() string {
 }
 
 func (app *WebApp) sendZoneMutationResponse(w http.ResponseWriter, err error, successMessage string) {
-	if _, unverified := err.(*zoneMutationVerificationError); unverified {
+	var unverified *zoneMutationVerificationError
+	if errors.As(err, &unverified) {
 		app.sendError(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -93,15 +100,18 @@ func (app *WebApp) prepareZoneMutationReadbacks(
 	cachedMasterExpectation func(string) zoneReadbackExpectation,
 ) []pendingZoneMutationReadback {
 	affected := make(map[string]struct{}, len(affectedDeviceIDs))
+
 	candidates := make(map[string]zoneReadbackExpectation, len(expectations))
 	for deviceID, expectation := range expectations {
 		deviceID = strings.TrimSpace(deviceID)
 		if deviceID == "" {
 			continue
 		}
+
 		affected[deviceID] = struct{}{}
 		candidates[deviceID] = expectation
 	}
+
 	for _, deviceID := range affectedDeviceIDs {
 		if deviceID = strings.TrimSpace(deviceID); deviceID != "" {
 			affected[deviceID] = struct{}{}
@@ -109,6 +119,7 @@ func (app *WebApp) prepareZoneMutationReadbacks(
 	}
 
 	snapshot := app.DeviceSnapshot()
+
 	connectionsByDeviceID := make(map[string][]*webtypes.DeviceConnection, len(snapshot))
 	for _, entry := range snapshot {
 		if entry.Device == nil || entry.Device.DeviceInfo == nil {
@@ -125,14 +136,7 @@ func (app *WebApp) prepareZoneMutationReadbacks(
 			continue
 		}
 
-		zoneAffected := false
-		for affectedDeviceID := range affected {
-			if status.Zone.IsInZone(affectedDeviceID) {
-				zoneAffected = true
-				break
-			}
-		}
-		if !zoneAffected {
+		if !zoneContainsAffectedDevice(status.Zone, affected) {
 			continue
 		}
 
@@ -140,6 +144,7 @@ func (app *WebApp) prepareZoneMutationReadbacks(
 		if masterID == "" {
 			continue
 		}
+
 		if _, exists := candidates[masterID]; !exists {
 			candidates[masterID] = cachedMasterExpectation(masterID)
 		}
@@ -149,6 +154,7 @@ func (app *WebApp) prepareZoneMutationReadbacks(
 	for deviceID := range candidates {
 		deviceIDs = append(deviceIDs, deviceID)
 	}
+
 	sort.Strings(deviceIDs)
 
 	readbacks := make([]pendingZoneMutationReadback, 0, len(deviceIDs))
@@ -177,6 +183,16 @@ func (app *WebApp) prepareZoneMutationReadbacks(
 	return readbacks
 }
 
+func zoneContainsAffectedDevice(zone *models.ZoneInfo, affected map[string]struct{}) bool {
+	for deviceID := range affected {
+		if zone.IsInZone(deviceID) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (app *WebApp) runZoneMutation(
 	readbacks []pendingZoneMutationReadback,
 	mutate func() error,
@@ -193,6 +209,7 @@ func (app *WebApp) runZoneMutation(
 	pending := 0
 	verified := 0
 	problems := make([]string, 0)
+
 	for _, readback := range readbacks {
 		if readback.problem != "" {
 			problems = append(problems, fmt.Sprintf("%s: %s", readback.deviceID, readback.problem))
@@ -200,6 +217,7 @@ func (app *WebApp) runZoneMutation(
 		}
 
 		pending++
+
 		go func(readback pendingZoneMutationReadback) {
 			zone, err := readback.connection.Client.GetZone()
 			results <- readbackResult{readback: readback, zone: zone, err: err}
@@ -208,11 +226,13 @@ func (app *WebApp) runZoneMutation(
 
 	for range pending {
 		result := <-results
+
 		readback := result.readback
 		if result.err != nil {
 			problems = append(problems, fmt.Sprintf("%s: /getZone failed: %v", readback.deviceID, result.err))
 			continue
 		}
+
 		if result.zone == nil || readback.expect.matches == nil || !readback.expect.matches(result.zone) {
 			problems = append(problems, fmt.Sprintf("%s: expected %s", readback.deviceID, readback.expect.description))
 			continue
@@ -228,8 +248,11 @@ func (app *WebApp) runZoneMutation(
 				problems = append(problems, fmt.Sprintf("%s: readback was stale or invalid", readback.deviceID))
 				continue
 			}
+
 			verified++
+
 			app.BroadcastDeviceList()
+
 			continue
 		}
 
@@ -242,11 +265,14 @@ func (app *WebApp) runZoneMutation(
 			problems = append(problems, fmt.Sprintf("%s: member readback was stale or invalid", readback.deviceID))
 			continue
 		}
+
 		verified++
+
 		if changed {
 			app.BroadcastDeviceList()
 		}
 	}
+
 	if mutationErr != nil && verified == 0 && len(problems) == 0 {
 		problems = append(problems, "no topology readback was available")
 	}
@@ -269,16 +295,19 @@ func zoneReadbackIsAuthoritative(deviceID string, zone *models.ZoneInfo) bool {
 
 func zoneDeviceIDs(zone *models.ZoneInfo, fallbackDeviceID string) []string {
 	deviceIDs := map[string]struct{}{}
+
 	if zone != nil {
 		if masterID := strings.TrimSpace(zone.Master); masterID != "" {
 			deviceIDs[masterID] = struct{}{}
 		}
+
 		for _, member := range zone.Members {
 			if deviceID := strings.TrimSpace(member.DeviceID); deviceID != "" {
 				deviceIDs[deviceID] = struct{}{}
 			}
 		}
 	}
+
 	if fallbackDeviceID = strings.TrimSpace(fallbackDeviceID); fallbackDeviceID != "" {
 		deviceIDs[fallbackDeviceID] = struct{}{}
 	}
@@ -287,6 +316,7 @@ func zoneDeviceIDs(zone *models.ZoneInfo, fallbackDeviceID string) []string {
 	for deviceID := range deviceIDs {
 		result = append(result, deviceID)
 	}
+
 	sort.Strings(result)
 
 	return result
@@ -313,6 +343,7 @@ func uniqueDeviceIDs(deviceIDs []string) []string {
 	for deviceID := range unique {
 		result = append(result, deviceID)
 	}
+
 	sort.Strings(result)
 
 	return result
@@ -321,17 +352,20 @@ func uniqueDeviceIDs(deviceIDs []string) []string {
 func expectZoneMaster(masterID string, requiredDeviceIDs, excludedDeviceIDs []string) zoneReadbackExpectation {
 	required := append([]string(nil), requiredDeviceIDs...)
 	excluded := append([]string(nil), excludedDeviceIDs...)
+
 	return zoneReadbackExpectation{
 		description: "the confirmed master topology",
 		matches: func(zone *models.ZoneInfo) bool {
 			if zone == nil || strings.TrimSpace(zone.Master) != strings.TrimSpace(masterID) {
 				return false
 			}
+
 			for _, deviceID := range required {
 				if !zone.IsInZone(deviceID) {
 					return false
 				}
 			}
+
 			for _, deviceID := range excluded {
 				if zone.IsInZone(deviceID) {
 					return false
@@ -360,6 +394,7 @@ func expectStandalone(deviceID string) zoneReadbackExpectation {
 			if zone == nil {
 				return false
 			}
+
 			for _, currentDeviceID := range zoneDeviceIDs(zone, "") {
 				if currentDeviceID != deviceID {
 					return false
@@ -387,12 +422,14 @@ func zoneReadbackDescribesDevice(deviceID string, zone *models.ZoneInfo) bool {
 
 func expectDevicesAbsent(queriedDeviceID string, deviceIDs []string) zoneReadbackExpectation {
 	excluded := append([]string(nil), deviceIDs...)
+
 	return zoneReadbackExpectation{
 		description: "affected devices to be absent from the cached zone",
 		matches: func(zone *models.ZoneInfo) bool {
 			if !zoneReadbackDescribesDevice(queriedDeviceID, zone) {
 				return false
 			}
+
 			for _, deviceID := range excluded {
 				if zone.IsInZone(deviceID) {
 					return false
@@ -410,12 +447,14 @@ func zoneAddMutationPlan(
 ) ([]string, map[string]zoneReadbackExpectation, func(string) zoneReadbackExpectation) {
 	affected := zoneRequestDeviceIDs(zone)
 	expectations := make(map[string]zoneReadbackExpectation, len(affected))
+
 	requiredMembers := make([]string, 0, len(affected)-1)
 	for _, deviceID := range affected {
 		if deviceID != zone.Master {
 			requiredMembers = append(requiredMembers, deviceID)
 		}
 	}
+
 	expectations[zone.Master] = expectZoneMaster(zone.Master, requiredMembers, nil)
 	for _, deviceID := range requiredMembers {
 		expectations[deviceID] = expectZoneMember(zone.Master, deviceID)
@@ -451,6 +490,7 @@ func zoneRemoveMutationPlan(
 			expectations[deviceID] = expectZoneMember(masterID, deviceID)
 		}
 	}
+
 	expectations[removedDeviceID] = expectStandalone(removedDeviceID)
 
 	return affected, expectations, func(candidateDeviceID string) zoneReadbackExpectation {
@@ -463,6 +503,7 @@ func zoneDissolveMutationPlan(
 	masterID string,
 ) ([]string, map[string]zoneReadbackExpectation, func(string) zoneReadbackExpectation) {
 	affected := zoneDeviceIDs(zone, masterID)
+
 	expectations := make(map[string]zoneReadbackExpectation, len(affected))
 	for _, deviceID := range affected {
 		expectations[deviceID] = expectStandalone(deviceID)

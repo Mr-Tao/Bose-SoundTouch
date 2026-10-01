@@ -1627,6 +1627,7 @@ func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer app.zoneMutationMu.Unlock()
+
 	masterIP := chi.URLParam(r, "id")
 
 	slaveIP := chi.URLParam(r, "slaveId")
@@ -1697,9 +1698,11 @@ func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 
 	zoneReq.AddMember(slaveHwID, slaveIP)
 	affected, expectations, cachedMasterExpectation := zoneAddMutationPlan(zoneReq, slaveHwID)
+
 	if !app.revalidateZoneMutation(w, masterConn, zone) {
 		return
 	}
+
 	readbacks := app.prepareZoneMutationReadbacks(affected, expectations, cachedMasterExpectation)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1735,6 +1738,7 @@ func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer app.zoneMutationMu.Unlock()
+
 	masterIP := chi.URLParam(r, "id")
 	slaveIP := chi.URLParam(r, "slaveId")
 
@@ -1757,19 +1761,23 @@ func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 
 	masterHwID := masterConn.DeviceInfo.DeviceID
 	slaveHwID := slaveConn.DeviceInfo.DeviceID
+
 	zone, err := masterConn.Client.GetZone()
 	if err != nil {
 		app.sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
 	if !zoneMutationMaster(zone, masterHwID) || masterHwID == slaveHwID {
 		app.sendError(w, "Device is not the current zone master or removal targets the master", http.StatusConflict)
 		return
 	}
+
 	affected, expectations, cachedMasterExpectation := zoneRemoveMutationPlan(zone, masterHwID, slaveHwID)
 	if !app.revalidateZoneMutation(w, masterConn, zone) {
 		return
 	}
+
 	readbacks := app.prepareZoneMutationReadbacks(affected, expectations, cachedMasterExpectation)
 
 	// Remove a single member with the dedicated /removeZoneSlave endpoint.
@@ -1790,6 +1798,7 @@ func (app *WebApp) HandleZoneDissolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer app.zoneMutationMu.Unlock()
+
 	masterIP := chi.URLParam(r, "id")
 
 	masterConn, ok := app.GetDevice(masterIP)
@@ -1802,6 +1811,7 @@ func (app *WebApp) HandleZoneDissolve(w http.ResponseWriter, r *http.Request) {
 		app.sendError(w, "Device not ready", http.StatusInternalServerError)
 		return
 	}
+
 	zone, err := masterConn.Client.GetZone()
 	if err != nil {
 		app.sendError(w, err.Error(), http.StatusInternalServerError)
@@ -1812,7 +1822,9 @@ func (app *WebApp) HandleZoneDissolve(w http.ResponseWriter, r *http.Request) {
 		app.sendError(w, "Device is not the current zone master", http.StatusConflict)
 		return
 	}
+
 	zoneReq := models.NewZoneRequest(masterConn.DeviceInfo.DeviceID)
+
 	affected, expectations, cachedMasterExpectation := zoneDissolveMutationPlan(
 		zone,
 		masterConn.DeviceInfo.DeviceID,
@@ -1820,6 +1832,7 @@ func (app *WebApp) HandleZoneDissolve(w http.ResponseWriter, r *http.Request) {
 	if !app.revalidateZoneMutation(w, masterConn, zone) {
 		return
 	}
+
 	readbacks := app.prepareZoneMutationReadbacks(affected, expectations, cachedMasterExpectation)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1837,6 +1850,7 @@ func (app *WebApp) HandleZoneLeave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer app.zoneMutationMu.Unlock()
+
 	slaveIP := chi.URLParam(r, "id")
 
 	slaveConn, ok := app.GetDevice(slaveIP)
@@ -1867,16 +1881,19 @@ func (app *WebApp) HandleZoneLeave(w http.ResponseWriter, r *http.Request) {
 		app.sendError(w, "Master device not available", http.StatusInternalServerError)
 		return
 	}
+
 	masterZone, err := masterConn.Client.GetZone()
 	if err != nil {
 		app.sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
 	if !zoneMutationMaster(masterZone, zone.Master) ||
 		strings.TrimSpace(zone.Master) == strings.TrimSpace(slaveConn.DeviceInfo.DeviceID) {
 		app.sendError(w, "Zone master changed or device is not a zone member", http.StatusConflict)
 		return
 	}
+
 	affected, expectations, cachedMasterExpectation := zoneRemoveMutationPlan(
 		masterZone,
 		zone.Master,
@@ -1885,6 +1902,7 @@ func (app *WebApp) HandleZoneLeave(w http.ResponseWriter, r *http.Request) {
 	if !app.revalidateZoneMutation(w, masterConn, masterZone) {
 		return
 	}
+
 	readbacks := app.prepareZoneMutationReadbacks(affected, expectations, cachedMasterExpectation)
 
 	// Drop this slave with the dedicated /removeZoneSlave endpoint sent to the

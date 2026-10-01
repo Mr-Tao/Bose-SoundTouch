@@ -1145,6 +1145,7 @@ func (c *DeviceConnection) ApplyZoneMemberReadback(generation uint64, queriedDev
 		strings.TrimSpace(zone.Master) == strings.TrimSpace(queriedDeviceID) {
 		return false, false
 	}
+
 	return c.ApplyPolledZoneChanged(generation, queriedDeviceID, zone)
 }
 
