@@ -828,9 +828,10 @@ func (app *WebApp) handleVerifiedVolumeControl(
 
 	if err := json.NewEncoder(w).Encode(webtypes.APIResponse{
 		Success: true,
-		Data: map[string]int{
+		Data: map[string]interface{}{
 			"requested": level,
 			"actual":    *member.Actual,
+			"message":   fmt.Sprintf("Volume set to %d", level),
 		},
 	}); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)

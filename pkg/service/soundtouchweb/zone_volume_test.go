@@ -289,8 +289,9 @@ func TestStandaloneVolumeRoutesReturnAuthoritativeReadback(t *testing.T) {
 			var payload struct {
 				Success bool `json:"success"`
 				Data    struct {
-					Requested int `json:"requested"`
-					Actual    int `json:"actual"`
+					Requested int    `json:"requested"`
+					Actual    int    `json:"actual"`
+					Message   string `json:"message"`
 				} `json:"data"`
 			}
 			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
@@ -298,6 +299,9 @@ func TestStandaloneVolumeRoutesReturnAuthoritativeReadback(t *testing.T) {
 			}
 			if !payload.Success || payload.Data.Requested != test.level || payload.Data.Actual != test.level {
 				t.Fatalf("response = %+v", payload)
+			}
+			if payload.Data.Message != fmt.Sprintf("Volume set to %d", test.level) {
+				t.Fatalf("legacy confirmation message = %q", payload.Data.Message)
 			}
 			if _, posts, gets := speaker.operations(); fmt.Sprint(posts) != fmt.Sprintf("[%d]", test.level) || gets != 1 {
 				t.Fatalf("speaker operations = posts %v gets %d", posts, gets)
