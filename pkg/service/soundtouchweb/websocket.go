@@ -1025,6 +1025,7 @@ func (app *WebApp) updateDeviceStatus(deviceID string, conn *webtypes.DeviceConn
 	if stereoCapable && groupBaseline == nil {
 		groupGeneration = conn.BeginGroupRefresh()
 	}
+
 	nameGeneration := conn.BeginNameRefresh()
 
 	// Phase 1: slow network fetches. Local vars only, no shared state

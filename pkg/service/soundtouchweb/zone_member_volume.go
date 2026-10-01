@@ -23,6 +23,7 @@ type zoneMemberVolumeResult struct {
 func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request) {
 	zoneMasterID := chi.URLParam(r, "id")
 	memberID := chi.URLParam(r, "memberId")
+
 	requested, err := strconv.Atoi(chi.URLParam(r, "volume"))
 	if err != nil || !models.ValidateVolumeLevel(requested) {
 		app.sendError(w, "Invalid volume level (0-100)", http.StatusBadRequest)
@@ -34,6 +35,7 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 		app.sendError(w, "Device not found", http.StatusNotFound)
 		return
 	}
+
 	if initialMaster.Zone == nil {
 		app.sendError(w, "Device is not a logical zone master", http.StatusConflict)
 		return
@@ -75,11 +77,13 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 		zoneTopology.snapshot.Zone,
 		captureDeviceProjectionEntries(app.DeviceSnapshot()),
 	)
+
 	currentMember, current := findLogicalZoneMember(currentProjection, memberID)
 	if !projected || !current || !sameLogicalZoneMember(member, currentMember) {
 		app.sendError(w, "Zone member topology changed before volume update", http.StatusConflict)
 		return
 	}
+
 	member = currentMember
 
 	control, groupTopology, failure := app.zoneMemberVolumeControl(member)
@@ -92,6 +96,7 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 	app.BroadcastDeviceList()
 
 	w.Header().Set("Content-Type", "application/json")
+
 	if err := json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true, Data: result}); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
@@ -120,6 +125,7 @@ func findLogicalZoneMember(zone *zoneView, memberID string) (zoneMemberView, boo
 	}
 
 	memberID = strings.TrimSpace(memberID)
+
 	for index := range zone.Members {
 		member := &zone.Members[index]
 		if member.ControlID == memberID || member.HardwareID == memberID {

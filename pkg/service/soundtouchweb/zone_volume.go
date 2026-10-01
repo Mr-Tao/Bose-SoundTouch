@@ -55,6 +55,7 @@ const (
 // HandleZoneVolume moves every current logical member by one shared delta.
 func (app *WebApp) HandleZoneVolume(w http.ResponseWriter, r *http.Request) {
 	controlID := chi.URLParam(r, "id")
+
 	requested, err := strconv.Atoi(chi.URLParam(r, "volume"))
 	if err != nil || !models.ValidateVolumeLevel(requested) {
 		app.sendError(w, "Invalid volume level (0-100)", http.StatusBadRequest)
@@ -66,6 +67,7 @@ func (app *WebApp) HandleZoneVolume(w http.ResponseWriter, r *http.Request) {
 		app.sendError(w, "Device not found", http.StatusNotFound)
 		return
 	}
+
 	if view.Zone == nil {
 		app.sendError(w, "Device is not a logical zone master", http.StatusConflict)
 		return
@@ -93,6 +95,7 @@ func (app *WebApp) HandleZoneVolume(w http.ResponseWriter, r *http.Request) {
 	app.BroadcastDeviceList()
 
 	w.Header().Set("Content-Type", "application/json")
+
 	if err := json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true, Data: result}); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
@@ -100,6 +103,7 @@ func (app *WebApp) HandleZoneVolume(w http.ResponseWriter, r *http.Request) {
 
 func (app *WebApp) zoneVolumeLock(masterDeviceID string) *sync.Mutex {
 	value, _ := app.zoneVolumeLocks.LoadOrStore(masterDeviceID, &sync.Mutex{})
+
 	lock, ok := value.(*sync.Mutex)
 	if !ok {
 		panic("zone volume lock has an invalid type")
@@ -110,28 +114,35 @@ func (app *WebApp) zoneVolumeLock(masterDeviceID string) *sync.Mutex {
 
 func (app *WebApp) revalidateZone(masterDeviceID string) (zoneVolumeTopology, error) {
 	masterControlID := app.findIPByHwID(masterDeviceID)
+
 	master, ok := app.GetDevice(masterControlID)
 	if !ok || master.Client == nil {
 		return zoneVolumeTopology{}, fmt.Errorf("zone master is unavailable")
 	}
 
 	generation := master.BeginZoneRefresh()
+
 	zone, err := master.Client.GetZone()
 	if err != nil {
 		return zoneVolumeTopology{}, fmt.Errorf("refresh zone master: %w", err)
 	}
+
 	changed := master.ApplyPolledZone(generation, masterDeviceID, zone)
+
 	snapshot, current := master.SnapshotZoneTopology()
 	if !current {
 		return zoneVolumeTopology{}, fmt.Errorf("zone topology changed during refresh")
 	}
+
 	if zone == nil {
 		return zoneVolumeTopology{}, fmt.Errorf("zone master returned no topology")
 	}
+
 	if zone.IsStandalone() {
 		if changed {
 			app.BroadcastDeviceList()
 		}
+
 		return zoneVolumeTopology{}, fmt.Errorf("zone has been dissolved")
 	}
 
@@ -158,6 +169,7 @@ func (app *WebApp) applyZoneVolume(
 		Members:   make([]zoneVolumeMemberResult, len(members)),
 	}
 	targets := make([]*zoneVolumeTarget, len(members))
+
 	var readWG sync.WaitGroup
 	readWG.Add(len(members))
 
@@ -174,6 +186,7 @@ func (app *WebApp) applyZoneVolume(
 				strings.TrimSpace(conn.DeviceInfo.DeviceID) != strings.TrimSpace(projectedMember.HardwareID) {
 				member.Error = "speaker unavailable"
 				result.Members[index] = member
+
 				return
 			}
 
@@ -181,10 +194,12 @@ func (app *WebApp) applyZoneVolume(
 			if !volumeTopologyWritable(conn, groupTopology, confirmed) {
 				member.Error = "stereo pair master unavailable"
 				result.Members[index] = member
+
 				return
 			}
 
 			volumeGeneration := conn.BeginVolumeRefresh()
+
 			volume, err := conn.Client.GetVolume()
 			if err != nil || volume == nil {
 				if err != nil {
@@ -192,7 +207,9 @@ func (app *WebApp) applyZoneVolume(
 				} else {
 					member.Error = "read volume: empty response"
 				}
+
 				result.Members[index] = member
+
 				return
 			}
 
@@ -206,6 +223,7 @@ func (app *WebApp) applyZoneVolume(
 			) {
 				member.Error = "speaker topology or volume state changed while reading volume"
 				result.Members[index] = member
+
 				return
 			}
 
@@ -224,24 +242,14 @@ func (app *WebApp) applyZoneVolume(
 	}
 
 	readWG.Wait()
-	targetCount := 0
-	for _, target := range targets {
-		if target != nil {
-			targetCount++
-		}
-	}
+
+	baseline, targetCount := zoneVolumeBaseline(targets)
+
 	if targetCount == 0 {
 		return result, false
 	}
 
-	for _, target := range targets {
-		if target == nil {
-			continue
-		}
-		if target.before > result.Baseline {
-			result.Baseline = target.before
-		}
-	}
+	result.Baseline = baseline
 	result.Delta = requested - result.Baseline
 
 	partial := targetCount != len(members)
@@ -254,6 +262,7 @@ func (app *WebApp) applyZoneVolume(
 		member := &result.Members[target.index]
 		level := models.ClampVolumeLevel(target.before + result.Delta)
 		member.Target = intPointer(level)
+
 		atTarget, _ := app.applyVolumeTarget(
 			member,
 			target.controlID,
@@ -270,6 +279,22 @@ func (app *WebApp) applyZoneVolume(
 	result.Partial = partial
 
 	return result, true
+}
+
+func zoneVolumeBaseline(targets []*zoneVolumeTarget) (baseline, count int) {
+	for _, target := range targets {
+		if target == nil {
+			continue
+		}
+
+		count++
+
+		if target.before > baseline {
+			baseline = target.before
+		}
+	}
+
+	return baseline, count
 }
 
 func zoneVolumeResultForMember(member *zoneMemberView) zoneVolumeMemberResult {
@@ -290,6 +315,7 @@ func authoritativeVolumeTopology(conn *webtypes.DeviceConnection, topology webty
 	if conn == nil || conn.DeviceInfo == nil {
 		return false
 	}
+
 	if topology.Group == nil {
 		return true
 	}
@@ -307,6 +333,7 @@ func volumeTopologyWritable(
 	if conn == nil || conn.DeviceInfo == nil {
 		return false
 	}
+
 	if stereoPairCapable(conn.DeviceInfo) && !confirmed {
 		return false
 	}
@@ -326,8 +353,11 @@ func (app *WebApp) applyVolumeTarget(
 	confirmed := false
 
 	conn.WithVolumeOperation(func() {
-		var writeErr error
-		var volumeGeneration uint64
+		var (
+			writeErr         error
+			volumeGeneration uint64
+		)
+
 		if !app.withCurrentVolumeWrite(controlID, conn, groupTopology, zoneTopology, func() {
 			volumeGeneration = conn.BeginVolumeRefresh()
 			writeErr = conn.Client.SetVolume(level)
@@ -336,15 +366,20 @@ func (app *WebApp) applyVolumeTarget(
 			return
 		}
 
-		var volume *models.Volume
-		var readErr error
+		var (
+			volume  *models.Volume
+			readErr error
+		)
+
 		for attempt := 0; attempt < zoneVolumeReadbackAttempts; attempt++ {
 			if attempt > 0 {
 				app.waitForVolumeReadbackRetry()
+
 				if !app.volumeTargetCurrent(controlID, conn, groupTopology, zoneTopology) {
 					confirmed = false
 					break
 				}
+
 				volumeGeneration = conn.BeginVolumeRefresh()
 			}
 
@@ -365,6 +400,7 @@ func (app *WebApp) applyVolumeTarget(
 				atTarget = true
 				break
 			}
+
 			if !app.volumeTargetCurrent(controlID, conn, groupTopology, zoneTopology) {
 				break
 			}
@@ -374,25 +410,31 @@ func (app *WebApp) applyVolumeTarget(
 			if writeErr != nil {
 				appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
 			}
+
 			if readErr != nil {
 				appendZoneVolumeError(member, fmt.Sprintf("readback volume: %v", readErr))
 			} else {
 				appendZoneVolumeError(member, "readback volume: empty response")
 			}
+
 			return
 		}
+
 		if !confirmed {
 			appendZoneVolumeError(member, "speaker topology or volume state changed during readback")
 			return
 		}
 
 		member.Actual = intPointer(volume.ActualVolume)
+
 		if atTarget {
 			return
 		}
+
 		if writeErr != nil {
 			appendZoneVolumeError(member, fmt.Sprintf("set volume: %v", writeErr))
 		}
+
 		appendZoneVolumeError(member, fmt.Sprintf(
 			"readback target %d actual %d does not both match requested %d",
 			volume.TargetVolume,
@@ -454,6 +496,7 @@ func (app *WebApp) withCurrentVolumeWrite(
 	operation func(),
 ) bool {
 	current := false
+
 	withZoneVolumeFence(zoneTopology, func() {
 		conn.WithGroupWriteFence(func() {
 			app.devicesMu.RLock()
@@ -501,6 +544,7 @@ func (app *WebApp) withCurrentVolumeReadbackMerge(
 	merge func() bool,
 ) bool {
 	applied := false
+
 	withZoneVolumeFence(zoneTopology, func() {
 		conn.WithGroupWriteFence(func() {
 			app.devicesMu.RLock()
@@ -532,5 +576,6 @@ func appendZoneVolumeError(member *zoneVolumeMemberResult, message string) {
 	if member.Error != "" {
 		member.Error += "; "
 	}
+
 	member.Error += message
 }

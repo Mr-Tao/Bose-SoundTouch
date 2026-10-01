@@ -820,10 +820,12 @@ func (app *WebApp) handleVerifiedVolumeControl(
 		}
 
 		app.sendError(w, member.Error, status)
+
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
 	if err := json.NewEncoder(w).Encode(webtypes.APIResponse{
 		Success: true,
 		Data: map[string]int{

@@ -622,6 +622,7 @@ func (c *DeviceConnection) ApplyVolumeEvent(volume *models.Volume, activity time
 	defer c.volumeFieldMu.Unlock()
 
 	changed := false
+
 	c.ApplyFieldEvent(FieldVolume, func(status *DeviceStatus) {
 		changed = !reflect.DeepEqual(status.Volume, volume)
 		status.Volume = volume

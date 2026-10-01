@@ -459,10 +459,12 @@ func newZoneProjectionCandidate(
 		degraded = degraded || memberDegraded || !member.Available
 		if member.ActualVolume != nil {
 			groupVolumeKnown = true
+
 			if *member.ActualVolume > groupVolume {
 				groupVolume = *member.ActualVolume
 			}
 		}
+
 		if member.Available {
 			availableCount++
 		}
@@ -537,6 +539,7 @@ func newZoneMember(
 
 	member.Connectivity = string(projectedConnectivity(view.Status))
 	member.Available = member.Connectivity == "online"
+
 	if view.Status != nil && view.Status.Volume != nil {
 		volume := view.Status.Volume.ActualVolume
 		member.ActualVolume = &volume
