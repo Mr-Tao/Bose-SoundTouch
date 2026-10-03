@@ -126,7 +126,12 @@ func TestBassCapabilityChangeDuringPostMakesOutcomeUnverified(t *testing.T) {
 	if writes.Load() != 1 {
 		t.Fatalf("POST count=%d, want exactly one uncertain mutation", writes.Load())
 	}
-	if status := conn.Status(); status.BassCapabilities != newCapabilities || status.BassCapabilities == oldCapabilities {
+	if status := conn.Status(); status.BassCapabilities == nil || status.BassCapabilities == oldCapabilities ||
+		status.BassCapabilities.DeviceID != newCapabilities.DeviceID ||
+		status.BassCapabilities.BassAvailable != newCapabilities.BassAvailable ||
+		status.BassCapabilities.BassMin != newCapabilities.BassMin ||
+		status.BassCapabilities.BassMax != newCapabilities.BassMax ||
+		status.BassCapabilities.BassDefault != newCapabilities.BassDefault {
 		t.Fatalf("post-write path restored stale capabilities: %+v", status.BassCapabilities)
 	}
 
