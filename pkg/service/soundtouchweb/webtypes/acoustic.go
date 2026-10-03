@@ -265,3 +265,50 @@ func (c *DeviceConnection) ApplyBalanceRead(
 func confirmedPairMaster(deviceID string, group *models.Group) bool {
 	return validStereoPair(group) && strings.TrimSpace(group.MasterDeviceID) == strings.TrimSpace(deviceID)
 }
+
+// ReserveBassWrite checks capability authority at mutation admission and
+// invalidates older reads without holding the field lock over network I/O.
+func (c *DeviceConnection) ReserveBassWrite(capabilities *models.BassCapabilities) bool {
+	c.fieldGenMu.Lock()
+	defer c.fieldGenMu.Unlock()
+
+	if capabilities == nil || !capabilities.BassAvailable || c.Status().BassCapabilities != capabilities {
+		return false
+	}
+
+	c.fieldGen[FieldBass].issued++
+	c.fieldGen[FieldBass].applied = c.fieldGen[FieldBass].issued
+
+	return true
+}
+
+// ReserveBassRead binds a post-write reading to the capability authority the
+// operation admitted. A newer capability result is never recaptured silently.
+func (c *DeviceConnection) ReserveBassRead(capabilities *models.BassCapabilities) (uint64, bool) {
+	c.fieldGenMu.Lock()
+	defer c.fieldGenMu.Unlock()
+
+	if capabilities == nil || c.Status().BassCapabilities != capabilities {
+		return 0, false
+	}
+
+	c.fieldGen[FieldBass].issued++
+
+	return c.fieldGen[FieldBass].issued, true
+}
+
+// CompleteBassRead merges only the bass reading, never its cached capability
+// snapshot, while the admitted capability authority and generation still hold.
+func (c *DeviceConnection) CompleteBassRead(generation uint64, capabilities *models.BassCapabilities, bass *models.Bass) bool {
+	c.fieldGenMu.Lock()
+	defer c.fieldGenMu.Unlock()
+
+	if c.Status().BassCapabilities != capabilities || generation <= c.fieldGen[FieldBass].applied {
+		return false
+	}
+
+	c.updateStatusLocked(func(status *DeviceStatus) { status.Bass = bass; recordFieldRevision(status, FieldBass, generation) })
+	c.fieldGen[FieldBass].applied = generation
+
+	return true
+}

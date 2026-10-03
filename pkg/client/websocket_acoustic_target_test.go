@@ -179,7 +179,8 @@ func TestQueuedTargetBalanceHonorsContextCancellationBeforeFence(t *testing.T) {
 func TestTargetBalanceCancellationWhileSendWaitsForTransportLockDoesNotWrite(t *testing.T) {
 	f := newFakeSpeakerWS(t)
 	wsClient := f.connect(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	baseContext, cancel := context.WithCancel(context.Background())
+	ctx := &transportLockCancellationContext{Context: baseContext, preTransportCheck: make(chan struct{})}
 	defer cancel()
 
 	wsClient.writeMu.Lock()
@@ -190,9 +191,7 @@ func TestTargetBalanceCancellationWhileSendWaitsForTransportLockDoesNotWrite(t *
 		}
 	}()
 
-	sendEntered := make(chan struct{})
 	result := startTargetBalanceWrite(ctx, wsClient, func(send func() error) error {
-		close(sendEntered)
 		return send()
 	})
 	waitForPendingAcousticRequest(t, wsClient)
@@ -206,7 +205,7 @@ func TestTargetBalanceCancellationWhileSendWaitsForTransportLockDoesNotWrite(t *
 	}()
 	wsClient.writeMu.Unlock()
 	writeLocked = false
-	<-sendEntered
+	<-ctx.preTransportCheck
 
 	cancel()
 	wsClient.mu.Unlock()
@@ -327,4 +326,21 @@ func assertNoAcousticWrites(t *testing.T, f *fakeSpeakerWS) {
 	if requests := f.recordedRequests(); len(requests) != 0 {
 		t.Fatalf("recorded %d WebSocket requests, want zero: %v", len(requests), requests)
 	}
+}
+
+// Capture the successful pre-lock check before releasing the test thread.
+// Cancellation then cannot be caught by either earlier Err call, so rejecting
+// the write requires the subsequent check under the transport lock.
+type transportLockCancellationContext struct {
+	context.Context
+	checks            atomic.Int32
+	preTransportCheck chan struct{}
+}
+
+func (c *transportLockCancellationContext) Err() error {
+	err := c.Context.Err()
+	if c.checks.Add(1) == 2 {
+		close(c.preTransportCheck)
+	}
+	return err
 }

@@ -237,15 +237,9 @@ func (app *WebApp) runBassControl(
 		return
 	}
 
-	capabilities := conn.Status().BassCapabilities
-	if capabilities == nil {
-		var err error
-
-		capabilities, err = conn.Client.GetBassCapabilities()
-		if err != nil {
-			operation.fail(http.StatusBadGateway, fmt.Sprintf("Bass capability is unverified: %v", err))
-			return
-		}
+	capabilities, admitted := app.admitBassCapabilities(controlID, conn, expectedDeviceID, operation)
+	if !admitted {
+		return
 	}
 
 	if err := validBassCapabilities(capabilities, expectedDeviceID); err != nil {
@@ -261,13 +255,19 @@ func (app *WebApp) runBassControl(
 		return
 	}
 
-	current, writeErr := app.writeBassForTarget(controlID, conn, expectedDeviceID, requested)
+	current, writeErr := app.writeBassForTarget(controlID, conn, expectedDeviceID, requested, capabilities)
 	if !current {
-		operation.fail(http.StatusConflict, "Device registration changed")
+		operation.fail(http.StatusConflict, "Device registration or bass capabilities changed")
 		return
 	}
 
-	generation := conn.BeginFieldPoll(webtypes.FieldBass)
+	generation, current := conn.ReserveBassRead(capabilities)
+	if !current {
+		app.refreshBass(controlID, conn)
+		operation.fail(http.StatusConflict, "Bass capabilities changed during the write; outcome is unverified")
+
+		return
+	}
 
 	bass, readErr := conn.Client.GetBass()
 	if readErr != nil || validBassReadback(bass, capabilities, expectedDeviceID) != nil {
@@ -291,10 +291,7 @@ func (app *WebApp) runBassControl(
 	}
 
 	applied := app.applyAcousticRead(controlID, conn, expectedDeviceID, func() bool {
-		return conn.CompleteFieldPoll(webtypes.FieldBass, generation, func(status *webtypes.DeviceStatus) {
-			status.BassCapabilities = capabilities
-			status.Bass = bass
-		})
+		return conn.CompleteBassRead(generation, capabilities, bass)
 	})
 	if !applied {
 		operation.fail(http.StatusConflict, "A newer bass readback superseded this update")
@@ -491,7 +488,7 @@ func uint64Pointer(value uint64) *uint64 { return &value }
 
 // writeBassForTarget holds registry identity through physical verification and
 // the one HTTP mutation. Removal cannot replace the target during the write.
-func (app *WebApp) writeBassForTarget(controlID string, conn *webtypes.DeviceConnection, hardwareID string, requested int) (bool, error) {
+func (app *WebApp) writeBassForTarget(controlID string, conn *webtypes.DeviceConnection, hardwareID string, requested int, capabilities *models.BassCapabilities) (bool, error) {
 	app.devicesMu.RLock()
 	defer app.devicesMu.RUnlock()
 
@@ -510,7 +507,9 @@ func (app *WebApp) writeBassForTarget(controlID string, conn *webtypes.DeviceCon
 		return false, err
 	}
 
-	conn.InvalidateField(webtypes.FieldBass)
+	if !conn.ReserveBassWrite(capabilities) {
+		return false, nil
+	}
 
 	return true, conn.Client.SetBass(requested)
 }
@@ -544,4 +543,35 @@ func (app *WebApp) confirmBalanceReadback(ctx context.Context, controlID string,
 	}
 
 	return readback, revision, applied
+}
+
+func (app *WebApp) admitBassCapabilities(controlID string, conn *webtypes.DeviceConnection, expectedDeviceID string, operation *acousticControlOperation) (*models.BassCapabilities, bool) {
+	capabilities := conn.Status().BassCapabilities
+	if capabilities == nil {
+		generation := conn.BeginFieldPoll(webtypes.FieldBass)
+
+		var err error
+
+		capabilities, err = conn.Client.GetBassCapabilities()
+		if err != nil {
+			operation.fail(http.StatusBadGateway, fmt.Sprintf("Bass capability is unverified: %v", err))
+			return nil, false
+		}
+
+		if validBassCapabilities(capabilities, expectedDeviceID) == nil {
+			accepted := app.applyAcousticRead(controlID, conn, expectedDeviceID, func() bool {
+				return conn.CompleteFieldPoll(webtypes.FieldBass, generation, func(status *webtypes.DeviceStatus) {
+					status.BassCapabilities = capabilities
+				})
+			})
+			if !accepted {
+				operation.fail(http.StatusConflict, "Bass capabilities changed during admission")
+				return nil, false
+			}
+
+			operation.broadcast = true
+		}
+	}
+
+	return capabilities, true
 }
