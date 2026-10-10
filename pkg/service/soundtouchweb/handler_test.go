@@ -443,6 +443,12 @@ func TestHandleAPIControl_VolumeValidation(t *testing.T) {
 
 func TestHandleAPIControl_BassValidation(t *testing.T) {
 	app := createTestApp()
+	speaker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<bassCapabilities><bassAvailable>true</bassAvailable><bassMin>-9</bassMin><bassMax>0</bassMax><bassDefault>0</bassDefault></bassCapabilities>`))
+	}))
+	defer speaker.Close()
+	device, _ := app.GetDevice("test-device")
+	device.Client = client.NewClient(&client.Config{Host: speaker.URL})
 
 	tests := []struct {
 		name           string

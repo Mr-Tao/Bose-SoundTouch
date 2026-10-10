@@ -978,17 +978,28 @@ func (app *WebApp) handleBassControl(w http.ResponseWriter, r *http.Request, dev
 		return
 	}
 
-	if bassReq.Level < -9 || bassReq.Level > 9 {
-		app.sendError(w, "Bass must be between -9 and 9", http.StatusBadRequest)
-		return
-	}
-
 	if device.Client == nil {
 		app.sendError(w, "Device client not available", http.StatusInternalServerError)
 		return
 	}
 
-	err := device.Client.SetBass(bassReq.Level)
+	capabilities, err := device.LoadBassCapabilities()
+	if err != nil {
+		app.sendError(w, "Cannot read bass capabilities: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	if !capabilities.IsBassSupported() {
+		app.sendError(w, "Bass control is unavailable on this speaker", http.StatusConflict)
+		return
+	}
+
+	if !capabilities.ValidateLevel(bassReq.Level) {
+		app.sendError(w, fmt.Sprintf("Bass must be between %d and %d", capabilities.BassMin, capabilities.BassMax), http.StatusBadRequest)
+		return
+	}
+
+	err = device.Client.SetBass(bassReq.Level)
 	app.sendControlResponse(w, err, fmt.Sprintf("Bass set to %d", bassReq.Level))
 }
 
