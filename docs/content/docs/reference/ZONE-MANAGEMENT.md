@@ -15,6 +15,37 @@ Zone management allows you to:
 
 All SoundTouch devices that support multiroom functionality can participate in zones, with one device acting as the master and others as members.
 
+## Player volume controls
+
+The embedded player's zone-detail slider moves every logical member by the
+same absolute delta, clamped to `0..100`. Expanded members have individual
+sliders. A stereo pair contributes one logical volume and receives one write
+through its confirmed firmware master.
+
+The baseline is the loudest available member in the cached projection.
+Clamping at 0 or 100 loses that member's original offset; a later adjustment
+uses the current volumes rather than restoring the old offset.
+
+The player control API exposes these POST routes:
+
+- `/api/control/devices/{id}/zone/volume/{volume}` changes the logical group.
+- `/api/control/devices/{id}/zone/member/{memberId}/volume/{volume}` changes
+  one logical member.
+
+Each response includes `data.partial` and a `data.members` result list with
+the requested target, accepted actual volume, any member error, and a
+`status`: `confirmed`, `unverified`, or `failed`. Matching parsed target volume
+confirms the request even while actual volume ramps. Missing, mismatched,
+or obsolete confirmation and uncertain transport are unverified, not failed.
+Each member receives one write and at most one best-effort readback, without
+retries or write replay. Newer events or topology invalidate older cache merges.
+
+Any confirmed or unverified member yields HTTP 200 and `success: true`;
+`partial` is true unless all members confirm. Total definitive failure yields
+HTTP 502 and `success: false`, retaining member results. A prewrite topology
+conflict yields HTTP 409. Direct single-speaker routes retain their existing
+write-only behavior.
+
 ## Quick Start
 
 ### Basic Zone Operations
