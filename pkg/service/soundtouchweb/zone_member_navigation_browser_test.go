@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -110,6 +111,56 @@ func TestZoneMemberNavigationFollowsSiblingsAndRetracesBack(t *testing.T) {
 	}
 }
 
+func TestZoneMemberLeaveShowsErrorAfterTopologyEventWithoutDoubleWrite(t *testing.T) {
+	app := newZoneMemberNavigationApp(t)
+	server, mutations := newZoneMemberNavigationServer(t, app)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	mutations.beforeLeave = func() { close(started); <-release }
+	ctx := newHeadlessChromeContext(t)
+	var sameDocument bool
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(server.URL+"/app"),
+		chromedp.WaitVisible(".zone-card", chromedp.ByQuery),
+		chromedp.Click(".zone-card", chromedp.ByQuery),
+		chromedp.WaitVisible(".zone-member-details > summary", chromedp.ByQuery),
+		chromedp.Click(".zone-member-details > summary", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open zone: %v", err)
+	}
+	openZoneMemberAndWait(t, ctx, "Breakfast Room", `Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Leave zone')`)
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__zoneDocument = true; const b = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Leave zone'); b.click(); b.click();`, nil),
+		chromedp.Poll(`Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Leave zone' && b.disabled)`, nil),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			select {
+			case <-started:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			master, _ := app.GetDevice(zoneNavigationMaster)
+			master.UpdateStatus(func(status *webtypes.DeviceStatus) {
+				members := append([]models.Member(nil), status.Zone.Members...)
+				members = append(members, models.Member{DeviceID: "CANDIDATE", IP: zoneNavigationCandidate})
+				status.Zone = &models.ZoneInfo{Master: status.Zone.Master, Members: members}
+			})
+			app.BroadcastDeviceList()
+			return nil
+		}),
+		chromedp.Poll(`!!document.querySelector('.zone-section button[aria-label="Open details for Library"]')`, nil),
+		chromedp.ActionFunc(func(context.Context) error { releaseOnce.Do(func() { close(release) }); return nil }),
+		chromedp.Poll(`document.querySelector('[role="alert"]')?.textContent.includes('leave rejected')`, nil),
+		chromedp.Evaluate(`window.__zoneDocument === true`, &sameDocument),
+	); err != nil {
+		t.Fatalf("leave zone: %v", err)
+	}
+	if !sameDocument || mutations.Load() != 1 || mutations.request.Load() != "/api/control/devices/"+zoneNavigationMember+"/zone/leave" {
+		t.Fatalf("same document=%v mutations=%d path=%v", sameDocument, mutations.Load(), mutations.request.Load())
+	}
+}
+
 func openZoneMemberAndWait(t *testing.T, ctx context.Context, name, condition string) {
 	t.Helper()
 
@@ -197,7 +248,13 @@ func addZoneNavigationDevice(
 	}
 }
 
-func newZoneMemberNavigationServer(t *testing.T, app *WebApp) (*httptest.Server, *atomic.Int32) {
+type zoneNavigationMutations struct {
+	atomic.Int32
+	request     atomic.Value
+	beforeLeave func()
+}
+
+func newZoneMemberNavigationServer(t *testing.T, app *WebApp) (*httptest.Server, *zoneNavigationMutations) {
 	t.Helper()
 
 	projection := app.deviceViewSnapshot()
@@ -206,7 +263,7 @@ func newZoneMemberNavigationServer(t *testing.T, app *WebApp) (*httptest.Server,
 		t.Fatalf("unexpected zone projection: %+v", zone)
 	}
 
-	mutations := &atomic.Int32{}
+	mutations := &zoneNavigationMutations{}
 	router := chi.NewRouter()
 	app.MountWeb(router, nil)
 
@@ -214,9 +271,17 @@ func newZoneMemberNavigationServer(t *testing.T, app *WebApp) (*httptest.Server,
 		path := strings.TrimSuffix(r.URL.Path, "/")
 		if r.Method == http.MethodPost && strings.Contains(path, "/zone/") {
 			mutations.Add(1)
+			mutations.request.Store(path)
 		}
 
 		switch {
+		case r.Method == http.MethodPost && path == "/api/control/devices/"+zoneNavigationMember+"/zone/leave":
+			if mutations.beforeLeave != nil {
+				mutations.beforeLeave()
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			writeZoneNavigationJSON(w, webtypes.APIResponse{Success: false, Error: "leave rejected"})
 		case r.Method == http.MethodGet && path == "/api/control/devices/"+zoneNavigationMaster+"/zone":
 			writeZoneNavigationJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
 				"masterIp":            zone.MasterControlID,
