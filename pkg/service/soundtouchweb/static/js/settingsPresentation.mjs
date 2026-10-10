@@ -5,6 +5,7 @@ export const SETTINGS_SECTION_ORDER = [
     'sync',
     'bluetooth',
     'sources',
+    'network',
     'wifiOnboarding',
 ];
 
@@ -106,6 +107,36 @@ export function withPendingView(snapshot, pending) {
     return view;
 }
 
+export function networkInterfaceGroups(network) {
+    const interfaces = Array.isArray(network?.interfaces) ? network.interfaces : [];
+    const isConnected = item => item.state === 'NETWORK_WIFI_CONNECTED'
+        || item.state === 'NETWORK_ETHERNET_CONNECTED';
+    return {
+        connected: interfaces.filter(isConnected),
+        disconnected: interfaces.filter(item => !isConnected(item)),
+    };
+}
+
+export function networkInterfaceName(item, technical = false) {
+    if (item.type === 'WIFI_INTERFACE') {
+        if (technical) return item.name ? `Wi-Fi interface · ${item.name}` : 'Wi-Fi interface';
+        return item.ssid ? `Wi-Fi · ${item.ssid}` : 'Wi-Fi';
+    }
+    if (item.type === 'ETHERNET_INTERFACE') {
+        if (technical) return item.name ? `Ethernet interface · ${item.name}` : 'Ethernet interface';
+        return 'Ethernet';
+    }
+    return item.name || item.type || 'Network interface';
+}
+
+export function networkInterfaceSummary(item, technical = false) {
+    if (technical) {
+        return [item.state?.endsWith('_DISCONNECTED') ? 'Disconnected' : 'Not connected',
+            item.ipAddress, item.band].filter(Boolean).join(' · ');
+    }
+    return [item.ipAddress || 'IP not reported', item.band].filter(Boolean).join(' · ');
+}
+
 export function settingsSections(snapshot) {
     const support = snapshot?.support || {};
     const errors = snapshot?.errors;
@@ -121,6 +152,7 @@ export function settingsSections(snapshot) {
         ) || hasError(errors, ['bluetooth', 'bluetoothPair', 'bluetoothClear']),
         sources: Boolean(support.sourceNaming && snapshot?.sources?.length) ||
             hasError(errors, ['sources', 'sourceNaming']),
+        network: snapshot?.network != null || hasError(errors, ['network']),
         wifiOnboarding: Boolean(support.wifiOnboarding && snapshot?.onboardingUrl),
     };
 

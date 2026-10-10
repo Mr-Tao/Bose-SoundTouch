@@ -167,6 +167,20 @@ type settingsSource struct {
 	DisplayName   string `json:"displayName"`
 }
 
+type settingsNetworkInterface struct {
+	Type              string `json:"type"`
+	Name              string `json:"name,omitempty"`
+	IPAddress         string `json:"ipAddress,omitempty"`
+	SSID              string `json:"ssid,omitempty"`
+	Band              string `json:"band,omitempty"`
+	State             string `json:"state,omitempty"`
+	SignalDescription string `json:"signalDescription,omitempty"`
+}
+
+type settingsNetwork struct {
+	Interfaces []settingsNetworkInterface `json:"interfaces"`
+}
+
 type deviceSettingsSnapshot struct {
 	TargetIdentity string                 `json:"targetIdentity"`
 	Support        settingsSupport        `json:"support"`
@@ -177,6 +191,7 @@ type deviceSettingsSnapshot struct {
 	Sync           *settingsSync          `json:"sync,omitempty"`
 	Bluetooth      *settingsBluetooth     `json:"bluetooth,omitempty"`
 	Sources        []settingsSource       `json:"sources,omitempty"`
+	Network        *settingsNetwork       `json:"network,omitempty"`
 	OnboardingURL  string                 `json:"onboardingUrl,omitempty"`
 	Errors         map[string]string      `json:"errors,omitempty"`
 }
@@ -531,6 +546,46 @@ func readBluetoothDeviceSetting(
 	return nil
 }
 
+func readNetworkDeviceSetting(
+	device *webtypes.DeviceConnection,
+	supportedURLs *models.SupportedURLsResponse,
+	snapshot *deviceSettingsSnapshot,
+) {
+	if !supportedURLs.HasURL("/networkInfo") {
+		return
+	}
+
+	value, err := device.Client.GetNetworkInfo()
+	if err != nil {
+		snapshot.Errors["network"] = err.Error()
+
+		return
+	}
+
+	interfaces := value.GetInterfaces()
+	network := &settingsNetwork{Interfaces: make([]settingsNetworkInterface, 0, len(interfaces))}
+
+	for index := range interfaces {
+		iface := &interfaces[index]
+
+		projected := settingsNetworkInterface{
+			Type:      iface.Type,
+			Name:      iface.Name,
+			IPAddress: iface.IPAddress,
+			SSID:      iface.SSID,
+			Band:      iface.GetFrequencyBand(),
+			State:     iface.State,
+		}
+		if iface.IsWiFi() && iface.IsConnected() && iface.Signal != "" {
+			projected.SignalDescription = iface.GetSignalDescription()
+		}
+
+		network.Interfaces = append(network.Interfaces, projected)
+	}
+
+	snapshot.Network = network
+}
+
 func readDeviceSettingsMetadata(
 	device *webtypes.DeviceConnection,
 	targetIdentity string,
@@ -611,6 +666,8 @@ func (app *WebApp) readDeviceSettings(
 	if snapshot.Support.WiFiOnboarding && app.OnboardingURL != "" {
 		snapshot.OnboardingURL = app.OnboardingURL
 	}
+
+	readNetworkDeviceSetting(device, supportedURLs, snapshot)
 
 	if len(snapshot.Errors) == 0 {
 		snapshot.Errors = nil

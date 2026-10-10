@@ -493,10 +493,21 @@ func TestNetworkInterface_SignalQuality(t *testing.T) {
 			expectedDesc:    "Fair",
 		},
 		{
+			name:            "Marginal signal",
+			signal:          SignalMarginal,
+			expectedQuality: 40,
+			expectedDesc:    "Marginal",
+		},
+		{
 			name:            "Poor signal",
 			signal:          SignalPoor,
 			expectedQuality: 30,
 			expectedDesc:    "Poor",
+		},
+		{
+			name:            "Missing signal",
+			expectedQuality: 0,
+			expectedDesc:    "Unknown",
 		},
 		{
 			name:            "Unknown signal",

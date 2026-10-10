@@ -525,6 +525,92 @@ func TestSettingsNarrowTouchAndKeyboardContract(t *testing.T) {
 	}
 }
 
+func TestSettingsNetworkDiagnosticsBrowserContract(t *testing.T) {
+	app := NewWebApp()
+	router := chi.NewRouter()
+	app.Mount(router, nil)
+
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+
+	ctx := newHeadlessChromeContext(t)
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(server.URL+"/app"),
+		chromedp.WaitVisible(`.nav-discover-icon`, chromedp.ByQuery),
+		chromedp.Evaluate(`(async () => {
+            const [{ Settings }, { api }, { h, render }] = await Promise.all([
+                import('/app/static/js/components/Settings.js'),
+                import('/app/static/js/api.js'),
+                import('/app/static/lib/preact.module.js'),
+            ]);
+            const originalSettings = api.settings;
+            const root = document.createElement('div');
+            document.body.append(root);
+            try {
+                api.settings = async () => ({ success: true, data: {
+                    targetIdentity: 'network-physical',
+                    support: { wifiOnboarding: true }, onboardingUrl: '/setup/',
+                    network: { interfaces: [
+                        { type: 'WIFI_INTERFACE', ssid: 'Test WiFi', ipAddress: '192.0.2.10',
+                          band: '5GHz', state: 'NETWORK_WIFI_CONNECTED', signalDescription: 'Poor' },
+                        { type: 'ETHERNET_INTERFACE', ipAddress: '192.0.2.12',
+                          state: 'NETWORK_ETHERNET_CONNECTED' },
+                        { type: 'WIFI_INTERFACE', state: 'NETWORK_WIFI_CONNECTED' },
+                        { type: 'WIFI_INTERFACE', state: 'NETWORK_WIFI_CONNECTED',
+                          signalDescription: 'Unknown' },
+                        { type: 'WIFI_INTERFACE', name: 'wlan1',
+                          state: 'NETWORK_WIFI_DISCONNECTED' },
+                        { type: 'ETHERNET_INTERFACE', name: 'eth1',
+                          state: 'NETWORK_ETHERNET_DISCONNECTED' },
+                    ] },
+                } });
+                render(h(Settings, { deviceId: 'network-target', targetIdentity: 'network-physical' }), root);
+                await new Promise(resolve => setTimeout(resolve, 0));
+                const settings = root.querySelector('details.settings-section');
+                settings.open = true;
+                settings.dispatchEvent(new Event('toggle'));
+                for (let attempt = 0; attempt < 100 && !root.querySelector('.settings-network-primary'); attempt++) {
+                    await new Promise(resolve => setTimeout(resolve, 10));
+                }
+                const rows = root.querySelectorAll('.settings-network-primary > .settings-network-row');
+                if (rows.length !== 4 || rows[0].querySelector('strong').textContent.trim() !== 'Wi-Fi · Test WiFi' ||
+                    rows[0].querySelector('span').textContent.trim() !== '192.0.2.10 · 5GHz' ||
+                    rows[1].querySelector('strong').textContent.trim() !== 'Ethernet' ||
+                    rows[1].querySelector('span').textContent.trim() !== '192.0.2.12') {
+                    throw new Error('connected type, IP and band are not primary');
+                }
+                if (rows[0].querySelector('p')?.textContent.trim() !== 'Signal reported by the speaker: Poor' ||
+                    rows[1].querySelector('p') || rows[2].querySelector('p') ||
+                    rows[3].querySelector('p')?.textContent.trim() !== 'Signal reported by the speaker: Unknown' ||
+                    /dbm|rssi|percentage|fallback|conflict/i.test(root.textContent)) {
+                    throw new Error('signal labels were invented or presented as measurements');
+                }
+                const technical = root.querySelector('.settings-network-technical');
+                if (!technical || technical.open || technical.querySelector('summary').textContent !== 'Technical details' ||
+                    technical.querySelectorAll('.settings-network-row').length !== 2 ||
+                    !technical.textContent.includes('wlan1') || !technical.textContent.includes('eth1')) {
+                    throw new Error('disconnected adapters are not hidden in technical detail');
+                }
+                technical.open = true;
+                if (!technical.querySelector('.settings-network-row').textContent.includes('Disconnected')) {
+                    throw new Error('technical details lost the adapter state');
+                }
+                const setup = root.querySelector('a.settings-command-link');
+                if (!setup || setup.getAttribute('href') !== '/setup/' ||
+                    setup.getAttribute('target') !== '_blank' || setup.getAttribute('rel') !== 'noopener') {
+                    throw new Error('Wi-Fi onboarding changed');
+                }
+            } finally {
+                render(null, root);
+                root.remove();
+                api.settings = originalSettings;
+            }
+        })()`, nil, awaitPromise),
+	); err != nil {
+		t.Fatalf("settings network browser contract: %v", err)
+	}
+}
+
 func TestSettingsReloadRereadsTheSpeaker(t *testing.T) {
 	app := NewWebApp()
 	router := chi.NewRouter()

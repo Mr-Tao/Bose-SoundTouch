@@ -50,6 +50,8 @@ type settingsSpeakerFixture struct {
 	languageReadFail      bool
 	syncReadFail          bool
 	sourcesReadFail       bool
+	networkXML            string
+	networkReadFail       bool
 	infoStarted           chan struct{}
 	infoRelease           chan struct{}
 
@@ -61,6 +63,7 @@ type settingsSpeakerFixture struct {
 	infoGets            atomic.Int32
 	clearGets           atomic.Int32
 	capabilityGets      atomic.Int32
+	netStatsGets        atomic.Int32
 	pairingGets         atomic.Int32
 	pairingReads        atomic.Int32
 	capabilityFailAfter int32
@@ -130,6 +133,9 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 			}
 		case "/supportedURLs":
 			locations := []string{"/sources"}
+			if fixture.networkXML != "" || fixture.networkReadFail {
+				locations = append(locations, "/networkInfo", "/netStats")
+			}
 			if advertiseSettings {
 				locations = append(locations,
 					"/clockDisplay", "/clockTime", "/systemtimeout", "/language",
@@ -147,6 +153,16 @@ func newSettingsSpeakerFixture(t *testing.T, advertiseSettings bool) *settingsSp
 				_, _ = fmt.Fprintf(w, `<URL location="%s"/>`, location)
 			}
 			_, _ = io.WriteString(w, `</supportedURLs>`)
+		case "/networkInfo":
+			if fixture.networkReadFail {
+				http.Error(w, "network unavailable", http.StatusServiceUnavailable)
+
+				return
+			}
+			_, _ = io.WriteString(w, fixture.networkXML)
+		case "/netStats":
+			fixture.netStatsGets.Add(1)
+			http.NotFound(w, r)
 		case "/sources":
 			if fixture.sourcesReadFail {
 				http.Error(w, "sources unavailable", http.StatusInternalServerError)
@@ -436,6 +452,78 @@ func TestHandleGetDeviceSettingsProjectsOnlyAdvertisedControls(t *testing.T) {
 	}
 	if strings.Contains(responseBody, `"network"`) {
 		t.Fatalf("excluded network diagnostics were projected: %s", responseBody)
+	}
+}
+
+func TestHandleGetDeviceSettingsProjectsNetworkInfo(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		signal string
+		want   string
+	}{
+		{name: "poor", signal: models.SignalPoor, want: "Poor"},
+		{name: "marginal", signal: models.SignalMarginal, want: "Marginal"},
+		{name: "missing"},
+		{name: "unknown", signal: "FUTURE_SIGNAL", want: "Unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSettingsSpeakerFixture(t, true)
+			fixture.networkXML = fmt.Sprintf(`<networkInfo><interfaces>
+<interface type="WIFI_INTERFACE" name="wlan0" ipAddress="192.0.2.10" ssid="Test WiFi" frequencyKHz="5180000" state="NETWORK_WIFI_CONNECTED" signal="%s"/>
+<interface type="ETHERNET_INTERFACE" name="eth0" ipAddress="192.0.2.12" state="NETWORK_ETHERNET_CONNECTED"/>
+<interface type="WIFI_INTERFACE" name="wlan1" state="NETWORK_WIFI_DISCONNECTED" signal="EXCELLENT_SIGNAL"/>
+</interfaces></networkInfo>`, test.signal)
+			app := settingsTestApp(fixture)
+			recorder := httptest.NewRecorder()
+
+			app.HandleGetDeviceSettings(recorder, settingsRequest(http.MethodGet, "/api/control/devices/speaker/settings", ""))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+
+			snapshot := decodeSettingsResponse(t, recorder).Data
+			if snapshot.Network == nil || len(snapshot.Network.Interfaces) != 3 {
+				t.Fatalf("network = %+v", snapshot.Network)
+			}
+
+			interfaces := snapshot.Network.Interfaces
+			if interfaces[0].Type != models.InterfaceTypeWiFi || interfaces[0].IPAddress != "192.0.2.10" ||
+				interfaces[0].SSID != "Test WiFi" || interfaces[0].Band != "5GHz" ||
+				interfaces[0].State != models.StateWiFiConnected || interfaces[0].SignalDescription != test.want {
+				t.Fatalf("Wi-Fi = %+v, want signal %q", interfaces[0], test.want)
+			}
+			if interfaces[1].Type != models.InterfaceTypeEthernet || interfaces[1].State != models.StateEthernetConnected ||
+				interfaces[1].IPAddress != "192.0.2.12" || interfaces[1].SignalDescription != "" {
+				t.Fatalf("Ethernet = %+v", interfaces[1])
+			}
+			if interfaces[2].Name != "wlan1" || interfaces[2].State != models.StateWiFiDisconnected ||
+				interfaces[2].SignalDescription != "" {
+				t.Fatalf("disconnected adapter = %+v", interfaces[2])
+			}
+			if fixture.netStatsGets.Load() != 0 {
+				t.Fatal("Settings requested /netStats")
+			}
+			if !snapshot.Support.Bluetooth || !snapshot.Support.WiFiOnboarding || snapshot.OnboardingURL != "/setup/" {
+				t.Fatalf("existing settings changed: %+v", snapshot)
+			}
+		})
+	}
+}
+
+func TestHandleGetDeviceSettingsNetworkReadError(t *testing.T) {
+	fixture := newSettingsSpeakerFixture(t, true)
+	fixture.networkReadFail = true
+	app := settingsTestApp(fixture)
+	recorder := httptest.NewRecorder()
+
+	app.HandleGetDeviceSettings(recorder, settingsRequest(http.MethodGet, "/api/control/devices/speaker/settings", ""))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	snapshot := decodeSettingsResponse(t, recorder).Data
+	if snapshot.Network != nil || snapshot.Errors["network"] == "" || snapshot.ClockDisplay == nil {
+		t.Fatalf("network error affected other settings: %+v", snapshot)
 	}
 }
 

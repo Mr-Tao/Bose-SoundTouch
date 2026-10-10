@@ -549,6 +549,18 @@ Retrieves network information.
 </networkInfo>
 ```
 
+`GetNetworkInfo()` exposes every reported adapter. In the player's Settings,
+connected interfaces are the primary paths (type, IP address, and Wi-Fi band);
+disconnected adapters appear under Technical details. Wi-Fi setup remains a
+separate workflow.
+
+The `signal` categories are `EXCELLENT_SIGNAL`, `GOOD_SIGNAL`, `FAIR_SIGNAL`,
+`MARGINAL_SIGNAL`, and `POOR_SIGNAL`. Settings displays them as, for example,
+"Signal reported by the speaker: Poor". These are topology-sensitive firmware
+labels, not physical dBm measurements. An absent signal is omitted; an
+unrecognized signal is displayed as Unknown. The library's `GetSignalQuality()`
+is only a synthetic category score, not a measured percentage.
+
 ### GET /capabilities ✅ **Implemented**
 Retrieves device capabilities.
 
