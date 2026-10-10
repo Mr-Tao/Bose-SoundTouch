@@ -731,6 +731,29 @@ img { display: block; max-width: 100%; }
     overflow-wrap: anywhere;
 }
 .settings-source-row input { width: 100%; }
+.settings-network-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .5rem;
+    padding: .45rem 0;
+    border-top: 1px solid var(--border);
+    font-size: .82rem;
+    overflow-wrap: anywhere;
+}
+.settings-network-row:first-child { border-top: 0; }
+.settings-network-row > span { color: var(--text-dim); }
+.settings-network-row > p { flex-basis: 100%; margin: 0; color: var(--text-dim); }
+.settings-network-technical { margin-top: .45rem; border-top: 1px solid var(--border); }
+.settings-network-technical > summary {
+    min-height: 44px;
+    padding: .65rem 0;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: .78rem;
+    font-weight: 600;
+}
 @media (max-width: 520px) {
     .settings-field { grid-template-columns: 1fr; gap: .25rem; padding: .25rem 0; }
     .settings-field select { width: 100%; }

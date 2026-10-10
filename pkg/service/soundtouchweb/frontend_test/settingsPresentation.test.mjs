@@ -6,6 +6,9 @@ import {
     clockDisplayPatch,
     deviceSettingsTarget,
     deviceSettingsTitle,
+    networkInterfaceGroups,
+    networkInterfaceName,
+    networkInterfaceSummary,
     settingsSections,
     withPendingView,
 } from '../static/js/settingsPresentation.mjs';
@@ -36,6 +39,42 @@ test('settings sections follow the stable presentation order', () => {
         'sources',
         'wifiOnboarding',
     ]);
+});
+
+test('connected network paths stay separate from disconnected adapters', () => {
+    const wifi = {
+        type: 'WIFI_INTERFACE', ssid: 'Test WiFi', ipAddress: '192.0.2.10',
+        band: '5GHz', state: 'NETWORK_WIFI_CONNECTED', signalDescription: 'Poor',
+    };
+    const ethernet = {
+        type: 'ETHERNET_INTERFACE', ipAddress: '192.0.2.12', state: 'NETWORK_ETHERNET_CONNECTED',
+    };
+    const disconnected = {
+        type: 'WIFI_INTERFACE', name: 'wlan1', state: 'NETWORK_WIFI_DISCONNECTED',
+    };
+    const unknown = { type: 'ETHERNET_INTERFACE', name: 'eth1' };
+    const network = { interfaces: [disconnected, wifi, unknown, ethernet] };
+    assert.deepEqual(networkInterfaceGroups(network), {
+        connected: [wifi, ethernet], disconnected: [disconnected, unknown],
+    });
+    assert.equal(networkInterfaceName(wifi), 'Wi-Fi · Test WiFi');
+    assert.equal(networkInterfaceSummary(wifi), '192.0.2.10 · 5GHz');
+    assert.equal(networkInterfaceName(ethernet), 'Ethernet');
+    assert.equal(networkInterfaceSummary(ethernet), '192.0.2.12');
+    assert.equal(networkInterfaceName(disconnected, true), 'Wi-Fi interface · wlan1');
+    assert.equal(networkInterfaceSummary(disconnected, true), 'Disconnected');
+    assert.equal(networkInterfaceSummary(unknown, true), 'Not connected');
+    assert.equal(networkInterfaceSummary({}), 'IP not reported');
+    assert.deepEqual(networkInterfaceGroups(null), { connected: [], disconnected: [] });
+});
+
+test('network visibility does not replace Wi-Fi onboarding', () => {
+    assert.deepEqual(settingsSections({ network: { interfaces: [] } }), ['network']);
+    assert.deepEqual(settingsSections({ errors: { network: 'Read failed' } }), ['network']);
+    assert.deepEqual(settingsSections({
+        network: { interfaces: [] }, support: { wifiOnboarding: true }, onboardingUrl: '/setup/',
+    }), ['network', 'wifiOnboarding']);
+    assert.deepEqual(settingsSections({}), []);
 });
 
 test('ST20 clock readback exposes each supported control', () => {

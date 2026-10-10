@@ -53,6 +53,7 @@ const (
 	SignalExcellent = "EXCELLENT_SIGNAL"
 	SignalGood      = "GOOD_SIGNAL"
 	SignalFair      = "FAIR_SIGNAL"
+	SignalMarginal  = "MARGINAL_SIGNAL"
 	SignalPoor      = "POOR_SIGNAL"
 )
 
@@ -254,7 +255,8 @@ func (ni *NetworkInterface) HasWiFiInfo() bool {
 	return ni.SSID != "" || ni.FrequencyKHz > 0 || ni.Signal != ""
 }
 
-// GetSignalQuality returns a normalized signal quality percentage (0-100)
+// GetSignalQuality returns a synthetic score (0-100) for the speaker's category,
+// not a physical signal measurement.
 func (ni *NetworkInterface) GetSignalQuality() int {
 	switch ni.Signal {
 	case SignalExcellent:
@@ -263,6 +265,8 @@ func (ni *NetworkInterface) GetSignalQuality() int {
 		return 70
 	case SignalFair:
 		return 50
+	case SignalMarginal:
+		return 40
 	case SignalPoor:
 		return 30
 	default:
@@ -279,6 +283,8 @@ func (ni *NetworkInterface) GetSignalDescription() string {
 		return "Good"
 	case SignalFair:
 		return "Fair"
+	case SignalMarginal:
+		return "Marginal"
 	case SignalPoor:
 		return "Poor"
 	default:

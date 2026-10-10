@@ -6,6 +6,9 @@ import {
     clockControls,
     clockDisplayPatch,
     deviceSettingsTitle,
+    networkInterfaceGroups,
+    networkInterfaceName,
+    networkInterfaceSummary,
     settingsSections,
     withPendingView,
 } from '../settingsPresentation.mjs';
@@ -21,6 +24,7 @@ const SECTION_ERROR_KEYS = {
     // unverified clear, which the section's own result already shows.
     bluetooth: ['bluetooth', 'bluetoothPair'],
     sources: ['sources', 'sourceNaming'],
+    network: ['network'],
 };
 
 function errorText(error, fallback) {
@@ -289,6 +293,7 @@ export function Settings({ deviceId, targetIdentity = '', targetName = '', targe
     const shown = busy ? withPendingView(snapshot, pendingView) : snapshot;
     const clock = shown?.clockDisplay || {};
     const clockControl = clockControls(snapshot);
+    const networkInterfaces = networkInterfaceGroups(snapshot?.network);
     const browserTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
     function updateClockDisplay(field, value, fallback) {
@@ -531,6 +536,38 @@ export function Settings({ deviceId, targetIdentity = '', targetName = '', targe
                                 />
                             `)}
                         </div>
+                    </section>
+                ` : null}
+
+                ${sections.includes('network') ? html`
+                    <section class="settings-group">
+                        <h4>Network</h4>
+                        <${SectionErrors} snapshot=${snapshot} section="network" />
+                        <div class="settings-network-primary">
+                            ${networkInterfaces.connected.map((item, index) => html`
+                                <div class="settings-network-row" key=${index}>
+                                    <strong>${networkInterfaceName(item)}</strong>
+                                    <span>${networkInterfaceSummary(item)}</span>
+                                    ${item.signalDescription ? html`
+                                        <p>Signal reported by the speaker: ${item.signalDescription}</p>
+                                    ` : null}
+                                </div>
+                            `)}
+                        </div>
+                        ${snapshot.network && networkInterfaces.connected.length === 0 ? html`
+                            <p class="settings-value">No connected network interfaces were reported.</p>
+                        ` : null}
+                        ${networkInterfaces.disconnected.length > 0 ? html`
+                            <details class="settings-network-technical">
+                                <summary>Technical details</summary>
+                                ${networkInterfaces.disconnected.map((item, index) => html`
+                                    <div class="settings-network-row" key=${index}>
+                                        <strong>${networkInterfaceName(item, true)}</strong>
+                                        <span>${networkInterfaceSummary(item, true)}</span>
+                                    </div>
+                                `)}
+                            </details>
+                        ` : null}
                     </section>
                 ` : null}
 
