@@ -1674,7 +1674,12 @@ func (app *WebApp) HandleZoneAdd(w http.ResponseWriter, r *http.Request) {
 
 	zone, err := masterConn.Client.GetZone()
 	if err != nil {
-		app.sendError(w, err.Error(), http.StatusInternalServerError)
+		app.sendError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	if !zoneControlMaster(zone, masterHwID) {
+		app.sendError(w, "Device is not the current zone master", http.StatusConflict)
 		return
 	}
 
@@ -1712,6 +1717,16 @@ func currentSourceAllowsMultiroom(nowPlaying *models.NowPlaying, sources *models
 	return false
 }
 
+func zoneControlMaster(zone *models.ZoneInfo, deviceID string) bool {
+	if zone == nil || strings.TrimSpace(deviceID) == "" {
+		return false
+	}
+
+	master := strings.TrimSpace(zone.Master)
+
+	return master == strings.TrimSpace(deviceID) || (master == "" && len(zone.Members) == 0)
+}
+
 // HandleZoneRemove removes a slave from the zone.
 func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 	masterIP := chi.URLParam(r, "id")
@@ -1737,6 +1752,22 @@ func (app *WebApp) HandleZoneRemove(w http.ResponseWriter, r *http.Request) {
 	masterHwID := masterConn.DeviceInfo.DeviceID
 	slaveHwID := slaveConn.DeviceInfo.DeviceID
 
+	zone, err := masterConn.Client.GetZone()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	if !zoneControlMaster(zone, masterHwID) || masterHwID == slaveHwID {
+		app.sendError(w, "Device is not the current zone master", http.StatusConflict)
+		return
+	}
+
+	if !zone.IsMember(slaveHwID) {
+		app.sendError(w, "Device is not a current zone member", http.StatusConflict)
+		return
+	}
+
 	// Remove a single member with the dedicated /removeZoneSlave endpoint.
 	// Rebuilding the zone via /setZone with the remaining members does not
 	// reliably drop a member when the zone has more than one: the speaker only
@@ -1759,6 +1790,17 @@ func (app *WebApp) HandleZoneDissolve(w http.ResponseWriter, r *http.Request) {
 
 	if masterConn.Client == nil || masterConn.DeviceInfo == nil {
 		app.sendError(w, "Device not ready", http.StatusInternalServerError)
+		return
+	}
+
+	zone, err := masterConn.Client.GetZone()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	if !zoneControlMaster(zone, masterConn.DeviceInfo.DeviceID) {
+		app.sendError(w, "Device is not the current zone master", http.StatusConflict)
 		return
 	}
 
@@ -1788,7 +1830,12 @@ func (app *WebApp) HandleZoneLeave(w http.ResponseWriter, r *http.Request) {
 
 	zone, err := slaveConn.Client.GetZone()
 	if err != nil {
-		app.sendError(w, err.Error(), http.StatusInternalServerError)
+		app.sendError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	if zone == nil || strings.TrimSpace(zone.Master) == "" || zone.Master == slaveConn.DeviceInfo.DeviceID {
+		app.sendError(w, "Device is not a current zone member", http.StatusConflict)
 		return
 	}
 
@@ -1801,6 +1848,17 @@ func (app *WebApp) HandleZoneLeave(w http.ResponseWriter, r *http.Request) {
 	masterConn, ok := app.GetDevice(masterIP)
 	if !ok || masterConn.Client == nil {
 		app.sendError(w, "Master device not available", http.StatusInternalServerError)
+		return
+	}
+
+	masterZone, err := masterConn.Client.GetZone()
+	if err != nil {
+		app.sendError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	if !zoneControlMaster(masterZone, zone.Master) || !masterZone.IsMember(slaveConn.DeviceInfo.DeviceID) {
+		app.sendError(w, "Device is not a member of the current master zone", http.StatusConflict)
 		return
 	}
 
