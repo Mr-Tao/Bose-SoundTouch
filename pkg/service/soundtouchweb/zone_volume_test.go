@@ -444,9 +444,9 @@ func TestApplyVolumeTargetRejectsStaleGenerationsWithoutActual(t *testing.T) {
 
 	t.Run("volume generation invalidated during readback", func(t *testing.T) {
 		result := zoneVolumeMemberResult{}
-		atTarget, confirmed := app.applyVolumeTarget(&result, "192.0.2.30", conn, topology, nil, 40)
-		if atTarget || confirmed || result.Actual != nil || result.Status != volumeUnverified {
-			t.Fatalf("stale readback result = %+v, atTarget=%v confirmed=%v", result, atTarget, confirmed)
+		atTarget, cacheApplied := app.applyVolumeTarget(&result, "192.0.2.30", conn, topology, nil, 40)
+		if !atTarget || cacheApplied || result.Actual != nil || result.Status != volumeConfirmed {
+			t.Fatalf("matching stale readback result = %+v, atTarget=%v cacheApplied=%v", result, atTarget, cacheApplied)
 		}
 		if conn.Status().Volume.ActualVolume != 77 {
 			t.Fatalf("rejected readback replaced event cache: %+v", conn.Status().Volume)
