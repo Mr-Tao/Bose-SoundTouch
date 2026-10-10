@@ -13,6 +13,26 @@ import (
 	"time"
 )
 
+func TestGetVolumeKeepsPartialXMLCompatibility(t *testing.T) {
+	for _, body := range []string{
+		`<volume/>`,
+		`<volume><targetvolume>0</targetvolume></volume>`,
+		`<volume><actualvolume>0</actualvolume></volume>`,
+		`<volume><targetvolume/><actualvolume>0</actualvolume></volume>`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			volume, err := NewClientFromHost(server.URL).GetVolume()
+			if err != nil || volume == nil || volume.TargetVolume != 0 || volume.ActualVolume != 0 {
+				t.Fatalf("GetVolume = %+v, %v", volume, err)
+			}
+		})
+	}
+}
+
 func TestNewClient(t *testing.T) {
 	config := &Config{
 		Host:    "192.0.2.100",
