@@ -91,6 +91,11 @@ type DeviceConnection struct {
 	// which buried everything else in the log.
 	balanceUnavailableLogged atomic.Bool
 
+	// Bass capabilities are stable for this speaker connection. Failed loads
+	// are not cached, so a temporary outage does not disable later requests.
+	bassCapabilitiesMu sync.Mutex
+	bassCapabilities   *models.BassCapabilities
+
 	speakerConnectionKnown     bool
 	speakerConnectionConnected bool
 	speakerConnectionObserved  time.Time
