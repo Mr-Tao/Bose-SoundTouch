@@ -369,7 +369,7 @@ export function DeviceDetail({
             </div>
             <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} />
             <${Controls}
-                key=${controlsTargetKey}
+                key=${controlsMode === 'zone' ? controlsTargetKey : deviceId}
                 deviceId=${deviceId}
                 device=${device}
                 status=${device.status}
