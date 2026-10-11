@@ -144,10 +144,13 @@ export function DeviceDetail({
         }
     }
 
+    // Same dependency as the Controls key below: whenever Controls remounts,
+    // its scheduler drops pending callbacks, so a preview it started would
+    // never be confirmed or rejected.
     useEffect(() => {
         clearPreviewExpiry();
         setZoneVolumePreview(null);
-    }, [deviceId, controlsMode, topologyFingerprint]);
+    }, [controlsTargetKey]);
     useEffect(() => () => clearPreviewExpiry(), []);
 
     const authoritativeZoneVolumes = zoneMemberVolumes(device?.zone);
