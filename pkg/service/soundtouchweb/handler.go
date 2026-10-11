@@ -983,18 +983,22 @@ func (app *WebApp) handleBassControl(w http.ResponseWriter, r *http.Request, dev
 		return
 	}
 
+	// The speaker's capabilities only narrow the fixed range. When they can't
+	// be read, fall back to that range and write, as before they were checked;
+	// the failure is not cached, so a later request tries again.
 	capabilities, err := device.LoadBassCapabilities()
-	if err != nil {
-		app.sendError(w, "Cannot read bass capabilities: "+err.Error(), http.StatusBadGateway)
-		return
-	}
+	switch {
+	case err != nil:
+		log.Printf("[bass] device=%q: cannot read bass capabilities, using the fixed range: %v", sanitizeLog(device.Info().DeviceID), err)
 
-	if !capabilities.IsBassSupported() {
+		if bassReq.Level < -9 || bassReq.Level > 9 {
+			app.sendError(w, "Bass must be between -9 and 9", http.StatusBadRequest)
+			return
+		}
+	case !capabilities.IsBassSupported():
 		app.sendError(w, "Bass control is unavailable on this speaker", http.StatusConflict)
 		return
-	}
-
-	if !capabilities.ValidateLevel(bassReq.Level) {
+	case !capabilities.ValidateLevel(bassReq.Level):
 		app.sendError(w, fmt.Sprintf("Bass must be between %d and %d", capabilities.BassMin, capabilities.BassMax), http.StatusBadRequest)
 		return
 	}
