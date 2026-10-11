@@ -66,9 +66,12 @@ func TestBassCapabilityFailureCanRecover(t *testing.T) {
 	defer speaker.Close()
 	app := NewWebApp()
 	device := webtypes.NewDeviceConnection(client.NewClient(&client.Config{Host: speaker.URL}), &models.DeviceInfo{DeviceID: "SPEAKER"})
-	for _, code := range []int{http.StatusBadGateway, http.StatusOK} {
+	// +4 is inside the fixed -9..9 range but above this speaker's bassMax 0.
+	// The first request can't read the capabilities and writes, as main did;
+	// the second reads them and refuses.
+	for _, code := range []int{http.StatusOK, http.StatusBadRequest} {
 		response := httptest.NewRecorder()
-		app.handleBassControl(response, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"level":-2}`)), device)
+		app.handleBassControl(response, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"level":4}`)), device)
 		if response.Code != code {
 			t.Fatalf("status=%d want=%d body=%s", response.Code, code, response.Body.String())
 		}
