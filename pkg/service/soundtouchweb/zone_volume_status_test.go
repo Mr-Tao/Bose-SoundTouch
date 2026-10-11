@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gesellix/bose-soundtouch/pkg/client"
 	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
 )
 
@@ -173,5 +174,23 @@ func TestVolumeIOLeavesTopologyEventsUnblocked(t *testing.T) {
 				t.Fatalf("obsolete confirmation merged: %+v", memberConn.Status().Volume)
 			}
 		})
+	}
+}
+
+// TestRefusedVolumeWriteIsDefinitive: a write whose connection was refused
+// never reached the speaker. Counting it as unverified made a zone with every
+// member offline answer 200 success:true.
+func TestRefusedVolumeWriteIsDefinitive(t *testing.T) {
+	speaker := httptest.NewServer(http.NotFoundHandler())
+	host := speaker.URL
+	speaker.Close()
+
+	err := client.NewClient(&client.Config{Host: host, Timeout: time.Second}).SetVolume(20)
+	if err == nil {
+		t.Fatal("SetVolume against a closed port succeeded")
+	}
+
+	if uncertainVolumeWrite(err) {
+		t.Fatalf("refused connection counted as uncertain: %v", err)
 	}
 }
