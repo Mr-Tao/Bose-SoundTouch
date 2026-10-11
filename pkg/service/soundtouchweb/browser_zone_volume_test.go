@@ -482,3 +482,60 @@ render(h('div', {},
 		}
 	}
 }
+
+// TestUntouchedGroupPressDoesNotFreezeMemberSliders: pressing the group slider
+// starts a preview of the member volumes. A press that changes nothing must
+// drop it again, or the member sliders keep showing it over their live
+// volumes until the next group interaction.
+func TestUntouchedGroupPressDoesNotFreezeMemberSliders(t *testing.T) {
+	const fixture = `
+import { h, render } from 'preact';
+import { useState } from 'preact/hooks';
+import { DeviceDetail } from '/app/static/js/app.js';
+function devicesFor(pairVolume, revision) {
+  const members = [
+    { controlId: 'speaker', hwId: 'MASTER', name: 'Kitchen', kind: 'device',
+      deviceIds: ['MASTER'], actualVolume: 50, available: true },
+    { controlId: 'other', hwId: 'OTHER', name: 'Office', kind: 'device',
+      deviceIds: ['OTHER'], actualVolume: pairVolume, available: true },
+  ];
+  return {
+    speaker: {
+      info: { name: 'Kitchen' },
+      status: { epoch: 1, revision, volume: { ActualVolume: 50, MuteEnabled: false } },
+      zone: { isStandalone: false, masterControlId: 'speaker', masterDeviceId: 'MASTER',
+        volume: 50, memberCount: 2, physicalMemberCount: 2, members },
+    },
+    other: { info: { name: 'Office' }, status: { epoch: 1, revision } },
+  };
+}
+function Fixture() {
+  const [state, setState] = useState({ v: 30, r: 1 });
+  window.publishOther = (v, r) => setState({ v, r });
+  return h(DeviceDetail, { deviceId: 'speaker', devices: devicesFor(state.v, state.r), onBack: () => {} });
+}
+render(h(Fixture), document.getElementById('fixture'));
+`
+	server := newPlayerFixtureServer(t, fixture, func(r chi.Router) {
+		registerDeviceDetailSideRoutes(r)
+	})
+	ctx := newHeadlessChromeContext(t)
+	var after string
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(server.URL+"/fixture"),
+		chromedp.WaitVisible(`.zone-member-volume-slider[aria-label="Office volume"]`, chromedp.ByQuery),
+		chromedp.Evaluate(`(() => {
+			const slider = document.querySelector('.volume-slider[aria-label="Group volume"]');
+			slider.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+			slider.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+		})()`, nil),
+		chromedp.Evaluate(`window.publishOther(10, 2)`, nil),
+		chromedp.Sleep(1500*time.Millisecond),
+		chromedp.Evaluate(`document.querySelector('.zone-member-volume-slider[aria-label="Office volume"]').value`, &after),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if after != "10" {
+		t.Errorf("stale preview masks authoritative member volume: shows %s, want 10", after)
+	}
+}
