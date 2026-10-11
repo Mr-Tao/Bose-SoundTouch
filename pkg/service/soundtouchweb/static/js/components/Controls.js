@@ -350,7 +350,14 @@ export function Controls({
 
     function finishVolumeInteraction(event) {
         if (!interactionDirtyRef.current) {
+            // A press that changed nothing still started a group preview.
+            // Nothing will confirm or reject it, so drop it here, or the
+            // member sliders keep showing it over their live volumes.
+            const wasActive = interactionActiveRef.current;
             interactionActiveRef.current = false;
+            if (wasActive && controlsLogicalZone && !schedulerRef.current.isActive()) {
+                onZoneVolumeFailure(interactionGenerationRef.current);
+            }
             return;
         }
         interactionDirtyRef.current = false;
