@@ -37,6 +37,12 @@ updates:
       golang:
         patterns:
           - "golang.org/*"
+      # Browser-test tooling (only the browsertest-tagged tests and
+      # scripts/screenshots import it). chromedp pins an exact cdproto,
+      # so bumping either one alone breaks the build.
+      browser-tests:
+        patterns:
+          - "github.com/chromedp/*"
 
   # Hugo module dependency updates (docs site)
   - package-ecosystem: "gomod"
