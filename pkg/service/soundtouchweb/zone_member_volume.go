@@ -51,7 +51,7 @@ func (app *WebApp) HandleZoneMemberVolume(w http.ResponseWriter, r *http.Request
 
 	zoneTopology, err := app.revalidateZone(masterDeviceID)
 	if err != nil {
-		app.sendError(w, err.Error(), http.StatusConflict)
+		app.sendError(w, err.Error(), revalidateZoneStatus(err))
 		return
 	}
 
