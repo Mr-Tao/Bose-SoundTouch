@@ -456,3 +456,42 @@ func TestApplyVolumeTargetRejectsStaleGenerationsWithoutActual(t *testing.T) {
 		}
 	})
 }
+
+// TestZoneVolumeUnreachableMasterIsBadGateway: when the master's /getZone
+// cannot be read, nothing says the topology changed, so the answer is an
+// upstream failure (502), not a conflict (409). A zone the master reports as
+// dissolved stays a conflict.
+func TestZoneVolumeUnreachableMasterIsBadGateway(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		zoneXML string
+		down    bool
+		want    int
+	}{
+		{name: "master unreachable", down: true, want: http.StatusBadGateway},
+		{name: "zone dissolved", zoneXML: `<zone />`, want: http.StatusConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			zone, _ := testZone()
+			masterSpeaker := newVolumeTestSpeaker(t, 20, test.zoneXML)
+			memberSpeaker := newVolumeTestSpeaker(t, 35, "")
+			app := NewWebApp()
+			addVolumeTestDevice(app, "192.0.2.10", "MASTER", "Kitchen", "SoundTouch 30", masterSpeaker, 20, nil, zone)
+			addVolumeTestDevice(app, "192.0.2.20", "MEMBER", "Dining", "SoundTouch 20", memberSpeaker, 35, nil, nil)
+			if test.down {
+				masterSpeaker.server.Close()
+			}
+
+			response := httptest.NewRecorder()
+			app.HandleZoneVolume(response, withChiParams(httptest.NewRequest(http.MethodPost, "/zone/volume/40", nil),
+				map[string]string{"id": "192.0.2.10", "volume": "40"}))
+			if response.Code != test.want {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.want, response.Body.String())
+			}
+
+			if _, posts, _ := memberSpeaker.operations(); len(posts) != 0 {
+				t.Fatalf("member was written: %v", posts)
+			}
+		})
+	}
+}

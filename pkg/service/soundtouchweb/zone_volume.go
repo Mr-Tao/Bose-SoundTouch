@@ -25,6 +25,20 @@ const (
 
 var errVolumeTopologyConflict = errors.New("speaker topology changed before volume update")
 
+// errZoneMasterUnreachable marks a zone check that could not ask the master,
+// as opposed to one whose answer showed a changed topology. The first is an
+// upstream failure (502), the second a conflict (409).
+var errZoneMasterUnreachable = errors.New("zone master is unavailable")
+
+// revalidateZoneStatus maps a revalidateZone error to its HTTP status.
+func revalidateZoneStatus(err error) int {
+	if errors.Is(err, errZoneMasterUnreachable) {
+		return http.StatusBadGateway
+	}
+
+	return http.StatusConflict
+}
+
 type zoneVolumeMemberResult struct {
 	DeviceID  string             `json:"deviceId"`
 	ControlID string             `json:"controlId,omitempty"`
@@ -85,7 +99,7 @@ func (app *WebApp) HandleZoneVolume(w http.ResponseWriter, r *http.Request) {
 
 	topology, err := app.revalidateZone(masterDeviceID)
 	if err != nil {
-		app.sendError(w, err.Error(), http.StatusConflict)
+		app.sendError(w, err.Error(), revalidateZoneStatus(err))
 		return
 	}
 
@@ -140,14 +154,14 @@ func (app *WebApp) revalidateZone(masterDeviceID string) (zoneVolumeTopology, er
 
 	master, ok := app.GetDevice(controlID)
 	if !ok || master.Client == nil {
-		return zoneVolumeTopology{}, fmt.Errorf("zone master is unavailable")
+		return zoneVolumeTopology{}, errZoneMasterUnreachable
 	}
 
 	generation := master.BeginZoneRefresh()
 
 	zone, err := master.Client.GetZone()
 	if err != nil {
-		return zoneVolumeTopology{}, fmt.Errorf("refresh zone master: %w", err)
+		return zoneVolumeTopology{}, fmt.Errorf("%w: refresh zone master: %w", errZoneMasterUnreachable, err)
 	}
 
 	changed := master.ApplyPolledZone(generation, masterDeviceID, zone)
