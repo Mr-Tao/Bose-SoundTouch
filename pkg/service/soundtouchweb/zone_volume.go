@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -279,6 +280,11 @@ func uncertainVolumeWrite(err error) bool {
 		deviceErrors *models.ErrorsResponse
 	)
 	if errors.As(err, &apiError) || errors.As(err, &deviceErrors) {
+		return false
+	}
+	// A connection that was never established cannot have applied anything.
+	var opError *net.OpError
+	if errors.As(err, &opError) && opError.Op == "dial" {
 		return false
 	}
 	// The shared client does not type every HTTP or transport error. Without
