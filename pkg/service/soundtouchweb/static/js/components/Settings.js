@@ -560,6 +560,7 @@ export function Settings({ deviceId, targetIdentity = '', targetName = '', targe
                         ${networkInterfaces.disconnected.length > 0 ? html`
                             <details class="settings-network-technical">
                                 <summary>Technical details</summary>
+                                <p>Additional interfaces reported by the speaker. Their status does not describe the speaker’s overall connection.</p>
                                 ${networkInterfaces.disconnected.map((item, index) => html`
                                     <div class="settings-network-row" key=${index}>
                                         <strong>${networkInterfaceName(item, true)}</strong>
