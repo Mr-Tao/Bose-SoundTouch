@@ -182,8 +182,7 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
         const member = resolved.member;
         const metadata = zoneMemberMetadata(member);
         const isStereoPair = member?.kind === 'stereoPair';
-        // Only a row that leads somewhere is a button: the member must be in
-        // the inventory, and the page already open is not a destination.
+        // Offer full details inside Settings only for another inventory entry.
         const openable = Boolean(onSelectMember) && resolved.controlId !== deviceId &&
             Boolean(devices?.[resolved.controlId]);
         const identity = html`
@@ -222,22 +221,7 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
 
         return html`
             <div class="zone-logical-member" key=${resolved.controlId}>
-                ${openable ? html`
-                    <button class="zone-logical-header zone-member-open" type="button"
-                            aria-label=${`Open details for ${metadata.name}`}
-                            onClick=${() => onSelectMember(resolved.controlId)}>
-                        ${identity}
-                        <svg class="zone-member-open-icon" width="18" height="18" viewBox="0 0 24 24"
-                             fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                             stroke-linejoin="round" aria-hidden="true">
-                            <path d="m9 18 6-6-6-6" />
-                        </svg>
-                    </button>
-                ` : html`
-                    <div class="zone-logical-header">
-                        ${identity}
-                    </div>
-                `}
+                <div class="zone-logical-header">${identity}</div>
 
                 <${ZoneMemberVolumeControl}
                     zoneMasterId=${zoneMasterId}
@@ -274,7 +258,8 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
                         })}
                     </div>
                 ` : null}
-                <${MemberSettings} deviceId=${resolved.controlId} device=${devices?.[resolved.controlId]} />
+                <${MemberSettings} deviceId=${resolved.controlId} device=${devices?.[resolved.controlId]}
+                    onOpenDetails=${openable ? () => onSelectMember(resolved.controlId) : undefined} />
             </div>
         `;
     }
