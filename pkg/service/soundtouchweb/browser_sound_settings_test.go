@@ -397,6 +397,11 @@ func TestScopedSoundSettingsHierarchyGeometry(t *testing.T) {
                         targetIdentity: id.split('.')[0], statusEpoch: 1, statusRevision: 1, support: {},
                         bassCapabilities: { BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0 },
                         bass: { ActualBass: 0 },
+                        network: { interfaces: [
+                            { type: 'WIFI_INTERFACE', name: 'wlan0', ssid: 'Room Wi-Fi',
+                                ipAddress: '192.0.2.10', band: '5GHz', state: 'NETWORK_WIFI_CONNECTED' },
+                            { type: 'WIFI_INTERFACE', name: 'wlan1', state: 'NETWORK_WIFI_DISCONNECTED' },
+                        ] },
                     } });
                     const root = document.createElement('div');
                     root.className = 'device-detail'; root.style.margin = '16px'; document.body.append(root);
@@ -460,6 +465,18 @@ func TestScopedSoundSettingsHierarchyGeometry(t *testing.T) {
                         children[0].querySelector('summary').click();
                         children[1].querySelector('summary').click();
                         await wait(() => children.every(node => node.open));
+                        await wait(() => children.every(node => node.querySelector('.settings-network-primary')));
+                        const technical = children[0].querySelector('.settings-network-technical');
+                        technical.querySelector('summary').click();
+                        const panel = children[0].querySelector(':scope > .settings-content');
+                        const panelBounds = panel.getBoundingClientRect();
+                        const nextSummary = children[1].querySelector(':scope > summary').getBoundingClientRect();
+                        check(getComputedStyle(panel).backgroundColor !== getComputedStyle(panel.parentElement.parentElement).backgroundColor,
+                            'Physical settings content must have a distinct surface');
+                        check(nextSummary.top - panelBounds.bottom >= 8
+                            && parseFloat(getComputedStyle(panel).paddingLeft) >= 8
+                            && panel.contains(technical) && technical.getBoundingClientRect().bottom <= panelBounds.bottom,
+                            'Expanded LEFT content must be bounded and separated from the following RIGHT heading');
                         children[0].querySelector('summary').click();
                         check(outer.open && !children[0].open && children[1].open, 'Physical disclosures must operate independently');
                         summary.click(); summary.click();
