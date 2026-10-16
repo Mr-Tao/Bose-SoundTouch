@@ -575,11 +575,11 @@ func TestSettingsNetworkDiagnosticsBrowserContract(t *testing.T) {
                     technical.querySelectorAll('.settings-network-row').length !== 3 ||
                     !technical.textContent.includes('wlan1') || !technical.textContent.includes('eth1') ||
                     !technical.textContent.includes('wlan2') ||
-                    !technical.textContent.includes('Additional interfaces reported by the speaker. Their status does not describe the speaker’s overall connection.')) {
+                    technical.querySelector('p') !== null) {
                     throw new Error('disconnected adapters are not hidden in technical detail');
                 }
                 technical.open = true;
-                if (!technical.querySelector('.settings-network-row').textContent.includes('This interface is disconnected') ||
+                if (!technical.querySelector('.settings-network-row').textContent.includes('Not connected') ||
                     !technical.textContent.includes('Connection state not reported')) {
                     throw new Error('technical details lost the adapter state');
                 }
