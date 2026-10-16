@@ -69,16 +69,16 @@ func TestZoneMemberNavigationFollowsSiblingsAndRetracesBack(t *testing.T) {
 		chromedp.Click(chromedp.CSS(".zone-card")),
 		chromedp.WaitVisible(chromedp.CSS(".zone-member-details > summary")),
 		chromedp.Click(chromedp.CSS(".zone-member-details > summary")),
-		chromedp.Poll[chromedp.Void](`!document.querySelector('button.zone-member-open[aria-label="Open details for Atrium"]')`),
+		chromedp.Poll[chromedp.Void](`!document.querySelector('button.member-details-link[aria-label="Full device details for Atrium"]')`),
 	); err != nil {
-		t.Fatalf("open zone detail without a self row button: %v", err)
+		t.Fatalf("open zone detail without a self link: %v", err)
 	}
 
 	openZoneMemberAndWait(t, ctx, "Breakfast Room", `document.querySelector('.zone-member-details > summary') !== null`)
 	if err := chromedp.Do(ctx,
 		chromedp.Click(chromedp.CSS(".zone-member-details > summary")),
-		chromedp.Poll[chromedp.Void](`document.querySelector('button.zone-member-open[aria-label="Open details for Living Pair"]') &&
-			!document.querySelector('button.zone-member-open[aria-label="Open details for Breakfast Room"]')`),
+		chromedp.Poll[chromedp.Void](`document.querySelector('button.member-details-link[aria-label="Full device details for Living Pair"]') &&
+			!document.querySelector('button.member-details-link[aria-label="Full device details for Breakfast Room"]')`),
 	); err != nil {
 		t.Fatalf("member page did not offer its siblings: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestZoneMemberLeaveShowsErrorAfterTopologyEventWithoutDoubleWrite(t *testin
 			app.BroadcastDeviceList()
 			return nil
 		}),
-		chromedp.Poll[chromedp.Void](`!!document.querySelector('.zone-section button[aria-label="Open details for Library"]')`),
+		chromedp.Poll[chromedp.Void](`!!document.querySelector('.zone-section button[aria-label="Full device details for Library"]')`),
 		chromedp.Func(func(context.Context, *chromedp.Target) error { releaseOnce.Do(func() { close(release) }); return nil }),
 		chromedp.Poll[chromedp.Void](`document.querySelector('[role="alert"]')?.textContent.includes('leave rejected')`),
 		evalInto(`window.__zoneDocument === true`, &sameDocument),
@@ -164,13 +164,24 @@ func TestZoneMemberLeaveShowsErrorAfterTopologyEventWithoutDoubleWrite(t *testin
 func openZoneMemberAndWait(t *testing.T, ctx context.Context, name, condition string) {
 	t.Helper()
 
-	selector := fmt.Sprintf(`button.zone-member-open[aria-label=%q]`, "Open details for "+name)
+	selector := fmt.Sprintf(`button.member-details-link[aria-label=%q]`, "Full device details for "+name)
+	summary := fmt.Sprintf(`.member-settings:has(%s) > summary`, selector)
 	if err := chromedp.Do(ctx,
-		chromedp.Click(chromedp.CSS(selector)),
+		chromedp.Poll[chromedp.Void](fmt.Sprintf(`!document.querySelector('.zone-member-open, .zone-member-open-icon') &&
+			document.querySelector(%q)?.textContent.trim() === 'Full device details' &&
+			document.querySelector(%q)?.checkVisibility() === false`, selector, selector)),
+		chromedp.Click(chromedp.CSS(summary)),
+		chromedp.WaitVisible(chromedp.CSS(selector)),
+		chromedp.Focus(chromedp.CSS(selector)),
+		chromedp.KeyEvent("\r"),
 		chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.querySelector('.page-title')?.textContent.includes(%q) && (%s)`,
 			name, condition)),
 	); err != nil {
-		t.Fatalf("open %q device detail: %v", name, err)
+		var state string
+		_ = chromedp.Do(ctx, evalInto(`JSON.stringify({title: document.querySelector('.page-title')?.textContent,
+            links: [...document.querySelectorAll('.member-details-link')].map(b => ({text: b.textContent, label: b.getAttribute('aria-label'), rects: b.getClientRects().length, open: b.closest('details').open})),
+            focus: document.activeElement?.outerHTML})`, &state))
+		t.Fatalf("open %q device detail: %v; state: %s", name, err, state)
 	}
 }
 
@@ -311,6 +322,16 @@ func newZoneMemberNavigationServer(t *testing.T, app *WebApp) (*httptest.Server,
 			id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/control/devices/"), "/stereo-pair")
 			writeZoneNavigationJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
 				"capable": id == zoneNavigationMember || id == zoneNavigationPairLeft,
+			}})
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/settings"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/control/devices/"), "/settings")
+			device, exists := app.GetDevice(id)
+			if !exists {
+				http.NotFound(w, r)
+				return
+			}
+			writeZoneNavigationJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
+				"targetIdentity": device.Info().DeviceID,
 			}})
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/recents"):
 			writeZoneNavigationJSON(w, webtypes.APIResponse{Success: true, Data: []interface{}{}})
