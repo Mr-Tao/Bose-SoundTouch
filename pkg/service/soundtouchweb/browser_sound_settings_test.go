@@ -3,6 +3,7 @@
 package soundtouchweb
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"testing"
 
@@ -362,6 +363,132 @@ func TestScopedSoundSettingsTapAndRapidSteps(t *testing.T) {
         })()`, chromedp.EvalAwaitPromise),
 	); err != nil {
 		t.Fatalf("tap and rapid sound steps: %v", err)
+	}
+}
+
+func TestScopedSoundSettingsHierarchyGeometry(t *testing.T) {
+	for _, width := range []int64{320, 390, 768, 1280} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			app := NewWebApp()
+			router := chi.NewRouter()
+			app.Mount(router, nil)
+			server := httptest.NewServer(router)
+			t.Cleanup(server.Close)
+			ctx := newHeadlessChromeContext(t)
+			if err := chromedp.Do(ctx,
+				chromedp.EmulateViewport(width, 1024),
+				chromedp.Navigate(server.URL+"/app"),
+				chromedp.WaitVisible(chromedp.CSS(`.nav-discover-icon`)),
+				chromedp.Evaluate[chromedp.Void](`(async () => {
+                    const [{ MemberSettings }, { Settings }, { api }, { h, render }] = await Promise.all([
+                        import('/app/static/js/components/MemberSettings.js'),
+                        import('/app/static/js/components/Settings.js'),
+                        import('/app/static/js/api.js'), import('/app/static/lib/preact.module.js'),
+                    ]);
+                    const original = { ...api };
+                    const writes = [];
+                    // Catch navigation-triggered commands, including sound's WebSocket-backed methods.
+                    for (const key of ['bass', 'bassChecked', 'balance', 'balanceChecked', 'setClockDisplay',
+                        'setClockTime', 'setSystemTimeout', 'setLanguage', 'setSync', 'bluetoothPair',
+                        'clearBluetoothPairings', 'setSourceName']) api[key] = async (...args) => {
+                        writes.push([key, ...args]); return { success: false, error: 'Unexpected mutation' };
+                    };
+                    api.settings = async id => ({ success: true, data: {
+                        targetIdentity: id.split('.')[0], statusEpoch: 1, statusRevision: 1, support: {},
+                        bassCapabilities: { BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0 },
+                        bass: { ActualBass: 0 },
+                    } });
+                    const root = document.createElement('div');
+                    root.className = 'device-detail'; root.style.margin = '16px'; document.body.append(root);
+                    const check = (ok, why) => { if (!ok) throw new Error(why); };
+                    const wait = async predicate => {
+                        for (let n = 0; n < 100; n++) {
+                            if (predicate()) return;
+                            await new Promise(resolve => setTimeout(resolve, 10));
+                        }
+                        throw new Error('Settings did not render');
+                    };
+                    const longName = 'Obývací pokoj · DlouhýNázevReproduktoruBezMezer0123456789';
+                    const pairName = longName + ' · stereo pair';
+                    const group = { ID: 'pair', MasterDeviceID: 'right', Roles: { Roles: [
+                        { DeviceID: 'right', Role: 'RIGHT' }, { DeviceID: 'left', Role: 'LEFT' }] } };
+                    const physical = (id, role) => ({ controlId: id + '.local', physicalId: id,
+                        name: longName + ' · ' + id, role,
+                        status: { epoch: 1, revision: 1, connectivity: 'online', group, bass: { ActualBass: 0 } } });
+                    const pair = { info: { device_id: 'right', name: pairName },
+                        settingsTargets: [physical('right', 'RIGHT'), physical('left', 'LEFT')],
+                        stereoPair: { id: 'pair', name: pairName, masterDeviceId: 'right',
+                            members: [{ deviceId: 'right', role: 'RIGHT' }, { deviceId: 'left', role: 'LEFT' }] },
+                        status: { epoch: 1, revision: 1, connectivity: 'online', group,
+                            balance: { Available: true, Min: -7, Max: 7, Default: 0, Actual: 0 } } };
+                    try {
+                        render(h('div', { className: 'zone-member-details' },
+                            h('div', { className: 'zone-logical-member' },
+                                h(MemberSettings, { deviceId: 'right.local', device: pair }))), root);
+                        const outer = root.querySelector('.member-settings');
+                        const summary = outer.querySelector(':scope > summary');
+                        const children = [...outer.querySelectorAll('.member-settings-content > .settings-section')];
+                        check(!outer.open && children.length === 2 && children.every(node => !node.open),
+                            'All settings disclosures must start collapsed');
+                        check(summary.textContent.trim() === 'Settings' && summary.getAttribute('aria-label') === 'Settings · ' + pairName,
+                            'Short Settings title lost its accessible target context');
+                        summary.click();
+                        await wait(() => outer.querySelectorAll('.sound-control').length === 2);
+                        check(children.every(node => !node.open), 'Opening Settings opened a physical device');
+                        const scopes = [...outer.querySelectorAll('.sound-control-scope')];
+                        check(scopes.length === 2 && scopes.every(node => node.textContent === pairName),
+                            'Each pair control must retain its full target scope');
+                        for (const [index, child] of children.entries()) {
+                            const row = child.querySelector(':scope > summary');
+                            const title = row.querySelector('.section-title');
+                            const role = row.querySelector('.settings-target-role');
+                            const chevron = row.querySelector(':scope > .settings-chevron');
+                            const r = row.getBoundingClientRect(), t = title.getBoundingClientRect();
+                            const b = role.getBoundingClientRect(), c = chevron.getBoundingClientRect();
+                            check(title.textContent === 'Device · ' + longName + ' · ' + (index ? 'right' : 'left')
+                                && role.textContent === (index ? 'RIGHT' : 'LEFT'), 'Physical targets lost their name or deterministic role');
+                            check(role.nextElementSibling === chevron && b.left >= t.right && c.left - b.right >= 6
+                                && c.left - b.right <= 20 && c.right <= r.right,
+                                'Role must sit at the right beside the direct-child chevron');
+                            check(r.height >= 44 && getComputedStyle(role).flexShrink === '0'
+                                && getComputedStyle(chevron).flexShrink === '0', 'Summary or trailing indicators lost their dimensions');
+                            check(parseFloat(getComputedStyle(role).fontSize) >= parseFloat(getComputedStyle(title).fontSize),
+                                'Moving the role must not shrink its text');
+                            if (innerWidth <= 390) check(t.height > parseFloat(getComputedStyle(title).lineHeight),
+                                'Long physical name must wrap on narrow screens');
+                        }
+                        children[0].querySelector('summary').click();
+                        children[1].querySelector('summary').click();
+                        await wait(() => children.every(node => node.open));
+                        children[0].querySelector('summary').click();
+                        check(outer.open && !children[0].open && children[1].open, 'Physical disclosures must operate independently');
+                        summary.click(); summary.click();
+                        check(outer.open && !children[0].open && children[1].open, 'Outer disclosure must preserve physical open states');
+                        for (const node of root.querySelectorAll('summary, button, [tabindex]')) { node.focus(); node.blur(); }
+                        await new Promise(resolve => setTimeout(resolve, 30));
+                        check(writes.length === 0, 'Disclosure or focus navigation synthesized a mutation');
+                        const bounds = root.getBoundingClientRect();
+                        for (const node of root.querySelectorAll('*')) {
+                            const r = node.getBoundingClientRect();
+                            if (!r.width || !r.height) continue;
+                            check(r.left >= bounds.left - 1 && r.right <= bounds.right + 1,
+                                'Settings overflow at ' + innerWidth + 'px: ' + node.className);
+                        }
+                        check(document.documentElement.scrollWidth <= innerWidth, 'Settings caused page overflow');
+                        render(h(Settings, { deviceId: 'right.local', targetIdentity: 'right',
+                            targetName: longName, targetRole: ' right ' }), root);
+                        check(root.querySelector('.section-title').textContent === 'Device settings · ' + longName
+                            && root.querySelector('.settings-target-role').textContent === 'RIGHT'
+                            && !root.querySelector('details').open, 'Standalone settings lost their context or normalized role');
+                        render(h(Settings, { deviceId: 'right.local', targetIdentity: 'right',
+                            targetName: longName, targetRole: '   ' }), root);
+                        check(!root.querySelector('.settings-target-role'), 'Empty physical role must not reserve a trailing label');
+                    } finally { render(null, root); root.remove(); Object.assign(api, original); }
+                })()`, chromedp.EvalAwaitPromise),
+			); err != nil {
+				t.Fatalf("settings hierarchy geometry: %v", err)
+			}
+		})
 	}
 }
 

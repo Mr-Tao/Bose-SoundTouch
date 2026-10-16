@@ -124,6 +124,7 @@ function SourceRenameRow({ source, busy, onRename }) {
 }
 
 export function Settings({ deviceId, targetIdentity = '', targetName = '', targetRole = '', nested = false }) {
+    const role = typeof targetRole === 'string' ? targetRole.trim().toUpperCase() : '';
     const expectedIdentity = String(targetIdentity || '').trim();
     const targetGeneration = `${deviceId}\u0000${expectedIdentity}`;
     const [snapshotState, setSnapshotState] = useState({ targetGeneration, data: null });
@@ -306,7 +307,8 @@ export function Settings({ deviceId, targetIdentity = '', targetName = '', targe
     return html`
         <details class="settings-section" ref=${detailsRef} onToggle=${onToggle}>
             <summary class="settings-summary">
-                <span class="section-title">${nested ? deviceSettingsTitle(targetName, targetRole).replace('Device settings', 'Device') : deviceSettingsTitle(targetName, targetRole)}</span>
+                <span class="section-title">${nested ? deviceSettingsTitle(targetName).replace('Device settings', 'Device') : deviceSettingsTitle(targetName)}</span>
+                ${role ? html`<span class="settings-target-role">${role}</span>` : null}
                 <span class="settings-chevron" aria-hidden="true"></span>
             </summary>
 
