@@ -7,7 +7,7 @@ import {
     nowPlayingFreshness,
     sortDeviceEntries,
 } from '../devicePresentation.js';
-import { zoneCardPresentation, zoneMembershipPresentation, zoneTopologyFingerprint } from '../zonePresentation.mjs';
+import { filterGroupedDeviceEntries, zoneCardPresentation, zoneMembershipPresentation, zoneTopologyFingerprint } from '../zonePresentation.mjs';
 import { ZoneMemberVolumeControl } from './ZoneMemberVolumeControl.js';
 import { volumeProjectionKey } from '../zoneVolumeResult.mjs';
 import { zoneMemberVolumes } from '../zoneVolumePreview.mjs';
@@ -117,7 +117,7 @@ export function DeviceList({ devices, isDiscovering, onSelect, onDiscover }) {
         localStorage.setItem(SORT_LS_KEY, mode);
     }
 
-    const entries = sortDeviceEntries(Object.entries(devices), sortMode);
+    const entries = sortDeviceEntries(filterGroupedDeviceEntries(Object.entries(devices)), sortMode);
 
     return html`
         <div class="device-list-container">
