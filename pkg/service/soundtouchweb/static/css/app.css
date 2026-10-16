@@ -1524,8 +1524,8 @@ img.source-icon { width: 16px; height: 16px; object-fit: contain; filter: var(--
     font-weight: 600;
 }
 .zone-member-details[open] > summary { border-bottom: 1px solid var(--border); }
-.zone-logical-members { display: flex; flex-direction: column; }
-.zone-logical-member { min-width: 0; padding: .75rem; }
+.zone-logical-members { display: flex; flex-direction: column; gap: .75rem; background: var(--bg); }
+.zone-logical-member { min-width: 0; padding: .75rem; background: var(--surface); }
 .zone-logical-member + .zone-logical-member { border-top: 1px solid var(--border); }
 .zone-logical-header { display: flex; align-items: flex-start; gap: .6rem; min-width: 0; }
 .zone-member-open {
