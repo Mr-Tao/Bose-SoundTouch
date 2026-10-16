@@ -19,7 +19,7 @@ export function MemberSettings({ deviceId, device, nested = true }) {
     `;
     return nested ? html`<details class="member-settings settings-section"
         onToggle=${event => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open); }}>
-        <summary class="settings-summary"><span class="section-title">Settings · ${device?.info?.name || deviceId}</span>
+        <summary class="settings-summary" aria-label=${`Settings · ${device?.info?.name || deviceId}`}><span class="section-title">Settings</span>
             <span class="settings-chevron" aria-hidden="true"></span></summary>
         <div class="member-settings-content">${content}</div>
     </details>` : content;

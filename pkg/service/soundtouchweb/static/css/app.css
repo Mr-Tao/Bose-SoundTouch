@@ -506,14 +506,25 @@ img { display: block; max-width: 100%; }
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: .75rem;
     min-height: 44px;
     color: var(--text);
     cursor: pointer;
     list-style: none;
 }
 .settings-summary::-webkit-details-marker { display: none; }
-.settings-summary .section-title { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.settings-summary .section-title { flex: 1; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.settings-target-role {
+    flex-shrink: 0;
+    color: var(--text-dim);
+    font-size: .8rem;
+    font-weight: 500;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
 .settings-chevron {
+    flex-shrink: 0;
     width: 9px;
     height: 9px;
     margin-right: .35rem;
@@ -1947,13 +1958,37 @@ img.recent-source-icon { width: 20px; height: 20px; object-fit: contain; filter:
 .announcement-dismiss:hover {
     color: var(--text);
 }
+.member-settings {
+    margin-top: .5rem;
+    padding-top: 0;
+}
+
+.member-settings .section-title {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
+}
+
+.member-settings > .settings-summary .section-title { color: var(--text-dim); }
+
 .member-settings-content {
+    margin-top: .25rem;
     padding: 0 12px 12px;
+    background: var(--bg);
+    border-radius: var(--radius);
+}
+
+.member-settings-content > .sound-settings > .section-title {
+    margin-bottom: 0;
+    padding-top: 1rem;
 }
 
 .member-settings-content > .settings-section {
-    margin-top: 12px;
+    margin-top: .25rem;
+    padding-top: .25rem;
 }
+
+.member-settings-content > .settings-section > .settings-summary .section-title { color: var(--text); }
 
 .sound-settings-content {
     padding-top: .25rem;
@@ -1972,6 +2007,9 @@ img.recent-source-icon { width: 20px; height: 20px; object-fit: contain; filter:
     justify-content: space-between;
     gap: .75rem;
 }
+
+.member-settings .sound-control-heading > div { min-width: 0; overflow-wrap: anywhere; }
+.member-settings .sound-control-value { flex-shrink: 0; }
 
 .sound-control-title {
     color: var(--text);
