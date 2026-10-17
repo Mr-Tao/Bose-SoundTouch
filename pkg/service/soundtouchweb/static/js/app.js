@@ -1,5 +1,5 @@
 import { h, render } from 'preact';
-import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { DeviceList } from './components/DeviceList.js';
 import { NowPlaying } from './components/NowPlaying.js';
@@ -20,6 +20,7 @@ import { MemberSettings } from './components/MemberSettings.js';
 import { api } from './api.js';
 import { isSoundTouch10StereoPair } from './stereoPresentation.mjs';
 import { previousDetailTarget } from './devicePresentation.js';
+import { captureDetailView, detailViewIdentity, restoreDetailView } from './detailViewState.mjs';
 import { removeDeviceAndRefresh } from './deviceRemoval.js';
 import {
     DISCRETE_COMMAND_READBACK_DELAYS_MS,
@@ -213,8 +214,17 @@ export function DeviceDetail({
     onStatusReadback,
     onNavigate,
     commandReadbackDelays = DISCRETE_COMMAND_READBACK_DELAYS_MS,
+    restoredView = null,
 }) {
     const device = devices[deviceId];
+    const detailRoot = useRef(null);
+    const viewIdentity = detailViewIdentity(device);
+    const consumedView = useRef(null);
+    useLayoutEffect(() => {
+        if (!restoredView || consumedView.current === restoredView) return;
+        consumedView.current = restoredView;
+        return restoreDetailView(detailRoot.current, restoredView, device);
+    }, [restoredView, deviceId, viewIdentity]);
     const status = device?.status;
     const controlsMode = device?.zone && !device.zone.isStandalone &&
         device.zone.masterControlId === deviceId ? 'zone' : 'device';
@@ -438,7 +448,7 @@ export function DeviceDetail({
     }
 
     return html`
-        <div class="device-detail">
+        <div class="device-detail" ref=${detailRoot}>
             <div class="page-header">
                 <button class="back-btn" onClick=${onBack}>← Back</button>
                 <button
@@ -548,6 +558,7 @@ function App() {
     // Device-detail pages opened from a zone's member rows, most recent
     // last, so Back retraces them instead of dropping to the device list.
     const [detailOrigins, setDetailOrigins] = useState([]);
+    const [restoredView, setRestoredView] = useState(null);
     const [toast, setToast] = useState(null);
     const [version, setVersion] = useState(null);
     const [isDiscovering, setIsDiscovering] = useState(false);
@@ -676,28 +687,32 @@ function App() {
 
     const navigate = useCallback((p, id = null) => {
         setDetailOrigins([]);
+        setRestoredView(null);
         setPage(p);
         setSelectedId(id);
     }, []);
 
-    function openZoneMember(controlId) {
+    function openZoneMember(controlId, anchor = null) {
         // A zone member is an ordinary inventory entry, so open its live
         // entry; the row of the page already open is not a navigation.
         if (!controlId || controlId === selectedId || !devices[controlId]) return;
 
-        setDetailOrigins(origins => [...origins, selectedId]);
+        const view = captureDetailView(document.querySelector('.device-detail'), devices[selectedId], anchor);
+        setDetailOrigins(origins => [...origins, { id: selectedId, view }]);
+        setRestoredView(null);
         setSelectedId(controlId);
         setPage('device');
     }
 
     function backFromDevice() {
-        const { id, origins } = previousDetailTarget(detailOrigins, devices);
+        const { id, origins } = previousDetailTarget(detailOrigins.map(origin => origin.id), devices);
         if (!id) {
             navigate('devices');
             return;
         }
 
-        setDetailOrigins(origins);
+        setRestoredView(detailOrigins[origins.length]?.view || null);
+        setDetailOrigins(detailOrigins.slice(0, origins.length));
         setSelectedId(id);
         setPage('device');
     }
@@ -860,6 +875,7 @@ function App() {
                         deviceId=${selectedId}
                         devices=${devices}
                         onBack=${backFromDevice}
+                        restoredView=${restoredView}
                         onDevicesChanged=${refreshDevices}
                         onSelectZoneMember=${openZoneMember}
                         notify=${showToast}

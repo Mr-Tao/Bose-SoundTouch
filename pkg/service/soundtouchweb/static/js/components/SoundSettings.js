@@ -7,7 +7,7 @@ import { SteppedSoundControl } from './SteppedSoundControl.js';
 
 const html = htm.bind(h);
 
-export function SoundSettings({ deviceId, device, nested = false, active = false }) {
+export function SoundSettings({ deviceId, device, nested = false, active = false, viewKey = '' }) {
     const [open, setOpen] = useState(false);
     const [snapshots, setSnapshots] = useState({});
     const [loadError, setLoadError] = useState('');
@@ -60,7 +60,8 @@ export function SoundSettings({ deviceId, device, nested = false, active = false
     if (currentPairBass) lastPresentation.current.pairBass = currentPairBass;
     const pairBass = currentPairBass || lastPresentation.current.pairBass;
     const content = html`
-        <div class="settings-content sound-settings-content">
+        <div class="settings-content sound-settings-content"
+            data-detail-loading=${(nested ? active : open) && snapshots.ownerKey !== ownerKey && !loadError ? 'true' : undefined}>
             ${loadError ? html`<div class="settings-error" role="alert">${loadError}
                 <button type="button" class="btn-secondary" onClick=${() => setRetry(value => value + 1)}>Retry</button></div>` : null}
             ${!paired ? bassTargets.filter(entry => entry.control).map(({ target, control, valid }) => html`<${SteppedSoundControl}
@@ -84,7 +85,7 @@ export function SoundSettings({ deviceId, device, nested = false, active = false
         </div>
     `;
     return nested ? html`<section class="sound-settings"><div class="section-title">Sound</div>${content}</section>` : html`
-        <details class="settings-section sound-settings" onToggle=${event => {
+        <details class="settings-section sound-settings" data-detail-key=${JSON.stringify(['sound-settings', viewKey || 'standalone', deviceId, device?.info?.device_id, device?.stereoPair?.id || '', device?.stereoPair?.masterDeviceId || '', targets.map(target => [target.controlId, target.physicalId, target.role]).sort()])} onToggle=${event => {
             if (event.target === event.currentTarget) setOpen(event.currentTarget.open);
         }}>
             <summary class="settings-summary"><span class="section-title">Sound settings · ${device?.info?.name || deviceId}</span>
