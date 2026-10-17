@@ -48,7 +48,7 @@ func TestMemberDetailsLinkWithoutPhysicalSettings(t *testing.T) {
             check(!root.querySelector('.member-details-link'), 'Standalone Settings must not gain a member navigation route');
             render(null, root);
             root.remove();
-        })()`),
+        })()`, chromedp.EvalAwaitPromise),
 	); err != nil {
 		t.Fatalf("member details fallback: %v", err)
 	}

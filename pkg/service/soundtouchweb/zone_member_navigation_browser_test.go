@@ -92,6 +92,8 @@ func TestZoneMemberNavigationFollowsSiblingsAndRetracesBack(t *testing.T) {
 
 	for _, want := range []string{"Breakfast Room", "Atrium"} {
 		if err := chromedp.Do(ctx,
+			// Express pointer intent before coordinate resolution can race restored scroll.
+			chromedp.Evaluate[chromedp.Void](`document.querySelector('.device-detail .back-btn').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}))`),
 			chromedp.Click(chromedp.CSS(".device-detail .back-btn")),
 			chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.querySelector('.page-title')?.textContent.includes(%q)`, want)),
 		); err != nil {
@@ -100,6 +102,8 @@ func TestZoneMemberNavigationFollowsSiblingsAndRetracesBack(t *testing.T) {
 	}
 
 	if err := chromedp.Do(ctx,
+		// Express pointer intent before coordinate resolution can race restored scroll.
+		chromedp.Evaluate[chromedp.Void](`document.querySelector('.device-detail .back-btn').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}))`),
 		chromedp.Click(chromedp.CSS(".device-detail .back-btn")),
 		chromedp.Poll[chromedp.Void](`document.querySelector('.page-title')?.textContent.trim() === 'Devices'`),
 	); err != nil {
@@ -165,12 +169,13 @@ func openZoneMemberAndWait(t *testing.T, ctx context.Context, name, condition st
 	t.Helper()
 
 	selector := fmt.Sprintf(`button.member-details-link[aria-label=%q]`, "Full device details for "+name)
-	summary := fmt.Sprintf(`.member-settings:has(%s) > summary`, selector)
+	header := fmt.Sprintf(`button.zone-member-settings-toggle[aria-label=%q]`, "Settings for "+name)
 	if err := chromedp.Do(ctx,
 		chromedp.Poll[chromedp.Void](fmt.Sprintf(`!document.querySelector('.zone-member-open, .zone-member-open-icon') &&
-			document.querySelector(%q)?.textContent.trim() === 'Full device details' &&
-			document.querySelector(%q)?.checkVisibility() === false`, selector, selector)),
-		chromedp.Click(chromedp.CSS(summary)),
+			document.querySelector(%q)?.textContent.trim() === 'Full device details'`, selector)),
+		chromedp.Evaluate[chromedp.Void](fmt.Sprintf(`{ const header = document.querySelector(%q);
+            header.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
+            if (header.getAttribute('aria-expanded') !== 'true') header.click(); }`, header)),
 		chromedp.WaitVisible(chromedp.CSS(selector)),
 		chromedp.Focus(chromedp.CSS(selector)),
 		chromedp.KeyEvent("\r"),
@@ -189,10 +194,13 @@ func returnToZone(t *testing.T, ctx context.Context, zoneName string) {
 	t.Helper()
 
 	if err := chromedp.Do(ctx,
+		// Express pointer intent before coordinate resolution can race restored scroll.
+		chromedp.Evaluate[chromedp.Void](`document.querySelector('.device-detail .back-btn').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}))`),
 		chromedp.Click(chromedp.CSS(".device-detail .back-btn")),
 		chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.querySelector('.page-title')?.textContent.includes(%q) &&
 			document.querySelector('.zone-member-details > summary') !== null`, zoneName)),
-		chromedp.Click(chromedp.CSS(".zone-member-details > summary")),
+		chromedp.Evaluate[chromedp.Void](`{ const details = document.querySelector('.zone-member-details');
+            if (!details.open) details.querySelector(':scope > summary').click(); }`),
 	); err != nil {
 		t.Fatalf("return to %q zone detail: %v", zoneName, err)
 	}
@@ -332,6 +340,10 @@ func newZoneMemberNavigationServer(t *testing.T, app *WebApp) (*httptest.Server,
 			}
 			writeZoneNavigationJSON(w, webtypes.APIResponse{Success: true, Data: map[string]interface{}{
 				"targetIdentity": device.Info().DeviceID,
+				"network": map[string]interface{}{"interfaces": []interface{}{
+					map[string]interface{}{"type": "WIFI_INTERFACE", "name": "wlan0", "state": "NETWORK_WIFI_CONNECTED", "ssid": "Test Wi-Fi"},
+					map[string]interface{}{"type": "WIFI_INTERFACE", "name": "wlan1", "state": "NETWORK_WIFI_DISCONNECTED"},
+				}},
 			}})
 		case r.Method == http.MethodGet && strings.HasSuffix(path, "/recents"):
 			writeZoneNavigationJSON(w, webtypes.APIResponse{Success: true, Data: []interface{}{}})
