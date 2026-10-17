@@ -1466,6 +1466,21 @@ img.source-icon { width: 16px; height: 16px; object-fit: contain; filter: var(--
 .zone-logical-member { min-width: 0; padding: .75rem; }
 .zone-logical-member + .zone-logical-member { border-top: 1px solid var(--border); }
 .zone-logical-header { display: flex; align-items: flex-start; gap: .6rem; min-width: 0; }
+.zone-member-settings-toggle {
+    width: 100%;
+    min-height: 44px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.zone-member-settings-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.zone-member-settings-toggle > .settings-chevron { flex-shrink: 0; align-self: center; }
+.zone-member-settings-toggle[aria-expanded="true"] > .settings-chevron { transform: rotate(225deg); }
 .member-details-link {
     display: block;
     min-height: 44px;

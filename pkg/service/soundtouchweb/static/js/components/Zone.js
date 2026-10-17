@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
 import { resolvedZoneMember } from '../devicePresentation.js';
+import { physicalSettingsTargets } from '../soundSettingsPresentation.mjs';
 import {
     effectiveZoneDetail,
     physicalMemberMetadata,
@@ -49,6 +50,7 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
     const [showPicker, setShowPicker] = useState(false);
     const [mutationPending, setMutationPending] = useState(false);
     const [mutationError, setMutationError] = useState('');
+    const [expandedMembers, setExpandedMembers] = useState({});
     const mutationContext = useRef(null);
     if (mutationContext.current?.deviceId !== deviceId) {
         mutationContext.current = { deviceId, pending: false };
@@ -184,6 +186,16 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
         // Offer full details inside Settings only for another inventory entry.
         const openable = Boolean(onSelectMember) && resolved.controlId !== deviceId &&
             Boolean(devices?.[resolved.controlId]);
+        const pair = devices?.[resolved.controlId]?.stereoPair;
+        const memberKey = JSON.stringify([resolved.controlId, devices?.[resolved.controlId]?.info?.device_id || '',
+            [...(member?.deviceIds || [])].sort(),
+            pair?.id || '', pair?.masterDeviceId || '',
+            (pair?.members || []).map(physical => [physical.deviceId, physical.role]).sort()]);
+        const settingsId = `zone-${encodeURIComponent(deviceId)}-member-${encodeURIComponent(memberKey)}-settings`;
+        const settingsAvailable = openable || physicalSettingsTargets(
+            resolved.controlId, devices?.[resolved.controlId],
+        ).length > 0;
+        const expanded = Boolean(expandedMembers[memberKey]);
         const identity = html`
             <span class="device-indicator ${metadata.connectivity}" role="status"
                   title=${metadata.connectivityLabel}
@@ -219,8 +231,17 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
         ]);
 
         return html`
-            <div class="zone-logical-member" key=${resolved.controlId}>
-                <div class="zone-logical-header">${identity}</div>
+            <div class="zone-logical-member" key=${memberKey}>
+                ${settingsAvailable ? html`
+                    <button type="button" class="zone-logical-header zone-member-settings-toggle"
+                        aria-label=${`Settings for ${metadata.name}`} aria-expanded=${expanded}
+                        aria-controls=${settingsId} data-detail-key=${memberKey}
+                        onClick=${() => setExpandedMembers(current => ({
+                            ...current, [memberKey]: !current[memberKey],
+                        }))}>
+                        ${identity}<span class="settings-chevron" aria-hidden="true"></span>
+                    </button>
+                ` : html`<div class="zone-logical-header">${identity}</div>`}
 
                 <${ZoneMemberVolumeControl}
                     zoneMasterId=${zoneMasterId}
@@ -258,7 +279,8 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
                     </div>
                 ` : null}
                 <${MemberSettings} deviceId=${resolved.controlId} device=${devices?.[resolved.controlId]}
-                    onOpenDetails=${openable ? () => onSelectMember(resolved.controlId) : undefined} />
+                    expanded=${expanded} id=${settingsId} viewKey=${memberKey}
+                    onOpenDetails=${openable ? event => onSelectMember(resolved.controlId, event.currentTarget) : undefined} />
             </div>
         `;
     }
@@ -282,7 +304,7 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
             `}
 
             ${!currentZone.isStandalone && logicalMembers.length > 0 ? html`
-                <details class="zone-member-details">
+                <details class="zone-member-details" data-detail-key="zone-members">
                     <summary>${zoneMemberCountSummary(logicalMembers.length, physicalCount)}</summary>
                     <div class="zone-logical-members">
                         ${logicalMembers.map(member => logicalMemberRow(

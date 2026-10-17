@@ -14,7 +14,7 @@ test('logical zones render one volume control per logical member, outside physic
     assert.match(deviceList, /zone-card/);
     assert.match(deviceList, /healthLabel/);
     assert.match(deviceList, /onSelect\(controlID\)/);
-    assert.match(zone, /<details class="zone-member-details">/);
+    assert.match(zone, /<details class="zone-member-details"/);
     assert.match(zone, /member\.physicalMembers/);
     assert.match(zone, /zone-physical-role/);
     assert.equal((zone.match(/<\$\{ZoneMemberVolumeControl\}/g) || []).length, 1);
