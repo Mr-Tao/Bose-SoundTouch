@@ -123,7 +123,7 @@ function SourceRenameRow({ source, busy, onRename }) {
     `;
 }
 
-export function Settings({ deviceId, targetIdentity = '', targetName = '', targetRole = '', nested = false }) {
+export function Settings({ deviceId, targetIdentity = '', targetName = '', targetRole = '', nested = false, viewKey = '' }) {
     const expectedIdentity = String(targetIdentity || '').trim();
     const targetGeneration = `${deviceId}\u0000${expectedIdentity}`;
     const [snapshotState, setSnapshotState] = useState({ targetGeneration, data: null });
@@ -304,7 +304,9 @@ export function Settings({ deviceId, targetIdentity = '', targetName = '', targe
     }
 
     return html`
-        <details class="settings-section" ref=${detailsRef} onToggle=${onToggle}>
+        <details class="settings-section" ref=${detailsRef} onToggle=${onToggle}
+            data-detail-loading=${loading || (!snapshot && !loadError) ? 'true' : undefined}
+            data-detail-key=${JSON.stringify(['device-settings', viewKey || (nested ? 'zone' : 'standalone'), deviceId, expectedIdentity])}>
             <summary class="settings-summary">
                 <span class="section-title">${nested ? deviceSettingsTitle(targetName, targetRole).replace('Device settings', 'Device') : deviceSettingsTitle(targetName, targetRole)}</span>
                 <span class="settings-chevron" aria-hidden="true"></span>
@@ -558,7 +560,8 @@ export function Settings({ deviceId, targetIdentity = '', targetName = '', targe
                             <p class="settings-value">No connected network interfaces were reported.</p>
                         ` : null}
                         ${networkInterfaces.disconnected.length > 0 ? html`
-                            <details class="settings-network-technical">
+                            <details class="settings-network-technical"
+                                data-detail-key=${JSON.stringify(['network-details', viewKey || (nested ? 'zone' : 'standalone'), deviceId, expectedIdentity])}>
                                 <summary>Technical details</summary>
                                 ${networkInterfaces.disconnected.map((item, index) => html`
                                     <div class="settings-network-row" key=${index}>

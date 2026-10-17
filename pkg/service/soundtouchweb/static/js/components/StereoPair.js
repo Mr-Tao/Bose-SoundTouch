@@ -52,6 +52,7 @@ function snapshotFromProjection(pair) {
 export function StereoPair({ deviceId, device, devices, onChanged, notify }) {
     const pair = device?.stereoPair;
     const [state, setState] = useState(null);
+    const [settledRefreshKey, setSettledRefreshKey] = useState(null);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [showPicker, setShowPicker] = useState(false);
@@ -98,6 +99,10 @@ export function StereoPair({ deviceId, device, devices, onChanged, notify }) {
             if (generation === refreshGeneration.current && refreshKey === currentRefreshKey.current &&
                 !preserveError && !mutationError.current) {
                 setError('Unable to read stereo-pair state');
+            }
+        } finally {
+            if (generation === refreshGeneration.current && refreshKey === currentRefreshKey.current) {
+                setSettledRefreshKey(refreshKey);
             }
         }
     }
@@ -219,7 +224,7 @@ export function StereoPair({ deviceId, device, devices, onChanged, notify }) {
     if (!pair && !state && !isStereoCapable(device)) return null;
 
     return html`
-        <section class="stereo-pair-section">
+        <section class="stereo-pair-section" data-detail-loading=${settledRefreshKey !== refreshKey ? 'true' : undefined}>
             <div class="section-title">Stereo pair</div>
             ${error ? html`<div class="stereo-pair-error" role="alert">${error}</div>` : null}
 
