@@ -133,7 +133,7 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
         await mutate(() => api.zoneLeave(deviceId));
     }
 
-    if (loading) return html`
+    if (loading && !zone && !projection) return html`
         <div class="zone-section">
             <div class="section-title">Zone</div>
             ${mutationError ? html`<div class="settings-error" role="alert">${mutationError}</div>` : null}
@@ -286,7 +286,8 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
     }
 
     return html`
-        <div class="zone-section">
+        <div class="zone-section" aria-busy=${loading ? 'true' : 'false'}
+             data-detail-loading=${loading ? 'true' : undefined}>
             <div class="section-title">Zone</div>
             ${mutationError ? html`<div class="settings-error" role="alert">${mutationError}</div>` : null}
 
