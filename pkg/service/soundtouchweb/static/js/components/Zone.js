@@ -43,6 +43,118 @@ function inferredPhysicalCount(members) {
         total + Math.max(1, member?.physicalMembers?.length || 0), 0);
 }
 
+function logicalMemberKey(resolved, devices) {
+    const member = resolved.member;
+    const pair = devices?.[resolved.controlId]?.stereoPair;
+    return JSON.stringify([resolved.controlId, devices?.[resolved.controlId]?.info?.device_id || '',
+        [...(member?.deviceIds || [])].sort(),
+        pair?.id || '', pair?.masterDeviceId || '',
+        (pair?.members || []).map(physical => [physical.deviceId, physical.role]).sort()]);
+}
+
+// Expansion belongs to the mounted membership row, rather than the device's
+// lifetime. A removed row drops it while surviving keyed rows retain theirs.
+function LogicalZoneMember({ memberKey, resolved, isMaster, deviceId, devices,
+    onSelectMember, zoneMasterId, topologyFingerprint, volumePreview }) {
+    const [expanded, setExpanded] = useState(false);
+    const member = resolved.member;
+    const metadata = zoneMemberMetadata(member);
+    const isStereoPair = member?.kind === 'stereoPair';
+    // Offer full details inside Settings only for another inventory entry.
+    const openable = Boolean(onSelectMember) && resolved.controlId !== deviceId &&
+        Boolean(devices?.[resolved.controlId]);
+    const settingsId = `zone-${encodeURIComponent(deviceId)}-member-${encodeURIComponent(memberKey)}-settings`;
+    const settingsAvailable = openable || physicalSettingsTargets(
+        resolved.controlId, devices?.[resolved.controlId],
+    ).length > 0;
+    const identity = html`
+        <span class="device-indicator ${metadata.connectivity}" role="status"
+              title=${metadata.connectivityLabel}
+              aria-label=${metadata.statusAriaLabel}></span>
+        <div class="zone-logical-identity">
+            <div class="zone-logical-name">
+                ${metadata.name}
+                ${isMaster ? html`<span class="zone-badge master">Master</span>` : null}
+            </div>
+            <div class="zone-logical-metadata">
+                <span>${metadata.modelType}</span>
+                ${metadata.ip ? html`<span class="zone-logical-ip">${metadata.ip}</span>` : null}
+                <span>${metadata.kind}</span>
+            </div>
+        </div>
+    `;
+    const previewVolume = volumePreview?.[resolved.controlId];
+    const volumeTopologyKey = JSON.stringify([
+        topologyFingerprint,
+        devices?.[zoneMasterId]?.status?.epoch ?? null,
+        devices?.[resolved.controlId]?.status?.epoch ?? null,
+        (member?.physicalMembers || []).map(physical => [
+            physical?.deviceId || '',
+            physical?.role || '',
+        ]),
+    ]);
+    const volumeProjectionKey = JSON.stringify([
+        devices?.[zoneMasterId]?.status?.epoch ?? null,
+        devices?.[zoneMasterId]?.status?.revision ?? null,
+        devices?.[resolved.controlId]?.status?.epoch ?? null,
+        devices?.[resolved.controlId]?.status?.revision ?? null,
+        Number.isFinite(member?.actualVolume) ? member.actualVolume : null,
+    ]);
+
+    return html`
+        <div class="zone-logical-member">
+            ${settingsAvailable ? html`
+                <button type="button" class="zone-logical-header zone-member-settings-toggle"
+                    aria-label=${`Settings for ${metadata.name}`} aria-expanded=${expanded}
+                    aria-controls=${settingsId} data-detail-key=${memberKey}
+                    onClick=${() => setExpanded(current => !current)}>
+                    ${identity}<span class="settings-chevron" aria-hidden="true"></span>
+                </button>
+            ` : html`<div class="zone-logical-header">${identity}</div>`}
+
+            <${ZoneMemberVolumeControl}
+                zoneMasterId=${zoneMasterId}
+                memberId=${resolved.controlId}
+                topologyKey=${volumeTopologyKey}
+                projectionKey=${volumeProjectionKey}
+                ariaLabel=${`${metadata.name} volume`}
+                available=${member?.available !== false}
+                volume=${member?.actualVolume}
+                previewVolume=${previewVolume}
+            />
+
+            ${isStereoPair ? html`
+                <div class="zone-physical-members">
+                    ${(member.physicalMembers || []).map(physical => {
+                        const diagnostic = physicalMemberMetadata(physical);
+                        return html`
+                            <div class="zone-physical-member" key=${physical.deviceId || diagnostic.role}>
+                                <span class="zone-physical-role">${diagnostic.role}</span>
+                                <span class="device-indicator ${diagnostic.connectivity}" role="status"
+                                      title=${diagnostic.connectivityLabel}
+                                      aria-label=${diagnostic.statusAriaLabel}></span>
+                                <div class="zone-physical-identity">
+                                    <span class="zone-physical-name">${diagnostic.name}</span>
+                                    <span class="zone-physical-metadata">
+                                        <span>${diagnostic.modelType}</span>
+                                        ${diagnostic.ip ? html`
+                                            <span class="zone-logical-ip">${diagnostic.ip}</span>
+                                        ` : null}
+                                    </span>
+                                </div>
+                            </div>
+                        `;
+                    })}
+                </div>
+            ` : null}
+            <${MemberSettings} deviceId=${resolved.controlId} device=${devices?.[resolved.controlId]}
+                expanded=${expanded} id=${settingsId} viewKey=${memberKey}
+                onOpenDetails=${openable ? event => onSelectMember(resolved.controlId, event.currentTarget) : undefined} />
+        </div>
+    `;
+}
+
+
 export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }) {
     const [zone, setZone] = useState(null);
     const [candidates, setCandidates] = useState({});
@@ -50,7 +162,6 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
     const [showPicker, setShowPicker] = useState(false);
     const [mutationPending, setMutationPending] = useState(false);
     const [mutationError, setMutationError] = useState('');
-    const [expandedMembers, setExpandedMembers] = useState({});
     const mutationContext = useRef(null);
     if (mutationContext.current?.deviceId !== deviceId) {
         mutationContext.current = { deviceId, pending: false };
@@ -179,111 +290,6 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
 
     const deviceName = (ip) => devices[ip]?.info?.name || candidates[ip]?.info?.name || ip;
 
-    function logicalMemberRow(resolved, isMaster) {
-        const member = resolved.member;
-        const metadata = zoneMemberMetadata(member);
-        const isStereoPair = member?.kind === 'stereoPair';
-        // Offer full details inside Settings only for another inventory entry.
-        const openable = Boolean(onSelectMember) && resolved.controlId !== deviceId &&
-            Boolean(devices?.[resolved.controlId]);
-        const pair = devices?.[resolved.controlId]?.stereoPair;
-        const memberKey = JSON.stringify([resolved.controlId, devices?.[resolved.controlId]?.info?.device_id || '',
-            [...(member?.deviceIds || [])].sort(),
-            pair?.id || '', pair?.masterDeviceId || '',
-            (pair?.members || []).map(physical => [physical.deviceId, physical.role]).sort()]);
-        const settingsId = `zone-${encodeURIComponent(deviceId)}-member-${encodeURIComponent(memberKey)}-settings`;
-        const settingsAvailable = openable || physicalSettingsTargets(
-            resolved.controlId, devices?.[resolved.controlId],
-        ).length > 0;
-        const expanded = Boolean(expandedMembers[memberKey]);
-        const identity = html`
-            <span class="device-indicator ${metadata.connectivity}" role="status"
-                  title=${metadata.connectivityLabel}
-                  aria-label=${metadata.statusAriaLabel}></span>
-            <div class="zone-logical-identity">
-                <div class="zone-logical-name">
-                    ${metadata.name}
-                    ${isMaster ? html`<span class="zone-badge master">Master</span>` : null}
-                </div>
-                <div class="zone-logical-metadata">
-                    <span>${metadata.modelType}</span>
-                    ${metadata.ip ? html`<span class="zone-logical-ip">${metadata.ip}</span>` : null}
-                    <span>${metadata.kind}</span>
-                </div>
-            </div>
-        `;
-        const previewVolume = volumePreview?.[resolved.controlId];
-        const volumeTopologyKey = JSON.stringify([
-            topologyFingerprint,
-            devices?.[zoneMasterId]?.status?.epoch ?? null,
-            devices?.[resolved.controlId]?.status?.epoch ?? null,
-            (member?.physicalMembers || []).map(physical => [
-                physical?.deviceId || '',
-                physical?.role || '',
-            ]),
-        ]);
-        const volumeProjectionKey = JSON.stringify([
-            devices?.[zoneMasterId]?.status?.epoch ?? null,
-            devices?.[zoneMasterId]?.status?.revision ?? null,
-            devices?.[resolved.controlId]?.status?.epoch ?? null,
-            devices?.[resolved.controlId]?.status?.revision ?? null,
-            Number.isFinite(member?.actualVolume) ? member.actualVolume : null,
-        ]);
-
-        return html`
-            <div class="zone-logical-member" key=${memberKey}>
-                ${settingsAvailable ? html`
-                    <button type="button" class="zone-logical-header zone-member-settings-toggle"
-                        aria-label=${`Settings for ${metadata.name}`} aria-expanded=${expanded}
-                        aria-controls=${settingsId} data-detail-key=${memberKey}
-                        onClick=${() => setExpandedMembers(current => ({
-                            ...current, [memberKey]: !current[memberKey],
-                        }))}>
-                        ${identity}<span class="settings-chevron" aria-hidden="true"></span>
-                    </button>
-                ` : html`<div class="zone-logical-header">${identity}</div>`}
-
-                <${ZoneMemberVolumeControl}
-                    zoneMasterId=${zoneMasterId}
-                    memberId=${resolved.controlId}
-                    topologyKey=${volumeTopologyKey}
-                    projectionKey=${volumeProjectionKey}
-                    ariaLabel=${`${metadata.name} volume`}
-                    available=${member?.available !== false}
-                    volume=${member?.actualVolume}
-                    previewVolume=${previewVolume}
-                />
-
-                ${isStereoPair ? html`
-                    <div class="zone-physical-members">
-                        ${(member.physicalMembers || []).map(physical => {
-                            const diagnostic = physicalMemberMetadata(physical);
-                            return html`
-                                <div class="zone-physical-member" key=${physical.deviceId || diagnostic.role}>
-                                    <span class="zone-physical-role">${diagnostic.role}</span>
-                                    <span class="device-indicator ${diagnostic.connectivity}" role="status"
-                                          title=${diagnostic.connectivityLabel}
-                                          aria-label=${diagnostic.statusAriaLabel}></span>
-                                    <div class="zone-physical-identity">
-                                        <span class="zone-physical-name">${diagnostic.name}</span>
-                                        <span class="zone-physical-metadata">
-                                            <span>${diagnostic.modelType}</span>
-                                            ${diagnostic.ip ? html`
-                                                <span class="zone-logical-ip">${diagnostic.ip}</span>
-                                            ` : null}
-                                        </span>
-                                    </div>
-                                </div>
-                            `;
-                        })}
-                    </div>
-                ` : null}
-                <${MemberSettings} deviceId=${resolved.controlId} device=${devices?.[resolved.controlId]}
-                    expanded=${expanded} id=${settingsId} viewKey=${memberKey}
-                    onOpenDetails=${openable ? event => onSelectMember(resolved.controlId, event.currentTarget) : undefined} />
-            </div>
-        `;
-    }
 
     return html`
         <div class="zone-section" aria-busy=${loading ? 'true' : 'false'}
@@ -308,10 +314,14 @@ export function Zone({ deviceId, devices, onSelectMember, volumePreview = null }
                 <details class="zone-member-details" data-detail-key="zone-members">
                     <summary>${zoneMemberCountSummary(logicalMembers.length, physicalCount)}</summary>
                     <div class="zone-logical-members">
-                        ${logicalMembers.map(member => logicalMemberRow(
-                            member,
-                            member.controlId === resolvedMaster.controlId,
-                        ))}
+                        ${logicalMembers.map(member => {
+                            const memberKey = logicalMemberKey(member, devices);
+                            return html`<${LogicalZoneMember} key=${memberKey} memberKey=${memberKey}
+                                resolved=${member} isMaster=${member.controlId === resolvedMaster.controlId}
+                                deviceId=${deviceId} devices=${devices} onSelectMember=${onSelectMember}
+                                zoneMasterId=${zoneMasterId} topologyFingerprint=${topologyFingerprint}
+                                volumePreview=${volumePreview} />`;
+                        })}
                     </div>
                 </details>
             ` : null}
