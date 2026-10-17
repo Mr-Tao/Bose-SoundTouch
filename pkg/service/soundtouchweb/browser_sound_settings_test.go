@@ -27,7 +27,7 @@ func TestScopedSoundSettingsDiscreteWritesAndHierarchy(t *testing.T) {
                 import('/app/static/js/api.js'),
                 import('/app/static/lib/preact.module.js'),
             ]);
-            const original = { settings: api.settings, bass: api.bass, balance: api.balance, device: api.device, bassChecked: api.bassChecked, balanceChecked: api.balanceChecked };
+            const original = { soundSettings: api.soundSettings, bass: api.bass, balance: api.balance, device: api.device, bassChecked: api.bassChecked, balanceChecked: api.balanceChecked };
             api.bassChecked = (...args) => api.bass(...args); api.balanceChecked = (...args) => api.balance(...args);
             const root = document.createElement('div');
             document.body.append(root);
@@ -56,7 +56,7 @@ func TestScopedSoundSettingsDiscreteWritesAndHierarchy(t *testing.T) {
                 }
                 throw new Error(message);
             };
-            api.settings = async id => ({ success: true, data: { targetIdentity: id.split('.')[0], support: {},
+            api.soundSettings = async id => ({ success: true, data: { targetIdentity: id.split('.')[0], support: {},
                 bassCapabilities: { BassAvailable: true, BassMin: -9, BassMax: 0, BassDefault: 0 },
                 statusEpoch: 1, statusRevision: 1, bass: { ActualBass: bass[id] } } });
             api.bass = async (id, value) => { writes.push(['bass', id, value]); bass['left.local'] = value; bass['right.local'] = value; return { success: true }; };
@@ -202,7 +202,7 @@ func TestScopedSoundSettingsConnectionEpochOwnership(t *testing.T) {
                 import('/app/static/js/api.js'),
                 import('/app/static/lib/preact.module.js'),
             ]);
-            const original = { settings: api.settings, bass: api.bass, bassChecked: api.bassChecked };
+            const original = { soundSettings: api.soundSettings, bass: api.bass, bassChecked: api.bassChecked };
             api.bassChecked = (...args) => api.bass(...args);
             const root = document.createElement('div');
             document.body.append(root);
@@ -229,7 +229,7 @@ func TestScopedSoundSettingsConnectionEpochOwnership(t *testing.T) {
                     writes.push([id, value]);
                     return new Promise(resolve => { settleWrite = resolve; });
                 };
-                api.settings = async () => snapshot(1, 0, -1);
+                api.soundSettings = async () => snapshot(1, 0, -1);
                 const renderControl = epoch => render(h(SteppedSoundControl, {
                     kind: 'bass', target: target(epoch), control, ownerKey: 'same-physical-target',
                 }), root);
@@ -251,7 +251,7 @@ func TestScopedSoundSettingsConnectionEpochOwnership(t *testing.T) {
                 render(null, root);
                 let settleOldSettings;
                 const loads = [];
-                api.settings = () => {
+                api.soundSettings = () => {
                     loads.push(true);
                     return loads.length === 1 ? new Promise(resolve => { settleOldSettings = resolve; })
                         : Promise.resolve(snapshot(2));
@@ -298,7 +298,7 @@ func TestScopedSoundSettingsTapAndRapidSteps(t *testing.T) {
                 import('/app/static/js/components/SteppedSoundControl.js'),
                 import('/app/static/js/api.js'), import('/app/static/lib/preact.module.js'),
             ]);
-            const original = { settings: api.settings, bass: api.bass, bassChecked: api.bassChecked };
+            const original = { soundSettings: api.soundSettings, bass: api.bass, bassChecked: api.bassChecked };
             api.bassChecked = (...args) => api.bass(...args);
             const root = document.createElement('div'); root.style.maxWidth = '320px'; document.body.append(root);
             const check = (ok, why) => { if (!ok) throw new Error(why); };
@@ -317,7 +317,7 @@ func TestScopedSoundSettingsTapAndRapidSteps(t *testing.T) {
                 if (writes.length === 1) await new Promise(resolve => { releaseFirst = resolve; });
                 actual = value; active--; return { success: true };
             };
-            api.settings = async () => ({ success: true, data: { targetIdentity: 'speaker', statusEpoch: 1,
+            api.soundSettings = async () => ({ success: true, data: { targetIdentity: 'speaker', statusEpoch: 1,
                 statusRevision: writes.length + 1, bassCapabilities: caps, bass: { ActualBass: actual } } });
             try {
                 render(h(SteppedSoundControl, { kind: 'bass', target, control, ownerKey: 'owner' }), root);

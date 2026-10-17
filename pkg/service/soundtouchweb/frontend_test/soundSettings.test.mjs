@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { bassControl, pairBassControl, balanceControl, balanceLabel, physicalSettingsTargets, settingsBassReadback, writeSoundSetting } from '../static/js/soundSettingsPresentation.mjs';
+import { inventoryBassCapabilities, bassControl, pairBassControl, balanceControl, balanceLabel, physicalSettingsTargets, settingsBassReadback, writeSoundSetting } from '../static/js/soundSettingsPresentation.mjs';
 import { createSteppedInteraction } from '../static/js/steppedInteraction.mjs';
 
 const physical = (controlId, physicalId, role = '') => ({ controlId, physicalId, role, name: physicalId,
@@ -58,7 +58,7 @@ test('pair bass writes only master once and verifies both members plus unchanged
     let posts = 0, reads = [], topologyReads = 0, fail = false, actual = -1, epoch = 1, topology = device;
     const api = {
         bass: async (id, value) => { assert.equal(id, 'right.local'); assert.equal(value, -1); posts++; return { success: true }; },
-        settings: async id => {
+        soundSettings: async id => {
             reads.push(id);
             return { success: true, data: { targetIdentity: id.split('.')[0], statusEpoch: id === 'left.local' ? epoch : 1, statusRevision: 2,
                 bassCapabilities: capabilities, bass: { ActualBass: id === 'left.local' ? actual : -1 }, errors: fail ? { bass: 'offline' } : {} } };
@@ -108,14 +108,14 @@ test('accepted writes get one confirmation read, and a failed read never replays
     let posts = 0;
     let gets = 0;
     const api = { bass: async () => { posts += 1; return { success: true }; },
-        settings: async () => { gets += 1; throw new Error('offline'); } };
+        soundSettings: async () => { gets += 1; throw new Error('offline'); } };
     const target = { ...physical('speaker.local', 'speaker'), kind: 'bass' };
     assert.match((await writeSoundSetting(api, target, -1)).error, /Unverified/);
     assert.equal(posts, 1);
     assert.equal(gets, 1);
-    api.settings = async () => ({ success: true, data: { targetIdentity: 'speaker', statusEpoch: 1, bassCapabilities: capabilities, bass: { ActualBass: -1 } } });
+    api.soundSettings = async () => ({ success: true, data: { targetIdentity: 'speaker', statusEpoch: 1, bassCapabilities: capabilities, bass: { ActualBass: -1 } } });
     assert.deepEqual(await writeSoundSetting(api, target, -1), { success: true, confirmedValue: -1 });
-    api.settings = async () => ({ success: true, data: { targetIdentity: 'replacement', bass: { ActualBass: -1 } } });
+    api.soundSettings = async () => ({ success: true, data: { targetIdentity: 'replacement', bass: { ActualBass: -1 } } });
     assert.match((await writeSoundSetting(api, target, -1)).error, /Unverified/);
 });
 
@@ -253,7 +253,7 @@ test('a confirmation read from another connection epoch cannot confirm the admit
     let writes = 0;
     const target = { ...physical('speaker.local', 'speaker'), kind: 'bass' };
     const api = { bass: async () => { writes++; return { success: true }; },
-        settings: async () => ({ success: true, data: { targetIdentity: 'speaker', statusEpoch: 2,
+        soundSettings: async () => ({ success: true, data: { targetIdentity: 'speaker', statusEpoch: 2,
             bassCapabilities: capabilities, bass: { ActualBass: -1 } } }) };
     assert.equal((await writeSoundSetting(api, target, -1)).outcome, 'unverified');
     assert.equal(writes, 1);
@@ -287,7 +287,7 @@ test('an ambiguous lost mutation response receives one read and never another wr
     let writes = 0, reads = 0, actual = -1;
     const target = { ...physical('speaker.local', 'speaker'), kind: 'bass' };
     const api = { bass: async () => { writes++; throw new Error('Response lost'); },
-        settings: async () => { reads++; return { success: true, data: { targetIdentity: 'speaker', statusEpoch: 1,
+        soundSettings: async () => { reads++; return { success: true, data: { targetIdentity: 'speaker', statusEpoch: 1,
             bassCapabilities: capabilities, bass: { ActualBass: actual } } }; } };
     assert.deepEqual(await writeSoundSetting(api, target, -1), { success: true, confirmedValue: -1 });
     assert.equal(writes, 1); assert.equal(reads, 1);
@@ -305,11 +305,23 @@ test('checked sound writes skip readback only for a definitive rejection', async
     let writes = 0, reads = 0, definitive = true;
     const api = { bass: () => { throw new Error('Plain mutation should not be used'); },
         bassChecked: async () => { writes++; throw Object.assign(new Error('Rejected or uncertain'), { definitive }); },
-        settings: async () => { reads++; return { success: true, data: { targetIdentity: 'speaker', statusEpoch: 1,
+        soundSettings: async () => { reads++; return { success: true, data: { targetIdentity: 'speaker', statusEpoch: 1,
             bassCapabilities: capabilities, bass: { ActualBass: -1 } } }; } };
     assert.equal((await writeSoundSetting(api, target, -1)).error, 'Rejected or uncertain');
     assert.equal(reads, 0); assert.equal(writes, 1);
     definitive = false;
     assert.deepEqual(await writeSoundSetting(api, target, -1), { success: true, confirmedValue: -1 });
     assert.equal(reads, 1); assert.equal(writes, 2);
+});
+
+
+test('inventory capabilities require physical and connection provenance without an invented range', () => {
+    const target = physical('speaker.local', 'speaker');
+    assert.equal(inventoryBassCapabilities(target), undefined);
+    target.status.bassCapabilities = { ...capabilities, DeviceID: 'speaker' };
+    assert.equal(inventoryBassCapabilities(target), target.status.bassCapabilities);
+    assert.equal(inventoryBassCapabilities({ ...target, physicalId: 'replacement' }), undefined);
+    assert.equal(inventoryBassCapabilities({ ...target, status: { ...target.status, bass: { ActualBass: 0, DeviceID: 'replacement' } } }), undefined);
+    assert.equal(inventoryBassCapabilities({ ...target, status: { ...target.status, epoch: undefined } }), undefined);
+    assert.equal(inventoryBassCapabilities({ ...target, status: { ...target.status, bassCapabilities: { ...capabilities, DeviceID: '' } } }).BassMin, -9);
 });

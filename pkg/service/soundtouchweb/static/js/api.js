@@ -84,6 +84,7 @@ export const api = {
     deviceNowPlaying: (id) => req(`/api/control/devices/${id}/now-playing`),
     removeDevice: (id) => req(`/api/control/devices/${id}`, { method: 'DELETE' }),
     settings: (id) => req(`/api/control/devices/${id}/settings/`),
+    soundSettings: (id) => req(`/api/control/devices/${id}/settings/?scope=sound`),
     setClockDisplay: (id, targetIdentity, body) => settingsMutation(
         `/api/control/devices/${id}/settings/clock-display`, 'PATCH', targetIdentity, body),
     setClockTime: (id, targetIdentity) => settingsMutation(

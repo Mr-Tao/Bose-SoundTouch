@@ -145,3 +145,12 @@ test('checked sound mutations preserve wire routes and distinguish rejection fro
         }
     } finally { globalThis.fetch = previous; }
 });
+
+
+test('acoustic GET requests only sound scope while full settings keeps its existing route', async () => {
+    const urls = [];
+    globalThis.fetch = async url => { urls.push(url); return new Response('{"success":true}'); };
+    await api.soundSettings('speaker');
+    await api.settings('speaker');
+    assert.deepEqual(urls, ['/api/control/devices/speaker/settings/?scope=sound', '/api/control/devices/speaker/settings/']);
+});

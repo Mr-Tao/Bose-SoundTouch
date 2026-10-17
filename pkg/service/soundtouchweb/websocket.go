@@ -1001,10 +1001,18 @@ func (app *WebApp) refreshDeviceStatusAfterStereoPairMutation(deviceID string, c
 }
 
 func (app *WebApp) updateDeviceStatus(deviceID string, conn *webtypes.DeviceConnection, groupBaseline *uint64) {
+	select {
+	case <-conn.Done():
+		return
+	default:
+	}
+
 	// Skip status update if client is not available (e.g., in tests)
 	if conn.Client == nil {
 		return
 	}
+
+	conn.WarmBassCapabilities(func() { app.queueBroadcastIfChanged(true) })
 
 	defer func() { conn.MarkStatusRefreshed(time.Now()) }()
 

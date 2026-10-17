@@ -1,3 +1,14 @@
+// These capabilities share the physical target's immutable connection snapshot.
+// A missing report is never replaced by an assumed range.
+export function inventoryBassCapabilities(target) {
+    if (!target?.controlId || !target?.physicalId || !Number.isSafeInteger(target.status?.epoch)) return undefined;
+    const capabilities = target.status?.bassCapabilities;
+    const reportedId = String(capabilities?.DeviceID || '').trim();
+    const bassId = String(target.status?.bass?.DeviceID || '').trim();
+    return capabilities && (!reportedId || reportedId === target.physicalId) &&
+        (!bassId || bassId === target.physicalId) ? capabilities : undefined;
+}
+
 function reportedRange(available, min, max, defaultValue, value) {
     return available === true && [min, max, defaultValue, value].every(Number.isSafeInteger) &&
         min <= max && defaultValue >= min && defaultValue <= max && value >= min && value <= max
@@ -102,7 +113,7 @@ export async function writeSoundSetting(api, target, value) {
             // The firmware mirrors pair bass. Write the master once, then verify
             // both physical values and the current pair; never fan out/replay.
             const snapshots = await Promise.all(target.bassMembers.map(async member => {
-                const result = await api.settings(member.controlId);
+                const result = await api.soundSettings(member.controlId);
                 const data = result?.data;
                 if (!result?.success || data?.errors?.bass || data?.targetIdentity !== member.physicalId ||
                     data.statusEpoch !== member.epoch) throw new Error('Pair member readback changed.');
@@ -125,7 +136,7 @@ export async function writeSoundSetting(api, target, value) {
             }
         } else {
             const readback = target.kind === 'bass'
-                ? await api.settings(target.controlId) : await api.device(target.controlId);
+                ? await api.soundSettings(target.controlId) : await api.device(target.controlId);
             const data = readback?.data;
             const epoch = target.kind === 'bass' ? data?.statusEpoch : data?.status?.epoch;
             const sameConnection = Number.isSafeInteger(target.status?.epoch) && epoch === target.status.epoch;
