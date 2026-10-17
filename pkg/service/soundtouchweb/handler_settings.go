@@ -850,6 +850,10 @@ func (app *WebApp) readBassDeviceSetting(
 	targetIdentity string,
 	snapshot *deviceSettingsSnapshot,
 ) error {
+	status := device.Status()
+	snapshot.StatusEpoch = status.Epoch
+	snapshot.StatusRevision = status.Revision
+
 	if !snapshot.Support.Bass {
 		return nil
 	}
@@ -860,6 +864,10 @@ func (app *WebApp) readBassDeviceSetting(
 
 	caps, err := device.LoadBassCapabilities()
 	if err != nil {
+		if errors.Is(err, webtypes.ErrBassCapabilitiesIdentityChanged) {
+			return fmt.Errorf("%w: %v", errSettingsTargetChanged, err)
+		}
+
 		snapshot.Errors["bass"] = err.Error()
 
 		return liveSettingsTargetError(device, targetIdentity)
@@ -924,7 +932,59 @@ func (app *WebApp) HandleGetDeviceSettings(w http.ResponseWriter, r *http.Reques
 	}
 	defer release()
 
+	if r.URL.Query().Get("scope") == "sound" {
+		app.refreshSoundDeviceSettings(w, device, targetIdentity)
+
+		return
+	}
+
 	app.refreshDeviceSettings(w, device, targetIdentity)
+}
+
+// refreshSoundDeviceSettings reads only the endpoints needed by acoustic controls.
+// It shares the settings operation lock and identity fences with the full GET.
+func (app *WebApp) refreshSoundDeviceSettings(w http.ResponseWriter, device *webtypes.DeviceConnection, targetIdentity string) {
+	if err := liveSettingsTargetError(device, targetIdentity); err != nil {
+		app.sendError(w, err.Error(), settingsReadErrorStatus(err))
+
+		return
+	}
+
+	urls, err := device.Client.GetSupportedURLs()
+	if err != nil {
+		app.sendError(w, "read supported device endpoints: "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	if err := validateReportedSettingsIdentity(targetIdentity, urls.DeviceID); err != nil {
+		app.sendError(w, err.Error(), settingsReadErrorStatus(err))
+
+		return
+	}
+
+	snapshot := &deviceSettingsSnapshot{
+		TargetIdentity: targetIdentity,
+		Support: settingsSupport{
+			Bass: urls.HasURL("/bassCapabilities") && urls.HasURL("/bass"),
+		},
+	}
+	if err := app.readBassDeviceSetting(device, targetIdentity, snapshot); err != nil {
+		app.sendError(w, err.Error(), settingsReadErrorStatus(err))
+
+		return
+	}
+
+	// Supported reads finish with the identity fence in readBassDeviceSetting.
+	if !snapshot.Support.Bass {
+		if err := liveSettingsTargetError(device, targetIdentity); err != nil {
+			app.sendError(w, err.Error(), settingsReadErrorStatus(err))
+
+			return
+		}
+	}
+
+	app.writeDeviceSettings(w, snapshot)
 }
 
 func decodeSettingsRequest(r *http.Request, target interface{}) error {

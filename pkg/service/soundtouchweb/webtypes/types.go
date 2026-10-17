@@ -94,8 +94,9 @@ type DeviceConnection struct {
 
 	// Bass capabilities are stable for this speaker connection. Failed loads
 	// are not cached, so a temporary outage does not disable later requests.
-	bassCapabilitiesMu sync.Mutex
-	bassCapabilities   *models.BassCapabilities
+	bassCapabilitiesMu         sync.Mutex
+	bassCapabilities           *models.BassCapabilities
+	bassCapabilitiesRefreshing atomic.Bool
 
 	speakerConnectionKnown     bool
 	speakerConnectionConnected bool
@@ -164,21 +165,22 @@ type DeviceConnection struct {
 
 // DeviceStatus represents the current device state
 type DeviceStatus struct {
-	NowPlaying             *models.NowPlaying      `json:"nowPlaying,omitempty"`
-	Volume                 *models.Volume          `json:"volume,omitempty"`
-	Presets                *models.Presets         `json:"presets,omitempty"`
-	Sources                *models.Sources         `json:"sources,omitempty"`
-	SourcesStale           bool                    `json:"sourcesStale,omitempty"`
-	Bass                   *models.Bass            `json:"bass,omitempty"`
-	Balance                *models.Balance         `json:"balance,omitempty"`
-	Group                  *models.Group           `json:"group,omitempty"`
-	Zone                   *models.ZoneInfo        `json:"zone,omitempty"`
-	Connectivity           Connectivity            `json:"connectivity"`
-	HTTPReachable          bool                    `json:"httpReachable"`
-	WebSocketConnected     bool                    `json:"webSocketConnected"`
-	SpeakerConnectionState *SpeakerConnectionState `json:"speakerConnectionState,omitempty"`
-	IsConnected            bool                    `json:"isConnected"`
-	LastActivity           time.Time               `json:"lastActivity"`
+	NowPlaying             *models.NowPlaying       `json:"nowPlaying,omitempty"`
+	Volume                 *models.Volume           `json:"volume,omitempty"`
+	Presets                *models.Presets          `json:"presets,omitempty"`
+	Sources                *models.Sources          `json:"sources,omitempty"`
+	SourcesStale           bool                     `json:"sourcesStale,omitempty"`
+	Bass                   *models.Bass             `json:"bass,omitempty"`
+	BassCapabilities       *models.BassCapabilities `json:"bassCapabilities,omitempty"`
+	Balance                *models.Balance          `json:"balance,omitempty"`
+	Group                  *models.Group            `json:"group,omitempty"`
+	Zone                   *models.ZoneInfo         `json:"zone,omitempty"`
+	Connectivity           Connectivity             `json:"connectivity"`
+	HTTPReachable          bool                     `json:"httpReachable"`
+	WebSocketConnected     bool                     `json:"webSocketConnected"`
+	SpeakerConnectionState *SpeakerConnectionState  `json:"speakerConnectionState,omitempty"`
+	IsConnected            bool                     `json:"isConnected"`
+	LastActivity           time.Time                `json:"lastActivity"`
 
 	// Epoch identifies the DeviceConnection that produced this status.
 	// Revision restarts at 0 for every new connection, so revisions from
@@ -723,7 +725,7 @@ func (c *DeviceConnection) ZoneTopologyCurrent(topology ZoneTopology) bool {
 // writers cannot silently lose each other's changes.
 //
 // The copy mut receives is a shallow value copy of the previous status.
-// Nested pointer fields (NowPlaying, Volume, Presets, Sources, Bass, Balance,
+// Nested pointer fields (NowPlaying, Volume, Presets, Sources, Bass, BassCapabilities, Balance,
 // Group, Zone)
 // share their backing struct with the previous version: callers MUST
 // REPLACE these pointers (s.Volume = &models.Volume{...}) rather than
