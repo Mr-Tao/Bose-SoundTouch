@@ -4,11 +4,11 @@ import htm from 'htm';
 import { DeviceList } from './components/DeviceList.js';
 import { NowPlaying } from './components/NowPlaying.js';
 import { Controls } from './components/Controls.js';
-import { Presets } from './components/Presets.js';
+import { LibraryTabs } from './components/LibraryTabs.js';
+import { useFavorites } from './useFavorites.js';
 import { Sources } from './components/Sources.js';
 import { Zone } from './components/Zone.js';
 import { StereoPair } from './components/StereoPair.js';
-import { Recents } from './components/Recents.js';
 import { TuneInBrowser } from './components/TuneInBrowser.js';
 import { RadioBrowser } from './components/RadioBrowser.js';
 import { Library } from './components/Library.js';
@@ -216,6 +216,9 @@ export function DeviceDetail({
     commandReadbackDelays = DISCRETE_COMMAND_READBACK_DELAYS_MS,
     restoredView = null,
     recentsRefreshToken = 0,
+    favoritesRefreshToken = 0,
+    libraryTab,
+    onLibraryTabChange,
 }) {
     const device = devices[deviceId];
     const detailRoot = useRef(null);
@@ -227,6 +230,7 @@ export function DeviceDetail({
         return restoreDetailView(detailRoot.current, restoredView, device);
     }, [restoredView, deviceId, viewIdentity]);
     const status = device?.status;
+    const favorites = useFavorites(favoritesRefreshToken);
     const controlsMode = device?.zone && !device.zone.isStandalone &&
         device.zone.masterControlId === deviceId ? 'zone' : 'device';
     const topologyFingerprint = zoneTopologyFingerprint(device?.zone);
@@ -272,6 +276,8 @@ export function DeviceDetail({
         status,
         onStatusReadback,
         readbackDelays: commandReadbackDelays,
+        targetIdentity: device?.info?.device_id,
+        currentTargetIdentity: device?.info?.device_id,
     });
     const source = status?.nowPlaying?.Source;
     const playStatus = status?.nowPlaying?.PlayStatus;
@@ -355,10 +361,10 @@ export function DeviceDetail({
             { ...contentExpectation(preset.ContentItem), targetId: String(preset.ID) });
     }
 
-    function playRecent(item) {
+    function playRecent(item, action = 'recent') {
         const content = item?.ContentItem;
         if (!content?.Location) return;
-        runDiscreteCommand('recent', () => api.playChecked(deviceId, {
+        runDiscreteCommand(action, () => api.playChecked(deviceId, {
             source: content.Source,
             type: content.Type,
             location: content.Location,
@@ -465,7 +471,7 @@ export function DeviceDetail({
                     </svg>
                 </button>
             </div>
-            <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} />
+            <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} favorites=${favorites} />
             <${Controls}
                 key=${controlsMode === 'zone' ? controlsTargetKey : deviceId}
                 deviceId=${deviceId}
@@ -486,12 +492,13 @@ export function DeviceDetail({
                 onZoneVolumeReadback=${reconcileGroupVolume}
                 onZoneVolumeFailure=${rejectGroupVolumePreview}
             />
-            <${Presets}
-                deviceId=${deviceId}
-                status=${device.status}
-                command=${command}
-                commandBusy=${commandBusy}
-                onSelect=${selectPreset}
+            <${LibraryTabs}
+                deviceId=${deviceId} device=${device} status=${status}
+                command=${command} commandBusy=${commandBusy}
+                onSelectPreset=${selectPreset} onPlay=${playRecent}
+                onPlayFavorite=${item => playRecent(item, 'favorite')}
+                selectedTab=${libraryTab} onTabChange=${onLibraryTabChange}
+                recentsRefreshToken=${recentsRefreshToken} favorites=${favorites}
             />
             <${Sources}
                 deviceId=${deviceId}
@@ -519,17 +526,6 @@ export function DeviceDetail({
                 volumePreview=${zoneVolumePreview?.controlId === deviceId
                     ? zoneVolumePreview.volumes
                     : null}
-            />
-            <${Recents}
-                deviceId=${deviceId}
-                physicalId=${device.info?.device_id}
-                epoch=${device.status?.epoch}
-                revision=${device.status?.recentsRevision}
-                refreshToken=${recentsRefreshToken}
-                presets=${device.status?.presets}
-                command=${command}
-                commandBusy=${commandBusy}
-                onPlay=${playRecent}
             />
             ${!device.zone ? html`<${MemberSettings} deviceId=${deviceId} device=${device} nested=${false} />` : null}
             ${!device.stereoPair ? html`
@@ -571,6 +567,8 @@ function App() {
     // service is down does not claim the connection was lost.
     const [connection, setConnection] = useState('connecting');
     const [recentsRefreshToken, setRecentsRefreshToken] = useState(0);
+    const [favoritesRefreshToken, setFavoritesRefreshToken] = useState(0);
+    const [libraryTab, setLibraryTab] = useState('presets');
     const [contentPlaybackRequest, setContentPlaybackRequest] = useState(null);
     const [contentPlaybackBusy, setContentPlaybackBusy] = useState(false);
     const contentPlaybackRef = useRef({ generation: 0, busy: false });
@@ -619,6 +617,8 @@ function App() {
             const msg = JSON.parse(event.data);
             if (msg.type === 'devices') {
                 setDevices(previous => mergeDevicesSnapshot(previous, msg.data));
+            } else if (msg.type === 'favorites_changed') {
+                setFavoritesRefreshToken(token => token + 1);
             } else if (msg.type === 'discovery_status') {
                 if (msg.data?.isDiscovering !== undefined) {
                     setIsDiscovering(msg.data.isDiscovering);
@@ -657,6 +657,7 @@ function App() {
                 backoff = RECONNECT_BASE_MS;
                 setConnection('online');
                 setRecentsRefreshToken(token => token + 1);
+                setFavoritesRefreshToken(token => token + 1);
             };
 
             ws.onmessage = handleMessage;
@@ -889,6 +890,8 @@ function App() {
                         onRemove=${removeDevice}
                         onStatusReadback=${mergeDeviceReadback}
                         recentsRefreshToken=${recentsRefreshToken}
+                        favoritesRefreshToken=${favoritesRefreshToken}
+                        libraryTab=${libraryTab} onLibraryTabChange=${setLibraryTab}
                         onNavigate=${navigate}
                     />
                 ` : page === 'tunein' ? html`

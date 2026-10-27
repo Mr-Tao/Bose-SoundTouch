@@ -1231,6 +1231,7 @@ render(h(Fixture), document.getElementById('fixture'));
 
 	if err := chromedp.Do(ctx,
 		chromedp.Navigate(server.URL+"/fixture"),
+		chromedp.Click(chromedp.CSS(`[role=tab][id$="-recents"]`)),
 		chromedp.WaitVisible(chromedp.CSS(`.recent-item`)),
 		evalInto(`document.querySelector('.recent-item img.recent-art')?.getAttribute('src') || ''`, &borrowed),
 		// The entry with no matching preset keeps the source-icon placeholder.
@@ -1623,6 +1624,7 @@ render(h(Fixture), document.getElementById('fixture'));
 		evalInto(`document.querySelector('.preset-slot:not(.empty)').getAttribute('aria-busy') === 'true'`, &presetPending),
 		chromedp.Poll[chromedp.Void](`document.querySelector('.discrete-command-status').textContent === 'Preset started'`),
 		chromedp.Evaluate[chromedp.Void](`window.publishStatus({revision: 100, nowPlayingRevision: 100, nowPlaying: {Source: 'PRODUCT', PlayStatus: 'PLAY_STATE'}, volume: {ActualVolume: 20, MuteEnabled: false}, presets: {Preset: [{ID: 1, ContentItem: {Source: 'TUNEIN', Location: '/station/preset', ItemName: 'Preset station'}}]}})`),
+		chromedp.Click(chromedp.CSS(`[role=tab][id$="-recents"]`)),
 		chromedp.WaitVisible(chromedp.CSS(`.recent-item`)),
 		chromedp.Click(chromedp.CSS(`.recent-item`)),
 		evalInto(`document.querySelector('.recent-item').getAttribute('aria-busy') === 'true'`, &recentPending),

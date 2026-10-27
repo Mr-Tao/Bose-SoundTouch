@@ -193,7 +193,7 @@ export function matchesCommand(status, command) {
         }
         return false;
     }
-    if (['preset', 'recent', 'tunein', 'radiobrowser', 'url', 'library'].includes(action)) {
+    if (['preset', 'recent', 'favorite', 'tunein', 'radiobrowser', 'url', 'library'].includes(action)) {
         return matchesContentExpectation(nowPlaying, command?.expected);
     }
     return false;
@@ -202,7 +202,7 @@ export function matchesCommand(status, command) {
 function commandFailed(status, command) {
     const action = commandAction(command);
     if (![
-        'play', 'pause', 'next-track', 'previous-track', 'preset', 'recent',
+        'play', 'pause', 'next-track', 'previous-track', 'preset', 'recent', 'favorite',
         'tunein', 'radiobrowser', 'url', 'library',
     ].includes(action)) return false;
     const nowPlaying = status?.nowPlaying;
@@ -228,6 +228,7 @@ export function commandText(command) {
         'next-track': ['Skipping to next track', 'Next track started, confirming', 'Next track started', 'Next-track command unverified', 'Next-track command failed'],
         'previous-track': ['Returning to previous track', 'Previous track started, confirming', 'Previous track started', 'Previous-track command unverified', 'Previous-track command failed'],
         preset: ['Starting preset', 'Preset started, confirming', 'Preset started', 'Preset playback unverified', 'Preset playback failed'],
+        favorite: ['Starting favorite', 'Favorite started, confirming', 'Favorite started', 'Favorite playback unverified', 'Favorite playback failed'],
         recent: ['Starting recent item', 'Recent item started, confirming', 'Recent item started', 'Recent-item playback unverified', 'Recent-item playback failed'],
         tunein: ['Starting TuneIn item', 'TuneIn item started, confirming', 'TuneIn item started', 'TuneIn playback unverified', 'TuneIn playback failed'],
         radiobrowser: ['Starting RadioBrowser station', 'RadioBrowser station started, confirming', 'RadioBrowser station started', 'RadioBrowser playback unverified', 'RadioBrowser playback failed'],

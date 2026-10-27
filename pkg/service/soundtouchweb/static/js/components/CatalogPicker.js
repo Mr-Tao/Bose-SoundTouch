@@ -20,7 +20,7 @@ const html = htm.bind(h);
 // It deliberately does not hide entries that already sit in a slot. Copying
 // one station into a second slot, or onto a second speaker, is a thing people
 // do on purpose; the list only says where an entry already is.
-export function CatalogPicker({ deviceId, slot, presets, sources = null, current = null, onClose, onAssigned }) {
+export function CatalogPicker({ deviceId, slot, presets, sources = null, current = null, onClose, onAssigned, onPick }) {
     const [state, setState] = useState({ status: 'loading' });
     const [query, setQuery] = useState('');
     const [saving, setSaving] = useState(null);
@@ -30,7 +30,7 @@ export function CatalogPicker({ deviceId, slot, presets, sources = null, current
     const [newName, setNewName] = useState(current?.ContentItem?.ItemName ?? '');
 
     const item = current?.ContentItem ?? null;
-    const occupied = !!item;
+    const occupied = !onPick && !!item;
 
     useEffect(() => {
         let cancelled = false;
@@ -92,6 +92,18 @@ export function CatalogPicker({ deviceId, slot, presets, sources = null, current
     }, [state.entries, query]);
 
     function pick(entry) {
+        if (onPick) {
+            setSaving(entry.location);
+            setError(null);
+            Promise.resolve().then(() => onPick({
+                Source: entry.source, SourceAccount: entry.source_account || '',
+                Location: entry.location, Type: entry.type || '',
+                ItemName: entry.name || '', ContainerArt: entry.container_art || '',
+                IsPresetable: entry.is_presetable === 'true',
+            })).catch(() => setError('Could not add this favorite. Retry when the library is available.'))
+                .finally(() => setSaving(null));
+            return;
+        }
         storeItem(slot, {
             source: entry.source,
             sourceAccount: entry.source_account || '',
@@ -205,7 +217,7 @@ export function CatalogPicker({ deviceId, slot, presets, sources = null, current
     // A slot that holds something is being edited, not filled: renaming and
     // moving are right there, and "Fill" would name the least likely of the
     // three.
-    const heading = occupied ? `Preset ${slot}` : `Fill preset ${slot}`;
+    const heading = onPick ? 'Add favorite from catalog' : occupied ? `Preset ${slot}` : `Fill preset ${slot}`;
 
     return html`
         <section class="catalog-picker" aria-label=${heading}>
@@ -319,7 +331,7 @@ export function CatalogPicker({ deviceId, slot, presets, sources = null, current
                                         <span class="catalog-entry-name">${entry.name || entry.location}</span>
                                         <span class="catalog-entry-meta">
                                             ${sourceLabel(entry.source)}
-                                            ${occupies !== undefined ? html` · in preset ${occupies}` : null}
+                                            ${!onPick && occupies !== undefined ? html` · in preset ${occupies}` : null}
                                             ${missing ? html` · <span class="catalog-entry-warn">${missing}</span>` : null}
                                         </span>
                                     </span>

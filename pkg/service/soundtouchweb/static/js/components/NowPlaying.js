@@ -3,6 +3,7 @@ import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
 import { SourceIcon } from '../sourceIcons.js';
+import { FavoriteButton } from './FavoriteButton.js';
 import { PresetPicker } from './PresetPicker.js';
 import { sameContentLocation } from '../contentLocation.mjs';
 
@@ -51,7 +52,7 @@ function NowPlayingPresetPicker({ deviceId, nowPlaying, presets }) {
     />`;
 }
 
-export function NowPlaying({ nowPlaying, deviceId, presets }) {
+export function NowPlaying({ nowPlaying, deviceId, presets, favorites }) {
     const [position, setPosition] = useState(0);
 
     useEffect(() => {
@@ -96,6 +97,7 @@ export function NowPlaying({ nowPlaying, deviceId, presets }) {
                     <span class="track-source">${nowPlaying.Source}</span>
                     ${isBuffering && html`<span class="buffering-badge">Buffering…</span>`}
                 </div>
+                <${FavoriteButton} item=${nowPlaying.ContentItem} favorites=${favorites} />
                 ${showFullMetadata && html`
                     <details class="track-details">
                         <summary>Full details</summary>
