@@ -105,6 +105,11 @@ export const api = {
     // not device-scoped: the pick list exists so one speaker can be given
     // what another one had.
     catalog: () => req('/api/control/catalog'),
+    favorites: (options = {}) => req('/api/control/favorites', options),
+    addFavorite: (item) => checkedReq('/api/control/favorites', {
+        method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(item),
+    }),
+    removeFavorite: (id) => checkedReq(`/api/control/favorites/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     discover: () => req('/api/control/discover', { method: 'POST' }),
     key: (id, key) => req(`/api/control/devices/${id}/key/${key}`, { method: 'POST' }),
     // Checked variants of the mutations the discrete-command hook issues. They

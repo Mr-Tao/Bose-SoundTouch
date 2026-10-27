@@ -380,3 +380,9 @@ The Raspberry Pi installer configures a writable systemd state directory at `/va
 The application-wide API uses `GET /api/control/favorites`, `POST /api/control/favorites` with one `ContentItem` JSON object, and `DELETE /api/control/favorites/{id}`. The six-slot API and speaker state are unaffected by library changes. Duplicate additions return the existing entry with its original name, artwork, order and ID; deleting an absent entry is harmless. Both mutations return the usual JSON success envelope. IDs are assigned once and retained when reading the versioned file. Safety bounds reject oversized input or a full file rather than evicting user selections.
 
 Favorites preserve original replay locations and source accounts. Comparison keys are used only for duplicate detection. The library is independent of Stockholm/Marge Favorites and provider-specific lists such as TuneIn favorites; import and synchronization are separate work.
+
+## Player library
+
+A speaker detail offers Presets, Favorites and Recents tabs. Presets retain the six numbered hardware slots. Favorites are the explicitly saved library shared by speakers controlled through this player instance. Recents remain the selected speaker's own history. The selected tab is remembered while navigating within the application; switching tabs never starts playback.
+
+Save a favorite from the currently playing item, from a recent item, or by opening the optional catalog picker. Removing a favorite changes only the library. The preset star still assigns a hardware slot; the separate Save favorite button adds to the library. Favorites use the normal checked playback command and show confirmation or failure. Refreshes preserve valid entries during a read failure and offer Retry; library changes notify other connected browser windows.

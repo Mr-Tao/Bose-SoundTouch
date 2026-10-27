@@ -2,6 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
+import { FavoriteButton } from './FavoriteButton.js';
 import { SourceIcon } from '../sourceIcons.js';
 import { artworkFor, presetArtIndex } from '../recentsArt.mjs';
 
@@ -16,7 +17,7 @@ export function Recents(props) {
 }
 
 function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
-    revision = 0, refreshToken = 0 }) {
+    revision = 0, refreshToken = 0, showHeading = true, favorites }) {
     const [items, setItems] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -82,7 +83,7 @@ function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
 
     if (loading && items === null && !error) return html`
         <div class="recents-section">
-            <div class="section-title">Recents</div>
+            ${showHeading && html`<div class="section-title">Recents</div>`}
             <div class="loading-bar"></div>
         </div>
     `;
@@ -113,7 +114,7 @@ function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
 
     return html`
         <div class="recents-section">
-            <div class="section-title">Recents</div>
+            ${showHeading && html`<div class="section-title">Recents</div>`}
             ${error ? html`<div role="alert">
                 ${error}
                 <button type="button" class="btn-secondary" disabled=${loading}
@@ -125,6 +126,7 @@ function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
                     if (!ci) return null;
                     const art = artworkFor(ci, artIndex);
                     return html`
+                        <div class="recent-row" key=${item.ID || item.UTCTime || ci.Location}>
                         <button
                             class="recent-item"
                             key=${item.ID || item.UTCTime}
@@ -144,6 +146,8 @@ function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
                             </div>
                             <span class="recent-play">▶</span>
                         </button>
+                        <${FavoriteButton} item=${ci} favorites=${favorites} />
+                        </div>
                     `;
                 })}
             </div>

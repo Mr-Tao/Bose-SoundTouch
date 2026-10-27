@@ -131,7 +131,7 @@ function PresetSlot({ preset, deviceId, active, canSave, command, commandBusy, o
     `;
 }
 
-export function Presets({ deviceId, status, command, commandBusy = false, onSelect }) {
+export function Presets({ deviceId, status, command, commandBusy = false, onSelect, showHeading = true }) {
     // Which slot the catalog picker is open for, if any. One picker for the
     // whole section rather than a popover per tile: six tiles wrap to two or
     // three rows on a phone, and a list that has to be filtered needs the
@@ -159,7 +159,7 @@ export function Presets({ deviceId, status, command, commandBusy = false, onSele
 
     return html`
         <div class="presets-section">
-            <h3 class="section-title">Presets</h3>
+            ${showHeading && html`<h3 class="section-title">Presets</h3>`}
             <${StoredPresets} deviceId=${deviceId} revision=${status?.revision} />
             <div class="preset-grid">
                 ${slots.map(preset => html`
