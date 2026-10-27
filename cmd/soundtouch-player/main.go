@@ -86,6 +86,10 @@ func main() {
 		Usage: "LAN web player for controlling Bose SoundTouch devices",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
+				Name: "catalog-file", Usage: "Optional read-only curated catalog JSON file",
+				EnvVars: []string{"PLAYER_CATALOG_FILE"},
+			},
+			&cli.StringFlag{
 				Name:    "data-dir",
 				Usage:   "Directory for the player Favorites library (default: the user configuration directory/aftertouch-player). Use a separate directory for each running instance",
 				EnvVars: []string{"DATA_DIR"},
@@ -157,6 +161,7 @@ func main() {
 			// Create web app without templates (SPA mode)
 			webApp := soundtouchweb.NewWebApp()
 			webApp.Favorites = favorites.NewFileStore(filepath.Join(dataDir, "favorites.json"))
+			webApp.SetCatalogFile(c.String("catalog-file"))
 			webApp.Version = version
 			webApp.Commit = commit
 			webApp.Date = date
