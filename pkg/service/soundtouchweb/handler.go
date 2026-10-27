@@ -151,9 +151,13 @@ type WebApp struct {
 	// CatalogEntries, when set, returns the service's catalog of preset and
 	// source entries seen so far (issue 754), newest sighting first. The
 	// embedded build wires it to the service datastore; standalone
-	// soundtouch-player leaves it nil, which the player surfaces as "no
-	// catalog here" rather than as an empty one.
+	// soundtouch-player leaves it nil, but may supply ConfiguredCatalog.
+	// With neither source the UI reports an unavailable catalog.
 	CatalogEntries func() []catalog.Entry
+
+	// ConfiguredCatalog is an optional read-only curated source. Read failures
+	// remain errors instead of pretending the user supplied an empty catalog.
+	ConfiguredCatalog func() ([]catalog.Entry, error)
 
 	// Favorites is explicit household-owned state, separate from learned catalog
 	// entries and physical preset slots. Composition supplies one owner per file.

@@ -386,3 +386,9 @@ Favorites preserve original replay locations and source accounts. Comparison key
 A speaker detail offers Presets, Favorites and Recents tabs. Presets retain the six numbered hardware slots. Favorites are the explicitly saved library shared by speakers controlled through this player instance. Recents remain the selected speaker's own history. The selected tab is remembered while navigating within the application; switching tabs never starts playback.
 
 Save a favorite from the currently playing item, from a recent item, or by opening the optional catalog picker. Removing a favorite changes only the library. The preset star still assigns a hardware slot; the separate Save favorite button adds to the library. Favorites use the normal checked playback command and show confirmation or failure. Refreshes preserve valid entries during a read failure and offer Retry; library changes notify other connected browser windows.
+
+## Optional curated catalog
+
+`--catalog-file` (`PLAYER_CATALOG_FILE`) supplies a read-only JSON catalog to the standalone player. The embedded service uses `--player-catalog-file` with the same environment variable. The file has `{"version":1,"entries":[...]}`; entries use the existing catalog fields (`source`, `source_account`, `location`, `type`, `name`, `container_art`, `is_presetable`). Each entry needs a source and replay location. Preserve stable helper URLs and provider replay locations rather than temporary CDN manifests.
+
+Curated candidates appear alongside learned catalog entries, with curated ordering and metadata taking precedence for the same normalized content identity. Opening or updating the catalog never saves Favorites or changes a preset. The file is reread on request; a malformed, missing configured file or unsupported schema reports a catalog error. The learned catalog and the Favorites library files remain separate. With no catalog configured or learned, current-item and Recents saving still work.
