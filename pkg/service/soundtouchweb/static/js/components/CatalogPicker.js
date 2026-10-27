@@ -38,6 +38,7 @@ export function CatalogPicker({ deviceId, slot, presets, sources = null, current
         api.catalog()
             .then(res => {
                 if (cancelled) return;
+                if (res?.success !== true) throw new Error(res?.error || 'Catalog unavailable');
 
                 const data = res?.data ?? {};
 
@@ -278,8 +279,8 @@ export function CatalogPicker({ deviceId, slot, presets, sources = null, current
 
             ${state.status === 'unavailable' && html`
                 <p class="catalog-picker-note">
-                    This player has no catalog behind it. It is kept by the AfterTouch
-                    service, and can be switched off with the <code>catalog_size</code> setting.
+                    This player has no catalog configured. You can still save what's playing
+                    or choose an item from Recents.
                 </p>
             `}
 

@@ -235,6 +235,10 @@ func logBufferCapacityFromEnv(defaultCap int) int {
 // exact same flags loadConfig reads, instead of hand-duplicating them.
 var serviceFlags = []cli.Flag{
 	&cli.StringFlag{
+		Name: "player-catalog-file", Usage: "Optional read-only curated catalog JSON file for the player",
+		EnvVars: []string{"PLAYER_CATALOG_FILE"},
+	},
+	&cli.StringFlag{
 		Name:    "port",
 		Aliases: []string{"p"},
 		Usage:   "HTTP port to bind the service to",
@@ -693,6 +697,7 @@ func main() {
 
 			internalURL := "http://" + net.JoinHostPort(loopbackHost, config.port)
 			webApp := newEmbeddedWebApp(server, config.serverURL, internalURL, ds, config.deviceSeedRetryInterval, config.deviceSeedRetryWindow)
+			webApp.SetCatalogFile(c.String("player-catalog-file"))
 			webApp.OnboardingURL = stockholmOnboardingURL(stockholmHandler)
 
 			r := setupRouter(server, stockholmHandler, webApp)

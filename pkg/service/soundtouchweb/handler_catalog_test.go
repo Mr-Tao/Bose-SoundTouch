@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,5 +73,38 @@ func TestHandleCatalogWithoutAServiceReportsUnavailable(t *testing.T) {
 
 	if payload.Entries == nil {
 		t.Error("entries must serialise as [] rather than null")
+	}
+}
+
+func TestConfiguredCatalogMergesCandidatesWithoutSavingThem(t *testing.T) {
+	app := NewWebApp()
+	app.ConfiguredCatalog = func() ([]catalog.Entry, error) {
+		return []catalog.Entry{{Source: "TUNEIN", Location: "s1", Name: "Curated name"}}, nil
+	}
+	app.CatalogEntries = func() []catalog.Entry {
+		return []catalog.Entry{
+			{Source: "TUNEIN", SourceAccount: "TUNEIN", Location: "s1", Name: "Learned alias"},
+			{Source: "TUNEIN", SourceAccount: "another-account", Location: "s1", Name: "Distinct account"},
+			{Source: "LOCAL_INTERNET_RADIO", Location: "/station?data=variant", Name: "Other variant"},
+		}
+	}
+	w := httptest.NewRecorder()
+	app.HandleCatalog(w, httptest.NewRequest("GET", "/api/control/catalog", nil))
+	data := decodeCatalog(t, w)
+	if !data.Available || len(data.Entries) != 3 || data.Entries[0].Name != "Curated name" || data.Entries[1].Name != "Distinct account" {
+		t.Fatalf("merge: %+v", data)
+	}
+	if app.Favorites != nil || app.DeviceCount() != 0 {
+		t.Fatal("catalog must not create a library or speaker")
+	}
+}
+
+func TestConfiguredCatalogReadErrorIsNotAnEmptyPicker(t *testing.T) {
+	app := NewWebApp()
+	app.SetCatalogFile(filepath.Join(t.TempDir(), "missing.json"))
+	w := httptest.NewRecorder()
+	app.HandleCatalog(w, httptest.NewRequest("GET", "/api/control/catalog", nil))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), `"success":false`) {
+		t.Fatalf("error hidden: %d %s", w.Code, w.Body.String())
 	}
 }
