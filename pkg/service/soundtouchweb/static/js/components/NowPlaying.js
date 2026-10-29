@@ -1,11 +1,11 @@
 import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
-import { api } from '../api.js';
 import { SourceIcon } from '../sourceIcons.js';
 import { FavoriteButton } from './FavoriteButton.js';
 import { PresetPicker } from './PresetPicker.js';
 import { sameContentLocation } from '../contentLocation.mjs';
+import { currentPresetContent } from '../presetMutations.mjs';
 
 const html = htm.bind(h);
 
@@ -16,15 +16,10 @@ function fmt(secs) {
     return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-// NowPlayingPresetPicker — the ★ star button in the top-right corner of the
-// now-playing card. Translucent when nothing is mapped; golden when the
-// current content already exists in one of the device's presets, in which
-// case the tooltip names the slot.
-//
-// The popover itself lives in PresetPicker, shared with the Library rows
-// (issue 700). Here the store is a single request against whatever is already
-// playing, so its result is known immediately and shown inline.
-function NowPlayingPresetPicker({ deviceId, nowPlaying, presets }) {
+// The picker chooses a destination; the shared controller freezes this
+// ContentItem and confirms any move/overwrite against the speaker's bank.
+function NowPlayingPresetPicker({ nowPlaying, presets, presetMutations }) {
+    const current = currentPresetContent(nowPlaying);
     // Detect whether the current content is already saved as any preset.
     const currentSource = nowPlaying?.ContentItem?.Source;
     const currentLocation = nowPlaying?.ContentItem?.Location;
@@ -38,13 +33,12 @@ function NowPlayingPresetPicker({ deviceId, nowPlaying, presets }) {
         : undefined;
 
     function save(slotId) {
-        return api.storePreset(deviceId, slotId).then(res => {
-            if (!res?.success) throw new Error(res?.error || 'preset save failed');
-        });
+        if (current) presetMutations?.request(slotId, current);
     }
 
     return html`<${PresetPicker}
         onSave=${save}
+        disabled=${!current || !presetMutations}
         mappedSlot=${mappedPreset ? mappedPreset.ID : null}
         wrapClass="now-playing-fav-wrap"
         buttonClass="now-playing-fav-btn"
@@ -52,7 +46,7 @@ function NowPlayingPresetPicker({ deviceId, nowPlaying, presets }) {
     />`;
 }
 
-export function NowPlaying({ nowPlaying, deviceId, presets, favorites }) {
+export function NowPlaying({ nowPlaying, deviceId, presets, favorites, presetMutations }) {
     const [position, setPosition] = useState(0);
 
     useEffect(() => {
@@ -122,6 +116,7 @@ export function NowPlaying({ nowPlaying, deviceId, presets, favorites }) {
                     deviceId=${deviceId}
                     nowPlaying=${nowPlaying}
                     presets=${presets}
+                    presetMutations=${presetMutations}
                 />
             `}
         </div>

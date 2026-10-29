@@ -2243,3 +2243,22 @@ img.recent-source-icon { width: 20px; height: 20px; object-fit: contain; filter:
 @media (max-width: 380px) {
     .favorites-toolbar { align-items: flex-start; flex-direction: column; }
 }
+
+/* Explicit preset editing and bank-confirmed outcomes. */
+.preset-slot-wrap { flex-direction: column; }
+.preset-slot-wrap .preset-slot { flex: 1; }
+.preset-edit-control { min-width: 60px; min-height: 44px; align-self: flex-end; padding: .4rem .8rem; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; margin-top: .3rem; }
+.preset-save-text { width: auto; height: auto; min-height: 44px; min-width: 44px; padding: .4rem .6rem; font-size: .8rem; line-height: 1.3; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; opacity: 1; }
+.now-playing-fav-wrap { position: relative; top: auto; right: auto; align-self: flex-start; }
+.now-playing { flex-wrap: wrap; }
+.preset-picker-slot, .catalog-move-slot, .catalog-action-btn, .catalog-clear-btn { min-width: 44px; min-height: 44px; }
+.preset-editor { margin-top: .7rem; }
+.preset-save-current { min-height: 44px; margin-bottom: .5rem; }
+.preset-safety-dialog { position: fixed; z-index: 100; bottom: 1rem; left: 50%; transform: translateX(-50%); width: min(36rem, calc(100% - 2rem)); max-height: 75vh; overflow: auto; padding: 1rem; background: var(--surface); color: var(--text); border: 2px solid var(--text); border-radius: var(--radius); box-shadow: var(--shadow); }
+.preset-safety-dialog h3 { font-size: 1rem; margin-bottom: .5rem; }
+.preset-outcome { overflow-wrap: anywhere; }
+.preset-outcome.unverified, .preset-outcome.failed { color: var(--danger); }
+.preset-safety-actions { display: flex; gap: .7rem; flex-wrap: wrap; margin-top: .8rem; }
+.preset-safety-actions button { min-height: 44px; }
+.recent-row { flex-wrap: wrap; }
+.recent-row > .preset-picker-wrap { margin-left: auto; }

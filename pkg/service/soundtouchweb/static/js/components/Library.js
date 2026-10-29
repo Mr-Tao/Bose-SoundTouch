@@ -3,6 +3,8 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
 import { PresetPicker } from './PresetPicker.js';
+import { usePresetMutations } from '../usePresetMutations.js';
+import { PresetMutationDialog } from './PresetMutationDialog.js';
 
 const html = htm.bind(h);
 
@@ -11,11 +13,13 @@ export function Library({
     onPlaybackRequest,
     playbackBusy = false,
     commandReadbackDelays,
+    onStatusReadback,
 }) {
     const deviceEntries = Object.entries(devices);
     const firstDeviceId = deviceEntries.length > 0 ? deviceEntries[0][0] : null;
 
     const [deviceId, setDeviceId] = useState(firstDeviceId);
+    const presetMutations = usePresetMutations({ deviceId, device: devices[deviceId], onStatusReadback });
     const [servers, setServers] = useState([]);
     const [discovered, setDiscovered] = useState([]);
     const [server, setServer] = useState(null);       // { udn, name, account }
@@ -240,17 +244,15 @@ export function Library({
         const account = server?.account;
 
         if (!deviceId || !account || !entry?.location) {
-            return Promise.reject(new Error('no device, server or location'));
+            return;
         }
 
-        return api.storePresetContent(deviceId, slot, {
+        presetMutations.request(slot, {
             source: 'STORED_MUSIC',
             sourceAccount: account,
             location: entry.location,
             type: entry.isDir ? '' : (entry.type || 'track'),
             itemName: entry.name,
-        }).then(res => {
-            if (!res?.success) throw new Error(res?.error || 'preset save failed');
         });
     }
 
@@ -277,6 +279,7 @@ export function Library({
 
     return html`
         <div class="tunein-browser">
+            <${PresetMutationDialog} mutations=${presetMutations} />
 
             ${deviceEntries.length === 0 ? html`
                 <p class="tunein-item-desc" style="padding:.75rem 0">

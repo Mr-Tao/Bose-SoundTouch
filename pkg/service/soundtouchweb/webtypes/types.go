@@ -116,6 +116,7 @@ type DeviceConnection struct {
 	fieldGen   [numStatusFields]struct{ issued, applied uint64 }
 
 	volumeFieldMu     sync.Mutex
+	presetFieldMu     sync.Mutex
 	volumeOperationMu sync.Mutex
 	groupWriteMu      sync.Mutex
 	zoneWriteMu       sync.RWMutex

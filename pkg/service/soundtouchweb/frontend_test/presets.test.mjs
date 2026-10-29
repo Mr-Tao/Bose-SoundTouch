@@ -12,8 +12,8 @@ const css = await readFile(new URL('../static/css/app.css', import.meta.url), 'u
 // rendered only while something was playing *and* revealed only on hover, so
 // two reporters concluded the feature did not exist and filed a bug against
 // something else entirely.
-test('the save button is disabled rather than hidden when nothing is playing', () => {
-    assert.match(presets, /disabled=\$\{!canSave\}/);
+test('the explicit editor save is disabled when nothing is playing', () => {
+    assert.match(presets, /disabled=\$\{!canSave \|\| !presetMutations\}/);
     assert.doesNotMatch(presets, /\$\{canSave && html/);
 });
 
@@ -38,9 +38,9 @@ test('the save button is not hidden behind a hover reveal', () => {
     assert.doesNotMatch(css, /:hover\s+\.preset-save-btn/);
 });
 
-test('an empty slot saves the current content when clicked', () => {
-    assert.match(presets, /savableEmpty = isEmpty && canSave/);
-    assert.match(presets, /if \(savableEmpty\) store\(\)/);
+test('an empty slot opens the editor without storing current playback', () => {
+    assert.match(presets, /isEmpty \? onEdit\(preset.ID\)/);
+    assert.doesNotMatch(presets, /api.storePreset/);
 });
 
 // The grid item is .preset-slot-wrap, which stretches to the row height; the

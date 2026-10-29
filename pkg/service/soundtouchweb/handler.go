@@ -983,6 +983,9 @@ func (app *WebApp) HandleStorePresetContent(w http.ResponseWriter, r *http.Reque
 
 	logPlaybackRequest("store-preset", deviceID, contentItem.Source, contentItem.SourceAccount, contentItem.Location, contentItem.ItemName)
 
+	if !app.validatePresetTarget(w, r, device) {
+		return
+	}
 	err = device.Client.StorePreset(slot, contentItem)
 	app.sendControlResponse(w, err, fmt.Sprintf("Stored %s as preset %d", req.Source, slot))
 }
@@ -1020,6 +1023,9 @@ func (app *WebApp) HandleRemovePreset(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[preset] clear device=%q slot=%d", sanitizeLog(deviceID), slot)
 
+	if !app.validatePresetTarget(w, r, device) {
+		return
+	}
 	err = device.Client.RemovePreset(slot)
 	app.sendControlResponse(w, err, fmt.Sprintf("Cleared preset %d", slot))
 }

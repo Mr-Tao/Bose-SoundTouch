@@ -3283,14 +3283,16 @@ func TestStaleSourcesRemainVisibleButCannotBeSelected(t *testing.T) {
 // folder with no type, a track with one), the inline save feedback, and that
 // a row already occupying a slot says so.
 func TestLibraryRowSavesNamedContentToAPreset(t *testing.T) {
-	const fixture = `
+	const fixture = presetFixtureHelpers + `
 import { h, render } from 'preact';
 import { useState } from 'preact/hooks';
 import { Library } from '/app/static/js/components/Library.js';
 const status = {
+  epoch: 1,
   revision: 1,
-  presets: { Preset: [{ ID: 3, ContentItem: { Source: 'STORED_MUSIC', Location: '5:audio5:part13:3171:5 TRACK' } }] },
+  presets: { Preset: [{ ID: 3, ContentItem: { Source: 'STORED_MUSIC', SourceAccount: 'uuid:library/0', Location: '5:audio5:part13:3171:5 TRACK' } }] },
 };
+preparePresetBank(status.presets,'DEVICE1');
 function Fixture() {
   const [devices] = useState({ speaker: { info: { device_id: 'DEVICE1', name: 'Speaker' }, status } });
   return h('section', { id: 'library' }, h(Library, { devices, onPlaybackRequest: () => true }));
@@ -3332,31 +3334,36 @@ render(h(Fixture), document.getElementById('fixture'));
 		chromedp.Click(chromedp.CSS(`#library .tunein-item`)),
 		chromedp.WaitVisible(chromedp.CSS(`#library .library-preset-btn`)),
 
-		// Row 1 is the folder: save it to slot 4 and wait for the ✓.
+		// Row 1 is the folder: explicitly confirm slot 4 and verify its bank.
 		chromedp.Click(chromedp.CSS(`#library .tunein-item:nth-child(1) .library-preset-btn`)),
 		chromedp.Click(chromedp.CSS(`#library .tunein-item:nth-child(1) .preset-picker-slot:nth-child(4)`)),
-		chromedp.Poll[chromedp.Void](`document.querySelector('#library .tunein-item:nth-child(1) .preset-picker-slot.saved')?.textContent === '✓'`),
+		chromedp.WaitVisible(chromedp.CSS(`.preset-confirm`)),
+		chromedp.Click(chromedp.CSS(`.preset-confirm`)),
+		chromedp.WaitVisible(chromedp.CSS(`.preset-outcome.confirmed`)),
+		chromedp.Click(chromedp.CSS(`.preset-cancel`)),
 
 		// Row 2 is a single track, and it already occupies slot 3, so its star
 		// is marked and says which slot without the popover being opened.
-		evalInto(`document.querySelector('#library .tunein-item:nth-child(2) .library-preset-btn').title`, &trackStarTitle),
 		chromedp.Click(chromedp.CSS(`#library .tunein-item:nth-child(2) .library-preset-btn`)),
+		textInto(chromedp.CSS(`#library .tunein-item:nth-child(2) .preset-picker-label`), &trackStarTitle),
 		chromedp.Click(chromedp.CSS(`#library .tunein-item:nth-child(2) .preset-picker-slot:nth-child(1)`)),
-		chromedp.Poll[chromedp.Void](`document.querySelector('#library .tunein-item:nth-child(2) .preset-picker-slot.saved') !== null`),
+		chromedp.WaitVisible(chromedp.CSS(`.preset-confirm`)),
+		chromedp.Click(chromedp.CSS(`.preset-confirm`)),
+		chromedp.WaitVisible(chromedp.CSS(`.preset-outcome.confirmed`)),
 	); err != nil {
 		t.Fatalf("save library rows as presets: %v", err)
 	}
 
-	var mappedClass bool
+	var explicitAction bool
 	if err := chromedp.Do(ctx,
-		evalInto(`document.querySelector('#library .tunein-item:nth-child(2) .library-preset-btn').classList.contains('mapped')`, &mappedClass),
+		evalInto(`document.querySelector('#library .tunein-item:nth-child(2) .library-preset-btn').textContent === 'Save as preset'`, &explicitAction),
 	); err != nil {
 		t.Fatalf("read mapped star: %v", err)
 	}
-	if !mappedClass {
-		t.Error("a row already saved in a slot should have a mapped star")
+	if !explicitAction {
+		t.Error("a hardware preset save must have an explicit text action")
 	}
-	if !strings.Contains(trackStarTitle, "preset 3") {
+	if !strings.Contains(strings.ToLower(trackStarTitle), "preset 3") {
 		t.Errorf("mapped star title = %q, want it to name preset 3", trackStarTitle)
 	}
 
@@ -3386,7 +3393,7 @@ render(h(Fixture), document.getElementById('fixture'));
 // card rendering the shared picker directly with the wrapper's props) went
 // unnoticed: both leave the star gone or inert at runtime.
 func TestNowPlayingStarSavesThroughTheSharedPicker(t *testing.T) {
-	const fixture = `
+	const fixture = presetFixtureHelpers + `
 import { h, render } from 'preact';
 import { NowPlaying } from '/app/static/js/components/NowPlaying.js';
 const nowPlaying = {
@@ -3394,15 +3401,15 @@ const nowPlaying = {
   ContentItem: { Source: 'STORED_MUSIC', Location: '5:audio5:part13:3171:5 TRACK', ItemName: 'Great Song' },
 };
 const presets = { Preset: [{ ID: 2, ContentItem: { Source: 'STORED_MUSIC', Location: '5:audio5:part13:3171:5 TRACK' } }] };
-render(h(NowPlaying, { nowPlaying, deviceId: 'speaker', presets }), document.getElementById('fixture'));
+renderSafePresetComponent(NowPlaying, { nowPlaying, deviceId: 'speaker', presets });
 `
 
 	var mu sync.Mutex
 	var slots []string
 	server := newPlayerFixtureServer(t, fixture, func(r chi.Router) {
-		r.Get("/api/control/devices/speaker/action/storepreset", func(w http.ResponseWriter, req *http.Request) {
+		r.Post("/api/control/devices/speaker/preset/{slot}", func(w http.ResponseWriter, req *http.Request) {
 			mu.Lock()
-			slots = append(slots, req.URL.Query().Get("id"))
+			slots = append(slots, chi.URLParam(req, "slot"))
 			mu.Unlock()
 			_ = json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true})
 		})
@@ -3414,16 +3421,18 @@ render(h(NowPlaying, { nowPlaying, deviceId: 'speaker', presets }), document.get
 	if err := chromedp.Do(ctx,
 		chromedp.Navigate(server.URL+"/fixture"),
 		chromedp.WaitVisible(chromedp.CSS(`.now-playing-fav-btn`)),
-		evalInto(`document.querySelector('.now-playing-fav-btn').title`, &starTitle),
-		evalInto(`document.querySelector('.now-playing-fav-btn').classList.contains('mapped')`, &mapped),
+		evalInto(`document.querySelector('.now-playing-fav-btn').textContent === 'Save as preset'`, &mapped),
 		chromedp.Click(chromedp.CSS(`.now-playing-fav-btn`)),
+		textInto(chromedp.CSS(`.preset-picker-label`), &starTitle),
 		chromedp.Click(chromedp.CSS(`.preset-picker-slot:nth-child(5)`)),
-		chromedp.Poll[chromedp.Void](`document.querySelector('.preset-picker-slot.saved')?.textContent === '✓'`),
+		chromedp.WaitVisible(chromedp.CSS(`.preset-confirm`)),
+		chromedp.Click(chromedp.CSS(`.preset-confirm`)),
+		chromedp.WaitVisible(chromedp.CSS(`.preset-outcome.confirmed`)),
 	); err != nil {
 		t.Fatalf("save the now-playing content as a preset: %v", err)
 	}
 
-	if !mapped || !strings.Contains(starTitle, "preset 2") {
+	if !mapped || !strings.Contains(strings.ToLower(starTitle), "preset 2") {
 		t.Errorf("now-playing star: mapped=%v title=%q, want it marked and naming preset 2", mapped, starTitle)
 	}
 

@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
 import { FavoriteButton } from './FavoriteButton.js';
+import { PresetPicker } from './PresetPicker.js';
 import { SourceIcon } from '../sourceIcons.js';
 import { artworkFor, presetArtIndex } from '../recentsArt.mjs';
 
@@ -17,7 +18,7 @@ export function Recents(props) {
 }
 
 function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
-    revision = 0, refreshToken = 0, showHeading = true, favorites }) {
+    revision = 0, refreshToken = 0, showHeading = true, favorites, presetMutations }) {
     const [items, setItems] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -147,6 +148,7 @@ function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
                             <span class="recent-play">▶</span>
                         </button>
                         <${FavoriteButton} item=${ci} favorites=${favorites} />
+                        ${presetMutations && html`<${PresetPicker} onSave=${slot => presetMutations.request(slot, ci)} />`}
                         </div>
                     `;
                 })}

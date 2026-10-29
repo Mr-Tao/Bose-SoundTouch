@@ -17,7 +17,7 @@ import (
 
 // The fixture is the issue 697 shape: the speaker reports six presets, and the
 // service stores eight rows for it.
-const storedPresetsFixtureScript = `
+const storedPresetsFixtureScript = presetFixtureHelpers + `
 import { h, render } from 'preact';
 import { Presets } from '/app/static/js/components/Presets.js';
 const status = {
@@ -25,7 +25,7 @@ const status = {
   nowPlaying: { Source: 'STANDBY' },
   presets: { Preset: [1, 2, 3, 4, 5, 6].map(id => ({ ID: id, ContentItem: { Source: 'TUNEIN', Location: 's' + id, ItemName: 'Station ' + id } })) },
 };
-render(h('section', { id: 'presets' }, h(Presets, { deviceId: 'speaker', status })), document.getElementById('fixture'));
+renderSafePresetComponent(Presets, { deviceId: 'speaker', status });
 `
 
 func storedRow(index int, button, name, source, verdict string) map[string]any {
@@ -263,7 +263,10 @@ func TestPerSlotChoiceSettlesOneButton(t *testing.T) {
 		}
 	}
 
-	server := newPlayerFixtureServer(t, storedPresetsFixtureScript, func(r chi.Router) {
+	fixture := strings.Replace(storedPresetsFixtureScript,
+		`{ Source: 'TUNEIN', Location: 's' + id, ItemName: 'Station ' + id }`,
+		`(id === 1 ? { Source: 'RADIO_BROWSER', Location: 'uuid-fm4', ItemName: 'Theirs' } : { Source: 'TUNEIN', Location: 's' + id, ItemName: 'Station ' + id })`, 1)
+	server := newPlayerFixtureServer(t, fixture, func(r chi.Router) {
 		r.Get("/api/control/devices/speaker/stored-presets/", func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true, Data: slotPayload()})
 		})
@@ -303,6 +306,10 @@ func TestPerSlotChoiceSettlesOneButton(t *testing.T) {
 
 		// Keeping ours pushes the stored content to the speaker.
 		chromedp.Click(chromedp.CSS(`#presets .stored-presets-side:nth-child(2) .stored-presets-choose`)),
+		chromedp.WaitVisible(chromedp.CSS(`.preset-confirm`)),
+		chromedp.Click(chromedp.CSS(`.preset-confirm`)),
+		chromedp.WaitVisible(chromedp.CSS(`.preset-outcome.confirmed`)),
+		chromedp.Click(chromedp.CSS(`.preset-cancel`)),
 		// The panel stays: keeping ours changes the speaker, and the stored
 		// list it is compared against has not moved.
 		chromedp.Poll[chromedp.Void](`performance.getEntriesByType('resource').some(e => e.name.endsWith('/preset/1'))`),

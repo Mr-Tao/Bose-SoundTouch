@@ -27,13 +27,12 @@ that is not the case yet, see [Getting Started](GETTING-STARTED.md).
    Both let you play a result straight to a speaker, so there is no need to
    hunt for stream URLs by hand.
 3. Press play and let the station start.
-4. Press the **★** at the top right of the now-playing card, then pick a slot
-   from **1 2 3 4 5 6**.
+4. Press **Save as preset** on the now-playing card and pick a slot from **1 2 3 4 5 6**.
+5. Review the station, destination and any existing slots affected, then press **Confirm change**.
 
-The star turns gold once the current content is saved in a slot, and its
-tooltip names which one. An empty preset tile reads **Save current here** and
-saves to that slot when you click it, which is quicker when you already know
-where you want it.
+You can also press **Edit** beneath a preset tile and choose **Save current here**. An empty tile opens its editor; opening it never writes a preset. Saving content already in the same slot makes no change. Favorites is a separate application library; adding a favorite does not change these six hardware buttons.
+
+The speaker can move content that already belongs to another slot, emptying the old slot and replacing the destination. The confirmation names both effects. After saving, AfterTouch reads all six slots and reports success only when the resulting bank matches the requested change. If the result remains unverified, check the slots before trying again; AfterTouch does not repeat the write automatically.
 
 Press the matching button on the speaker. It should start playing within a few
 seconds.
@@ -46,7 +45,7 @@ first.
 1. Open the **Library** page and pick your media server. If none is listed,
    set one up first: see [Play from a NAS or USB drive](dlna-music-library.md).
 2. Browse to an album, a folder, or a single track.
-3. Press the **★** on that row and pick a slot.
+3. Press **Save as preset** on that row, pick a slot and review the confirmation.
 
 Nothing is interrupted: the item is saved by name, so whatever is playing keeps
 playing. A saved folder plays from its first track when you recall it, and
@@ -56,10 +55,10 @@ skip forward and back move through it.
 
 Anything the speaker can play and mark as presetable can go in a slot, whatever
 its source: a Spotify album, a TuneIn station, a track from your library. Play
-it, press the **★**, pick a slot.
+it, choose **Save as preset**, pick a slot and review the confirmation.
 
 Live inputs cannot be saved, because there is nothing to recall: Bluetooth, AUX
-and AirPlay have no address to store. The star is greyed out for those.
+and AirPlay have no address to store. Saving current content is unavailable when the speaker marks it as non-presetable.
 
 ## What a preset remembers
 
@@ -76,18 +75,14 @@ source, and a name. Two consequences worth knowing:
 
 ## Change a slot without playing anything
 
-The **✎** next to each preset tile opens the slot editor. It lists what
-AfterTouch has seen this household play or store, so filling a slot is picking
-from that list rather than finding the station again first.
+The **Edit** button beneath each preset tile opens its slot editor. It lists what AfterTouch has seen this household play or store, so filling a slot is picking from that list rather than finding the station again first.
 
 From the editor you can:
 
 - **Fill the slot** from the list. Type in the filter box to narrow it.
 - **Rename** what is in the slot. The name is yours; it does not have to match
   what the station calls itself.
-- **Move it to another slot.** Press a slot number under "Move to". A slot that
-  already holds something is marked, says what it would replace, and needs a
-  second press.
+- **Move it to another slot.** Pick a number under "Move to" and review the source removal and any destination replacement before confirming. If the speaker keeps a copy in the original slot, AfterTouch clears that slot only after verifying the destination.
 - **Empty the slot.** The station stays on the list, so this loses the slot's
   contents, not the station.
 
@@ -119,9 +114,7 @@ happened on. That is what makes it useful for two jobs at once.
 - **Copying between speakers.** Open the editor on the second speaker and pick
   the same entry.
 
-An entry already sitting in a slot is still listed, and says which slot it is
-in. Putting the same station in two slots is allowed; it is sometimes what you
-want.
+An entry already sitting in a slot is still listed and identifies its existing slot. Do not assume saving it elsewhere will make a second copy: the speaker can move matching content instead. The confirmation explains the possible source-slot removal as well as any destination replacement.
 
 The list holds the 100 most recently seen entries, which costs about 45 KB.
 Change that in the admin UI under Settings ("Preset catalog size"), or by
@@ -326,7 +319,7 @@ soundtouch-cli --host 192.0.2.100 preset remove --slot 6
 
 ## When a preset does not work
 
-**The star is greyed out.** The current source cannot be saved. Bluetooth, AUX
+**Saving the current source is unavailable.** The current source cannot be saved. Bluetooth, AUX
 and AirPlay never can; switch to a station or a library item first.
 
 **The button does nothing on the speaker.** Check the slot actually holds

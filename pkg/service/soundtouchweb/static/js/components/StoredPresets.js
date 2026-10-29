@@ -24,7 +24,7 @@ const VERDICTS = {
 // The repair is the one preset write that goes to the service rather than
 // through the speaker: these rows exist only in AfterTouch, and several of
 // them name no button the speaker could be asked about.
-export function StoredPresets({ deviceId, revision }) {
+export function StoredPresets({ deviceId, revision, presetMutations }) {
     const [payload, setPayload] = useState(null);
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState(false);
@@ -75,32 +75,14 @@ export function StoredPresets({ deviceId, revision }) {
 
         if (!content?.present) return;
 
-        setBusy(true);
-        setError(null);
-
-        api.storePresetContent(deviceId, slot, {
+        presetMutations?.request(slot, {
             source: content.source,
             sourceAccount: content.sourceAccount ?? '',
             location: content.location,
             type: content.type ?? '',
             itemName: content.itemName ?? '',
             containerArt: content.containerArt ?? '',
-        })
-            .then(res => {
-                setBusy(false);
-
-                if (res?.success === false) {
-                    setError(res.error || 'The speaker refused that preset.');
-
-                    return;
-                }
-
-                return load();
-            })
-            .catch(() => {
-                setBusy(false);
-                setError('The request did not complete; reload to see what the speaker has now.');
-            });
+        }, { rename: true });
     }
 
     function repair(drop) {
@@ -188,7 +170,7 @@ export function StoredPresets({ deviceId, revision }) {
                                         <button
                                             type="button"
                                             class="stored-presets-choose"
-                                            disabled=${busy || !entry.ours?.present}
+                                            disabled=${busy || !entry.ours?.present || !presetMutations}
                                             title=${entry.ours?.present
                                                 ? `Put what AfterTouch stores into the speaker's preset ${entry.slot}`
                                                 : 'AfterTouch stores nothing for this button'}

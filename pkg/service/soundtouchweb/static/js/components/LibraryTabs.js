@@ -9,7 +9,7 @@ const html = htm.bind(h);
 const tabs = ['presets', 'favorites', 'recents'];
 
 export function LibraryTabs({ deviceId, device, status, command, commandBusy = false,
-    onSelectPreset, onPlay, onPlayFavorite = onPlay, selectedTab, onTabChange, recentsRefreshToken = 0, favorites }) {
+    onSelectPreset, onPlay, onPlayFavorite = onPlay, selectedTab, onTabChange, recentsRefreshToken = 0, favorites, presetMutations }) {
     const tabRefs = useRef([]);
     const [focused, setFocused] = useState(null);
     const [localTab, setLocalTab] = useState('presets');
@@ -50,7 +50,7 @@ export function LibraryTabs({ deviceId, device, status, command, commandBusy = f
             <div id=${`${prefix}-panel-presets`} role="tabpanel" aria-labelledby=${`${prefix}-tab-presets`}
                 hidden=${selected !== 'presets'} tabIndex="0">
                 <${Presets} deviceId=${deviceId} status=${status} command=${command} commandBusy=${commandBusy}
-                    onSelect=${onSelectPreset} showHeading=${false} />
+                    onSelect=${onSelectPreset} showHeading=${false} presetMutations=${presetMutations} />
             </div>
             <div id=${`${prefix}-panel-favorites`} role="tabpanel" aria-labelledby=${`${prefix}-tab-favorites`}
                 hidden=${selected !== 'favorites'} tabIndex="0">
@@ -62,7 +62,7 @@ export function LibraryTabs({ deviceId, device, status, command, commandBusy = f
                 <${Recents} deviceId=${deviceId} physicalId=${device?.info?.device_id} presets=${status?.presets}
                     epoch=${status?.epoch} revision=${status?.recentsRevision}
                     refreshToken=${recentsRefreshToken} command=${command} commandBusy=${commandBusy}
-                    onPlay=${onPlay} favorites=${favorites} showHeading=${false} />
+                    onPlay=${onPlay} favorites=${favorites} showHeading=${false} presetMutations=${presetMutations} />
             </div>
         </section>
     `;

@@ -18,6 +18,8 @@ import { Announcements } from './components/Announcements.js';
 import { ContentPlaybackCommand } from './components/ContentPlaybackCommand.js';
 import { MemberSettings } from './components/MemberSettings.js';
 import { api } from './api.js';
+import { usePresetMutations } from './usePresetMutations.js';
+import { PresetMutationDialog } from './components/PresetMutationDialog.js';
 import { isSoundTouch10StereoPair } from './stereoPresentation.mjs';
 import { previousDetailTarget } from './devicePresentation.js';
 import { captureDetailView, detailViewIdentity, restoreDetailView } from './detailViewState.mjs';
@@ -230,6 +232,7 @@ export function DeviceDetail({
         return restoreDetailView(detailRoot.current, restoredView, device);
     }, [restoredView, deviceId, viewIdentity]);
     const status = device?.status;
+    const presetMutations = usePresetMutations({ deviceId, device, onStatusReadback });
     const favorites = useFavorites(favoritesRefreshToken);
     const controlsMode = device?.zone && !device.zone.isStandalone &&
         device.zone.masterControlId === deviceId ? 'zone' : 'device';
@@ -471,7 +474,8 @@ export function DeviceDetail({
                     </svg>
                 </button>
             </div>
-            <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} favorites=${favorites} />
+            <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} favorites=${favorites} presetMutations=${presetMutations} />
+            <${PresetMutationDialog} mutations=${presetMutations} />
             <${Controls}
                 key=${controlsMode === 'zone' ? controlsTargetKey : deviceId}
                 deviceId=${deviceId}
@@ -499,6 +503,7 @@ export function DeviceDetail({
                 onPlayFavorite=${item => playRecent(item, 'favorite')}
                 selectedTab=${libraryTab} onTabChange=${onLibraryTabChange}
                 recentsRefreshToken=${recentsRefreshToken} favorites=${favorites}
+                presetMutations=${presetMutations}
             />
             <${Sources}
                 deviceId=${deviceId}
@@ -921,6 +926,7 @@ function App() {
                     <${Library}
                         key="library"
                         devices=${devices}
+                        onStatusReadback=${mergeDeviceReadback}
                         onPlaybackRequest=${startContentPlayback}
                         playbackBusy=${contentPlaybackBusy}
                     />

@@ -306,13 +306,7 @@ func (app *WebApp) applyPresetEvent(
 	conn *webtypes.DeviceConnection,
 	presets *models.Presets,
 ) bool {
-	return app.applySpeakerStatusEvent(conn, webtypes.FieldPresets, func(status *webtypes.DeviceStatus) bool {
-		changed := !reflect.DeepEqual(status.Presets, presets)
-		status.Presets = presets
-		status.LastActivity = time.Now()
-
-		return changed
-	})
+	return app.queueBroadcastIfChanged(conn.ApplyPresetEvent(presets))
 }
 
 func (app *WebApp) applyBassEvent(
@@ -493,14 +487,12 @@ func (app *WebApp) refreshPresets(deviceID string, conn *webtypes.DeviceConnecti
 		return
 	}
 
-	presets, err := conn.Client.GetPresets()
-	if err != nil {
+	if err := app.readDevicePresets(conn); err != nil {
 		log.Printf("Speaker %s: presets re-read failed: %v", sanitizeLog(deviceID), sanitizeLog(err.Error()))
 
 		return
 	}
 
-	app.applyPresetEvent(conn, presets)
 }
 
 // applyBalanceEvent stores a fresh balance reading on the device status.
@@ -1121,10 +1113,7 @@ func (app *WebApp) updateDeviceStatus(deviceID string, conn *webtypes.DeviceConn
 	if presetsErr == nil {
 		anyFetchSucceeded = true
 
-		conn.CompleteFieldPoll(webtypes.FieldPresets, presetsGen, func(s *webtypes.DeviceStatus) {
-			s.Presets = presets
-			s.LastActivity = time.Now()
-		})
+		conn.ApplyPolledPresets(presetsGen, presets)
 	}
 
 	if sourcesErr == nil {
