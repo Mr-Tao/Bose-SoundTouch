@@ -2538,7 +2538,7 @@ img.recent-source-icon { width: 20px; height: 20px; object-fit: contain; filter:
 /* Keep connection state visibly separate from the model, including wrapped headings. */
 .device-detail-context { margin-top: .4rem; gap: .4rem .85rem; }
 .device-detail-context > * { margin-top: 0; }
-.device-detail-status { display: inline-flex; align-items: center; gap: .4rem; white-space: nowrap; }
+.device-detail-status { display: inline-flex; align-items: center; gap: .4rem; white-space: nowrap; margin-inline-start: auto; order: 1; }
 .device-detail-status::before { content: ""; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--offline); }
 .device-detail-status.online::before { background: var(--online); }
 .device-detail-status.stale::before { background: var(--stale); }
