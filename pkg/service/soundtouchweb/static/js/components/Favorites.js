@@ -1,5 +1,5 @@
 import { h } from 'preact';
-import { useState } from 'preact/hooks';
+import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import htm from 'htm';
 import { SourceIcon } from '../sourceIcons.js';
 import { sourceLabel } from '../sourceLabels.js';
@@ -11,6 +11,21 @@ const html = htm.bind(h);
 export function Favorites({ deviceId, status, favorites, commandBusy = false, onPlay }) {
     const [picking, setPicking] = useState(false);
     const [query, setQuery] = useState('');
+    const addButton = useRef(null);
+    const picker = useRef(null);
+    const pickerId = `favorites-catalog-${encodeURIComponent(deviceId || 'speaker')}`;
+    function closePicker() {
+        setPicking(false);
+        addButton.current?.focus({ preventScroll: true });
+    }
+    useLayoutEffect(() => {
+        if (!picking) return;
+        // Reveal the heading, not the search field: touch users should see the
+        // opened catalog without an unsolicited on-screen keyboard.
+        const close = picker.current?.querySelector('.catalog-picker-close');
+        close?.focus({ preventScroll: true });
+        close?.closest('.catalog-picker-head')?.scrollIntoView({ block: 'nearest' });
+    }, [picking]);
     const { entries = [], available, loading, error, busy } = favorites ?? {};
     const needle = query.trim().toLowerCase();
     const filtered = entries.filter(entry => !needle ||
@@ -18,17 +33,24 @@ export function Favorites({ deviceId, status, favorites, commandBusy = false, on
 
     function pick(item) {
         // CatalogPicker's selector supplies a ContentItem; saving never plays it.
-        return favorites.add(item).then(() => setPicking(false)).catch(() => {});
+        return favorites.add(item).then(closePicker).catch(() => {});
     }
 
     return html`
         <div class="favorites-section" aria-busy=${loading ? 'true' : null}>
             <div class="favorites-toolbar">
                 <p class="favorites-note">Saved for all your speakers.</p>
-                ${available === true && html`<button type="button" class="favorites-add"
-                    disabled=${busy} onClick=${() => setPicking(!picking)}
+                ${available === true && html`<button type="button" class="favorites-add" ref=${addButton}
+                    aria-controls=${pickerId} disabled=${busy} onClick=${() => picking ? closePicker() : setPicking(true)}
                     aria-expanded=${picking ? 'true' : 'false'}>Add from catalog</button>`}
             </div>
+            ${picking && html`<div id=${pickerId} class="favorites-catalog" ref=${picker}
+                onKeyDown=${event => {
+                    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closePicker(); }
+                }}>
+                <${CatalogPicker} deviceId=${deviceId} sources=${status?.sources}
+                    presets=${status?.presets} onPick=${pick} onClose=${closePicker} />
+            </div>`}
             ${error && html`<div class="favorites-error" role="alert">
                 <span>${error}</span>
                 <button type="button" class="favorites-retry" disabled=${loading || busy}
@@ -72,8 +94,7 @@ export function Favorites({ deviceId, status, favorites, commandBusy = false, on
                 })}
             </ul>
             ${needle && entries.length > 0 && filtered.length === 0 && html`<p class="favorites-empty">Nothing matches that filter.</p>`}
-            ${picking && html`<${CatalogPicker} deviceId=${deviceId} sources=${status?.sources}
-                presets=${status?.presets} onPick=${pick} onClose=${() => setPicking(false)} />`}
+
         </div>
     `;
 }

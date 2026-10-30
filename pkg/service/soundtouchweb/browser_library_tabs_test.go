@@ -312,3 +312,32 @@ render(h(Fixture), document.getElementById('fixture'));
 		t.Errorf("before=%d play=%d saves=%d reads=%d pending=%v scoped=%v fields=%v selected=%v siblings=%v", writesBeforePlay, writes, favoriteWrites, readbacks, pending, scoped, savedFields, selected, noNested)
 	}
 }
+
+func TestFavoriteCatalogOpensBesideItsTriggerOnPhone(t *testing.T) {
+	const fixture = `
+import {h,render} from 'preact';
+import {Favorites} from '/app/static/js/components/Favorites.js';
+import {api} from '/app/static/js/api.js';
+window.catalogWrites=[];
+api.catalog=async()=>({success:true,data:{available:true,entries:[{source:'TUNEIN',location:'new',name:'New station'}]}});
+const favorites={available:true,entries:Array.from({length:20},(_,n)=>({id:String(n),content_item:{Source:'TUNEIN',Location:'s'+n,ItemName:'Station '+n}})),add:item=>catalogWrites.push(item),remove:id=>catalogWrites.push(id)};
+render(h('div',{class:'device-detail'},h(Favorites,{deviceId:'speaker',favorites,onPlay:item=>catalogWrites.push(item)})),document.getElementById('fixture'));
+`
+	server := newMetadataFixtureServer(t, fixture)
+	ctx := newHeadlessChromeContext(t)
+	for _, width := range []int64{320, 390} {
+		if err := chromedp.Do(ctx,
+			chromedp.EmulateViewport(width, 700), chromedp.Navigate(server.URL+"/fixture"),
+			chromedp.WaitVisible(chromedp.CSS(".favorites-add")), chromedp.Click(chromedp.CSS(".favorites-add")),
+			chromedp.WaitVisible(chromedp.CSS(".catalog-entry")),
+			chromedp.Poll[chromedp.Void](`(()=>{const head=document.querySelector('.catalog-picker-head'),picker=document.querySelector('.favorites-catalog'),trigger=document.querySelector('.favorites-add');const r=head.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&document.activeElement.matches('.catalog-picker-close')&&!!(picker.compareDocumentPosition(document.querySelector('.favorites-list'))&Node.DOCUMENT_POSITION_FOLLOWING)&&trigger.getAttribute('aria-controls')===picker.id&&trigger.getAttribute('aria-expanded')==='true'&&document.documentElement.scrollWidth<=innerWidth&&catalogWrites.length===0})()`),
+			chromedp.KeyEvent(kb.Escape),
+			chromedp.Poll[chromedp.Void](`!document.querySelector('.catalog-picker')&&document.activeElement.matches('.favorites-add')&&document.querySelector('.favorites-add').getAttribute('aria-expanded')==='false'&&catalogWrites.length===0`),
+			chromedp.Click(chromedp.CSS(".favorites-add")), chromedp.WaitVisible(chromedp.CSS(".catalog-picker-close")),
+			chromedp.Click(chromedp.CSS(".catalog-picker-close")),
+			chromedp.Poll[chromedp.Void](`!document.querySelector('.catalog-picker')&&document.activeElement.matches('.favorites-add')&&catalogWrites.length===0`),
+		); err != nil {
+			t.Fatalf("catalog at %d: %v", width, err)
+		}
+	}
+}
