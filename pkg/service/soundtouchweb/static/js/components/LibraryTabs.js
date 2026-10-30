@@ -4,6 +4,7 @@ import htm from 'htm';
 import { Presets } from './Presets.js';
 import { Recents } from './Recents.js';
 import { Favorites } from './Favorites.js';
+import { libraryOwnerCaption } from '../detailPresentation.mjs';
 
 const html = htm.bind(h);
 const tabs = ['presets', 'favorites', 'recents'];
@@ -47,6 +48,7 @@ export function LibraryTabs({ deviceId, device, status, command, commandBusy = f
                     onFocus=${() => setFocused(tab)} onKeyDown=${event => keyDown(event, index)}
                     onClick=${() => select(tab)}>${tab[0].toUpperCase() + tab.slice(1)}</button>`)}
             </div>
+            <p class="library-owner">${libraryOwnerCaption(selected, deviceId, device)}</p>
             <div id=${`${prefix}-panel-presets`} role="tabpanel" aria-labelledby=${`${prefix}-tab-presets`}
                 hidden=${selected !== 'presets'} tabIndex="0">
                 <${Presets} deviceId=${deviceId} status=${status} command=${command} commandBusy=${commandBusy}

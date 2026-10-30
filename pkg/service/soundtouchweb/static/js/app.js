@@ -1,6 +1,7 @@
 import { h, render } from 'preact';
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
+import { DetailNavigation } from './components/DetailNavigation.js';
 import { DeviceList } from './components/DeviceList.js';
 import { NowPlaying } from './components/NowPlaying.js';
 import { Controls } from './components/Controls.js';
@@ -38,6 +39,7 @@ import {
     zoneMemberVolumes,
 } from './zoneVolumePreview.mjs';
 import { zoneTopologyFingerprint } from './zonePresentation.mjs';
+import { detailFreshnessPresentation, detailPresentation } from './detailPresentation.mjs';
 
 const html = htm.bind(h);
 
@@ -457,6 +459,9 @@ export function DeviceDetail({
                 : current);
     }
 
+    const presentation = detailPresentation(deviceId, device);
+    const freshness = detailFreshnessPresentation(device);
+
     return html`
         <div class="device-detail" ref=${detailRoot}>
             <div class="page-header">
@@ -475,9 +480,18 @@ export function DeviceDetail({
                 </button>
             </div>
             <header class="device-detail-heading">
-                <h2 class="device-detail-name">${device.info?.name || deviceId}</h2>
-                ${device.info?.type && html`<p class="device-detail-model">${device.info.type}</p>`}
+                <h1 class="device-detail-name">${presentation.name}</h1>
+                <div class="device-detail-context">
+                    <span class="device-detail-model">${presentation.context}</span>
+                    ${presentation.membership ? html`<span class="device-detail-membership"
+                        title=${presentation.membership.title}>${presentation.membership.label}</span>` : null}
+                    ${presentation.degraded ? html`<span class="device-detail-health">Degraded</span>` : null}
+                    <span class="device-detail-status ${freshness.state}">${freshness.label}</span>
+                    ${freshness.freshness ? html`<span class="device-detail-freshness"
+                        title=${freshness.freshness.title}>${freshness.freshness.label}</span>` : null}
+                </div>
             </header>
+            <section class="detail-playback" aria-label="Playback">
             <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} favorites=${favorites} presetMutations=${presetMutations} />
             <${PresetMutationDialog} mutations=${presetMutations} />
             <${Controls}
@@ -500,6 +514,7 @@ export function DeviceDetail({
                 onZoneVolumeReadback=${reconcileGroupVolume}
                 onZoneVolumeFailure=${rejectGroupVolumePreview}
             />
+            </section>
             <${LibraryTabs}
                 deviceId=${deviceId} device=${device} status=${status}
                 command=${command} commandBusy=${commandBusy}
@@ -511,6 +526,7 @@ export function DeviceDetail({
             />
             <${Sources}
                 deviceId=${deviceId}
+                disclosure=${true}
                 status=${device.status}
                 onStatusReadback=${status => onStatusReadback(deviceId, status)}
                 onNavigate=${onNavigate}
@@ -584,20 +600,7 @@ function App() {
 
     const getPageTitle = () => {
         if (page === 'devices') return 'Devices';
-        if (page === 'device') {
-            const device = devices[selectedId];
-            const name = device?.info?.name || selectedId || 'Device Detail';
-            const ip = device?.info?.ip_address;
-            if (ip) {
-                return html`
-                    <div class="title-with-subtitle">
-                        <span class="main-title">${name}</span>
-                        <span class="sub-title">${ip}</span>
-                    </div>
-                `;
-            }
-            return name;
-        }
+        if (page === 'device') return 'Devices';
         if (page === 'tunein') return 'TuneIn';
         if (page === 'radiobrowser') return 'RadioBrowser';
         if (page === 'library') return 'Library';
@@ -812,7 +815,7 @@ function App() {
                     </div>
                 </a>
                 <div class="page-title">${getPageTitle()}</div>
-                <div class="nav-links">
+                ${page === 'device' ? html`<${DetailNavigation} onNavigate=${navigate} onDiscover=${discover} isDiscovering=${isDiscovering} />` : html`<div class="nav-links">
                     <a href="#" class="${page === 'devices' || page === 'device' ? 'active' : ''}"
                         onClick=${(e) => { e.preventDefault(); navigate('devices'); }}
                         title="Devices"
@@ -862,7 +865,7 @@ function App() {
                             <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
                         </svg>
                     </a>
-                </div>
+                </div>`}
             </nav>
 
             <${Announcements} />

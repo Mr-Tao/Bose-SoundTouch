@@ -75,10 +75,10 @@ func TestZoneMemberBackRestoresExpandedViewAfterDelayedReads(t *testing.T) {
             // Pointer activation need not focus a button on every browser.
             link().blur();
             link().click();
-            await wait(() => document.querySelector('.page-title')?.textContent.includes('Living Pair') &&
+            await wait(() => document.querySelector('.device-detail-name')?.textContent.includes('Living Pair') &&
                 document.querySelectorAll('.stereo-pair-member').length === 2);
             document.querySelector('.device-detail .back-btn').click();
-            await wait(() => document.querySelector('.page-title')?.textContent.includes('Atrium') && header());
+            await wait(() => document.querySelector('.device-detail-name')?.textContent.includes('Atrium') && header());
             await wait(() => header().getAttribute('aria-expanded') === 'true' &&
                 [...row().querySelectorAll('details')].some(node => node.dataset.detailKey === firstKey && node.open &&
                     node.querySelector('.settings-network-technical')?.open) &&

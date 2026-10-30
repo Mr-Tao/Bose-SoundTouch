@@ -95,7 +95,7 @@ func TestZoneMemberNavigationFollowsSiblingsAndRetracesBack(t *testing.T) {
 			// Express pointer intent before coordinate resolution can race restored scroll.
 			chromedp.Evaluate[chromedp.Void](`document.querySelector('.device-detail .back-btn').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}))`),
 			chromedp.Click(chromedp.CSS(".device-detail .back-btn")),
-			chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.querySelector('.page-title')?.textContent.includes(%q)`, want)),
+			chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.querySelector('.device-detail-name')?.textContent.includes(%q)`, want)),
 		); err != nil {
 			t.Fatalf("back did not return to %q: %v", want, err)
 		}
@@ -179,7 +179,7 @@ func openZoneMemberAndWait(t *testing.T, ctx context.Context, name, condition st
 		chromedp.WaitVisible(chromedp.CSS(selector)),
 		chromedp.Focus(chromedp.CSS(selector)),
 		chromedp.KeyEvent("\r"),
-		chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.querySelector('.page-title')?.textContent.includes(%q) && (%s)`,
+		chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.querySelector('.device-detail-name')?.textContent.includes(%q) && (%s)`,
 			name, condition)),
 	); err != nil {
 		var state string
@@ -197,7 +197,7 @@ func returnToZone(t *testing.T, ctx context.Context, zoneName string) {
 		// Express pointer intent before coordinate resolution can race restored scroll.
 		chromedp.Evaluate[chromedp.Void](`document.querySelector('.device-detail .back-btn').dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}))`),
 		chromedp.Click(chromedp.CSS(".device-detail .back-btn")),
-		chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.querySelector('.page-title')?.textContent.includes(%q) &&
+		chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.querySelector('.device-detail-name')?.textContent.includes(%q) &&
 			document.querySelector('.zone-member-details > summary') !== null`, zoneName)),
 		chromedp.Evaluate[chromedp.Void](`{ const details = document.querySelector('.zone-member-details');
             if (!details.open) details.querySelector(':scope > summary').click(); }`),

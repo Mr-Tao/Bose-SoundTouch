@@ -4,6 +4,7 @@ import htm from 'htm';
 import { api } from '../api.js';
 import { throttleTrailing, SLIDER_WRITE_INTERVAL_MS } from '../throttle.mjs';
 import { createLatestWinsScheduler, shouldSurfaceLatestFinal } from '../latestWinsScheduler.mjs';
+import { detailVolumeLabel } from '../detailPresentation.mjs';
 import {
     clampVolume,
     fenceVolumeReadback,
@@ -103,6 +104,8 @@ export function Controls({
     const zone = device?.zone;
     const controlsLogicalZone = Boolean(zone && !zone.isStandalone &&
         zone.masterControlId === deviceId);
+    const volumeLabel = detailVolumeLabel(deviceId, device);
+    const volumeID = `detail-volume-${encodeURIComponent(deviceId || 'speaker')}`;
     const np = status?.nowPlaying;
     const isPlaying = np?.PlayStatus === 'PLAY_STATE';
     const projectedVolume = controlsLogicalZone
@@ -447,29 +450,31 @@ export function Controls({
             <div class="discrete-command-status" role="status" aria-live="polite">
                 ${commandStatus}
             </div>
+            <div class="volume-label">
+                <label for=${volumeID}>${volumeLabel}</label>
+                <span class="volume-value">${localVolume}</span>
+            </div>
             ${controlsLogicalZone ? html`<div class="volume-row" aria-busy=${volumeBusy ? 'true' : 'false'}>
                 <span class="volume-icon">${IconVolume({ size: 16 })}</span>
-                <input type="range" class="volume-slider" min="0" max="100"
-                    value=${localVolume} aria-label=${controlsLogicalZone ? 'Group volume' : 'Volume'}
+                <input id=${volumeID} type="range" class="volume-slider" min="0" max="100"
+                    value=${localVolume} aria-label=${volumeLabel}
                     onPointerDown=${beginVolumeInteraction}
                     onInput=${event => queueVolume(event, false)}
                     onPointerUp=${finishVolumeInteraction}
                     onPointerCancel=${finishVolumeInteraction}
                     onChange=${finishVolumeInteraction}
                     onBlur=${finishVolumeInteraction} />
-                <span class="volume-value">${localVolume}</span>
             </div>` : html`
                 <div class="volume-row">
                     <span class="volume-icon">${IconVolume({ size: 16 })}</span>
-                    <input type="range" class="volume-slider" min="0" max="100"
-                        value=${localVolume} aria-label="Volume"
+                    <input id=${volumeID} type="range" class="volume-slider" min="0" max="100"
+                        value=${localVolume} aria-label=${volumeLabel}
                         onPointerDown=${beginVolumeInteraction}
                         onInput=${event => queueVolume(event, false)}
                         onPointerUp=${finishVolumeInteraction}
                         onPointerCancel=${finishVolumeInteraction}
                         onChange=${finishVolumeInteraction}
                         onBlur=${finishVolumeInteraction} />
-                    <span class="volume-value">${localVolume}</span>
                 </div>
             `}
             ${volumeFailure ? html`<div class="volume-control-failure" role="status">${volumeFailure}</div>` : null}
