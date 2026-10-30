@@ -93,6 +93,7 @@ export function Sources({
     status,
     onStatusReadback,
     onNavigate,
+    disclosure = false,
     readbackDelays = SOURCE_READBACK_DELAYS_MS,
 }) {
     const [command, setCommand] = useState(null);
@@ -391,9 +392,20 @@ export function Sources({
         return cmd.error ? `${text}: ${cmd.error}` : text;
     }
 
+    const Container = disclosure ? 'details' : 'div';
+
     return html`
-        <div class="sources-section">
-            <h3 class="section-title">Sources</h3>
+        <${Container} class="sources-section" data-detail-key=${disclosure ? 'sources' : undefined}>
+            ${disclosure ? html`
+                <summary class="settings-summary">
+                    <h3 class="section-title">Sources</h3>
+                    ${(availabilityMessage || commandMessage(command)) && html`
+                        <span class="sources-summary-status">${availabilityMessage || commandMessage(command)}</span>
+                    `}
+                    <span class="settings-chevron" aria-hidden="true"></span>
+                </summary>
+            ` : html`<h3 class="section-title">Sources</h3>`}
+            <div class="sources-content">
             <div class="source-list">
                 ${ready.map(src => {
                     const account = src.SourceAccount ?? '';
@@ -427,6 +439,7 @@ export function Sources({
                 ${availabilityMessage || commandMessage(command)}
             </div>
             <${SourcesElsewhere} deviceId=${deviceId} />
-        </div>
+            </div>
+        </${Container}>
     `;
 }
