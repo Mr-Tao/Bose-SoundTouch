@@ -92,11 +92,7 @@ export function Presets({ deviceId, status, command, commandBusy = false, onSele
         return item && item.Source === playing?.Source && sameContentLocation(item.Source, item.Location, playing?.Location);
     });
     return html`<div class="presets-section">
-        <div class="presets-toolbar">
-            ${showHeading && html`<h3 class="section-title">Presets</h3>`}
-            <button type="button" class="preset-edit-control" aria-label="Edit presets" aria-expanded=${editingSlot !== null ? 'true' : 'false'}
-                onClick=${() => { gesture.cancel(); setEditingSlot(editingSlot === null ? activeSlot || 1 : null); }}>Edit</button>
-        </div>
+        ${showHeading && html`<h3 class="section-title">Presets</h3>`}
         <${StoredPresets} deviceId=${deviceId} revision=${status?.revision} presetMutations=${presetMutations} />
         <div class="preset-grid">${[1, 2, 3, 4, 5, 6].map(id => {
             const preset = byId[id] ?? { ID: id, ContentItem: null };
@@ -105,7 +101,11 @@ export function Presets({ deviceId, status, command, commandBusy = false, onSele
             return html`<${PresetSlot} key=${id} preset=${preset} active=${active}
                 command=${command} busy=${busy} gesture=${gesture} hold=${hold?.slot === id ? hold : null} />`;
         })}</div>
-        ${canSave && presetMutations && html`<p class="preset-hold-hint">Tap to play · hold to save current playback</p>`}
+        <div class="presets-footer">
+            ${canSave && presetMutations && html`<p class="preset-hold-hint">Tap to play · hold to save current playback</p>`}
+            <button type="button" class="preset-edit-control" aria-label="Edit presets" aria-expanded=${editingSlot !== null ? 'true' : 'false'}
+                onClick=${() => { gesture.cancel(); setEditingSlot(editingSlot === null ? activeSlot || 1 : null); }}>Edit</button>
+        </div>
         <p class="preset-hold-status" role="status">${notice}</p>
         ${editingSlot !== null && html`<div class="preset-editor">
             <label class="preset-editor-choice">Preset
