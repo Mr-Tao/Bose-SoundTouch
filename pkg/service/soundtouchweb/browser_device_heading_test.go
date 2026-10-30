@@ -42,11 +42,13 @@ func TestDeviceHeadingAndCompactNowPlaying(t *testing.T) {
 		chromedp.Navigate(server.URL+"/fixture"),
 		chromedp.WaitVisible(chromedp.CSS(`.device-detail-heading`)),
 		chromedp.Poll[chromedp.Void](`document.querySelector('.device-detail-name').textContent==='ložnice' && document.querySelector('.device-detail-model').textContent==='SoundTouch 10' && document.querySelector('.now-playing-label').textContent==='Now playing'`),
+		chromedp.WaitVisible(chromedp.CSS(`.now-playing-actions-toggle`)),
+		chromedp.Click(chromedp.CSS(`.now-playing-actions-toggle`)),
 		chromedp.WaitVisible(chromedp.CSS(`.now-playing .favorite-save`)),
-		chromedp.Click(chromedp.CSS(`.now-playing-fav-btn`)),
-		chromedp.WaitVisible(chromedp.CSS(`.now-playing-fav-overlay`)),
-		chromedp.Poll[chromedp.Void](`document.documentElement.scrollWidth<=320 && [...document.querySelectorAll('.now-playing-fav-overlay .preset-picker-slot')].every(b=>{const r=b.getBoundingClientRect();return r.left>=0 && r.right<=320 && r.width>=44 && r.height>=44}) && window.headingWrites.length===0`),
-		chromedp.Click(chromedp.CSS(`.now-playing-fav-btn`)),
+		chromedp.Click(chromedp.CSS(`.now-playing-actions .preset-picker-btn`)),
+		chromedp.WaitVisible(chromedp.CSS(`.now-playing-actions .preset-picker-overlay`)),
+		chromedp.Poll[chromedp.Void](`document.documentElement.scrollWidth<=320 && [...document.querySelectorAll('.now-playing-actions .preset-picker-overlay .preset-picker-slot')].every(b=>{const r=b.getBoundingClientRect();return r.left>=0 && r.right<=320 && r.width>=44 && r.height>=44}) && window.headingWrites.length===0`),
+		chromedp.Click(chromedp.CSS(`.now-playing-actions-toggle`)),
 		chromedp.Evaluate[chromedp.Void](`renderHeading('airplay','long')`),
 		chromedp.WaitVisible(chromedp.CSS(`.track-details`)),
 		chromedp.Poll[chromedp.Void](`document.documentElement.scrollWidth<=320 && document.querySelector('.device-detail-name').textContent.startsWith('A long speaker') && document.querySelector('.track-title').title.length>80 && !!document.querySelector('.progress-row') && !document.querySelector('.now-playing .favorite-save')`),
@@ -55,7 +57,7 @@ func TestDeviceHeadingAndCompactNowPlaying(t *testing.T) {
 		chromedp.Poll[chromedp.Void](`document.querySelector('.device-detail-name').textContent==='obývák stereo' && document.documentElement.scrollWidth<=320`),
 		chromedp.Evaluate[chromedp.Void](`renderHeading('standby')`),
 		chromedp.WaitVisible(chromedp.CSS(`.now-playing.standby`)),
-		chromedp.Poll[chromedp.Void](`!document.querySelector('.now-playing .favorite-save') && !document.querySelector('.now-playing-fav-btn') && !document.querySelector('.now-playing-label') && window.headingWrites.length===0`),
+		chromedp.Poll[chromedp.Void](`!document.querySelector('.now-playing .favorite-save') && !document.querySelector('.now-playing-actions .preset-picker-btn') && !document.querySelector('.now-playing-label') && window.headingWrites.length===0`),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -63,11 +65,13 @@ func TestDeviceHeadingAndCompactNowPlaying(t *testing.T) {
 		if err := chromedp.Do(ctx,
 			chromedp.EmulateViewport(int64(width), 900),
 			chromedp.Evaluate[chromedp.Void](`renderHeading('playing','long')`),
-			chromedp.WaitVisible(chromedp.CSS(`.now-playing-fav-btn`)),
-			chromedp.Click(chromedp.CSS(`.now-playing-fav-btn`)),
-			chromedp.WaitVisible(chromedp.CSS(`.now-playing-fav-overlay`)),
-			chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.documentElement.scrollWidth<=%d && document.querySelector('.now-playing-fav-overlay').getBoundingClientRect().left>=0 && document.querySelector('.now-playing-fav-overlay').getBoundingClientRect().right<=%d`, width, width)),
-			chromedp.Click(chromedp.CSS(`.now-playing-fav-btn`)),
+			chromedp.WaitVisible(chromedp.CSS(`.now-playing-actions-toggle`)),
+			chromedp.Click(chromedp.CSS(`.now-playing-actions-toggle`)),
+			chromedp.WaitVisible(chromedp.CSS(`.now-playing-actions .preset-picker-btn`)),
+			chromedp.Click(chromedp.CSS(`.now-playing-actions .preset-picker-btn`)),
+			chromedp.WaitVisible(chromedp.CSS(`.now-playing-actions .preset-picker-overlay`)),
+			chromedp.Poll[chromedp.Void](fmt.Sprintf(`document.documentElement.scrollWidth<=%d && document.querySelector('.now-playing-actions .preset-picker-overlay').getBoundingClientRect().left>=0 && document.querySelector('.now-playing-actions .preset-picker-overlay').getBoundingClientRect().right<=%d`, width, width)),
+			chromedp.Click(chromedp.CSS(`.now-playing-actions-toggle`)),
 		); err != nil {
 			t.Fatalf("viewport %d: %v", width, err)
 		}

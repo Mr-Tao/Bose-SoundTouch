@@ -2,10 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
 import { SourceIcon } from '../sourceIcons.js';
-import { FavoriteButton } from './FavoriteButton.js';
-import { PresetPicker } from './PresetPicker.js';
-import { sameContentLocation } from '../contentLocation.mjs';
-import { currentPresetContent } from '../presetMutations.mjs';
+import { NowPlayingActions } from './NowPlayingActions.js';
 
 const html = htm.bind(h);
 
@@ -14,36 +11,6 @@ function fmt(secs) {
     const m = Math.floor(secs / 60);
     const s = secs % 60;
     return `${m}:${s.toString().padStart(2, '0')}`;
-}
-
-// The picker chooses a destination; the shared controller freezes this
-// ContentItem and confirms any move/overwrite against the speaker's bank.
-function NowPlayingPresetPicker({ nowPlaying, presets, presetMutations }) {
-    const current = currentPresetContent(nowPlaying);
-    // Detect whether the current content is already saved as any preset.
-    const currentSource = nowPlaying?.ContentItem?.Source;
-    const currentLocation = nowPlaying?.ContentItem?.Location;
-    const presetList = presets?.Preset ?? [];
-    // Keep the matching preset, not just a boolean, so the tooltip can name
-    // the slot it landed in.
-    const mappedPreset = currentLocation
-        ? presetList.find(p =>
-            p.ContentItem?.Source === currentSource &&
-            sameContentLocation(currentSource, p.ContentItem?.Location, currentLocation))
-        : undefined;
-
-    function save(slotId) {
-        if (current) presetMutations?.request(slotId, current);
-    }
-
-    return html`<${PresetPicker}
-        onSave=${save}
-        disabled=${!current || !presetMutations}
-        mappedSlot=${mappedPreset ? mappedPreset.ID : null}
-        wrapClass="now-playing-fav-wrap"
-        buttonClass="now-playing-fav-btn"
-        overlayClass="now-playing-fav-overlay"
-    />`;
 }
 
 export function NowPlaying({ nowPlaying, deviceId, presets, favorites, presetMutations }) {
@@ -92,7 +59,6 @@ export function NowPlaying({ nowPlaying, deviceId, presets, favorites, presetMut
                     <span class="track-source">${nowPlaying.Source}</span>
                     ${isBuffering && html`<span class="buffering-badge">Buffering…</span>`}
                 </div>
-                <${FavoriteButton} item=${nowPlaying.ContentItem} favorites=${favorites} />
                 ${showFullMetadata && html`
                     <details class="track-details">
                         <summary>Full details</summary>
@@ -112,14 +78,8 @@ export function NowPlaying({ nowPlaying, deviceId, presets, favorites, presetMut
                     </div>
                 `}
             </div>
-            ${deviceId && html`
-                <${NowPlayingPresetPicker}
-                    deviceId=${deviceId}
-                    nowPlaying=${nowPlaying}
-                    presets=${presets}
-                    presetMutations=${presetMutations}
-                />
-            `}
+            <${NowPlayingActions} deviceId=${deviceId} nowPlaying=${nowPlaying}
+                presets=${presets} favorites=${favorites} presetMutations=${presetMutations} />
         </div>
     `;
 }

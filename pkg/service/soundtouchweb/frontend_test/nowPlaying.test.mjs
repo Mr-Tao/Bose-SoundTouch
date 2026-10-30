@@ -4,6 +4,8 @@ import test from 'node:test';
 
 const nowPlaying = await readFile(
     new URL('../static/js/components/NowPlaying.js', import.meta.url), 'utf8');
+const nowPlayingActions = await readFile(
+    new URL('../static/js/components/NowPlayingActions.js', import.meta.url), 'utf8');
 const presetPicker = await readFile(
     new URL('../static/js/components/PresetPicker.js', import.meta.url), 'utf8');
 
@@ -20,9 +22,10 @@ test('the explicit preset action names its current slot when choosing a destinat
     assert.match(presetPicker, /label = 'Save as preset'/);
 });
 
-// The now-playing card keeps its own star styling and slot mapping, and hands
-// them to the shared picker rather than rendering a second popover.
-test('the now-playing card delegates preset saving to the shared picker', () => {
-    assert.match(nowPlaying, /import \{ PresetPicker \} from '\.\/PresetPicker\.js'/);
-    assert.match(nowPlaying, /mappedSlot=\$\{mappedPreset \? mappedPreset\.ID : null\}/);
+// Secondary actions share one contextual entry point and retain the existing
+// slot mapping through the common picker and confirmation controller.
+test('the now-playing card delegates secondary actions and preserves the shared picker', () => {
+    assert.match(nowPlaying, /import \{ NowPlayingActions \} from '\.\/NowPlayingActions\.js'/);
+    assert.match(nowPlayingActions, /import \{ PresetPicker \} from '\.\/PresetPicker\.js'/);
+    assert.match(nowPlayingActions, /mappedSlot=\$\{mappedPreset \? mappedPreset\.ID : null\}/);
 });

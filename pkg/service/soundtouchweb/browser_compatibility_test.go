@@ -3356,7 +3356,7 @@ render(h(Fixture), document.getElementById('fixture'));
 
 	var explicitAction bool
 	if err := chromedp.Do(ctx,
-		evalInto(`document.querySelector('#library .tunein-item:nth-child(2) .library-preset-btn').textContent === 'Save as preset'`, &explicitAction),
+		evalInto(`document.querySelector('#library .tunein-item:nth-child(2) .library-preset-btn').textContent === 'Save as preset…'`, &explicitAction),
 	); err != nil {
 		t.Fatalf("read mapped star: %v", err)
 	}
@@ -3386,13 +3386,10 @@ render(h(Fixture), document.getElementById('fixture'));
 	}
 }
 
-// TestNowPlayingStarSavesThroughTheSharedPicker renders the now-playing card
-// in Chrome and saves the current content to a slot. The card's star was
-// extracted into the shared PresetPicker for issue 700 and nothing exercised
-// it in a browser, so two module-level mistakes (a missing import, and the
-// card rendering the shared picker directly with the wrapper's props) went
-// unnoticed: both leave the star gone or inert at runtime.
-func TestNowPlayingStarSavesThroughTheSharedPicker(t *testing.T) {
+// TestNowPlayingActionsSaveThroughTheSharedPicker retains the issue 700
+// runtime regression through the compact action menu: the shared picker
+// must map the saved slot and store exactly once through normal confirmation.
+func TestNowPlayingActionsSaveThroughTheSharedPicker(t *testing.T) {
 	const fixture = presetFixtureHelpers + `
 import { h, render } from 'preact';
 import { NowPlaying } from '/app/static/js/components/NowPlaying.js';
@@ -3420,9 +3417,11 @@ renderSafePresetComponent(NowPlaying, { nowPlaying, deviceId: 'speaker', presets
 	var mapped bool
 	if err := chromedp.Do(ctx,
 		chromedp.Navigate(server.URL+"/fixture"),
-		chromedp.WaitVisible(chromedp.CSS(`.now-playing-fav-btn`)),
-		evalInto(`document.querySelector('.now-playing-fav-btn').textContent === 'Save as preset'`, &mapped),
-		chromedp.Click(chromedp.CSS(`.now-playing-fav-btn`)),
+		chromedp.WaitVisible(chromedp.CSS(`.now-playing-actions-toggle`)),
+		chromedp.Click(chromedp.CSS(`.now-playing-actions-toggle`)),
+		chromedp.WaitVisible(chromedp.CSS(`.now-playing-actions .preset-picker-btn`)),
+		evalInto(`document.querySelector('.now-playing-actions .preset-picker-btn').textContent === 'Save as preset…'`, &mapped),
+		chromedp.Click(chromedp.CSS(`.now-playing-actions .preset-picker-btn`)),
 		textInto(chromedp.CSS(`.preset-picker-label`), &starTitle),
 		chromedp.Click(chromedp.CSS(`.preset-picker-slot:nth-child(5)`)),
 		chromedp.WaitVisible(chromedp.CSS(`.preset-confirm`)),
