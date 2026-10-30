@@ -282,6 +282,8 @@ render(h(Fixture), document.getElementById('fixture'));
 		chromedp.Click(chromedp.CSS(`.now-playing .favorite-save`)),
 		chromedp.Poll[chromedp.Void](`window.saved.length===1`),
 		chromedp.Click(chromedp.CSS(`[role=tab][id$="-recents"]`)),
+		chromedp.WaitVisible(chromedp.CSS(`.recent-actions-toggle`)),
+		chromedp.Click(chromedp.CSS(`.recent-actions-toggle`)),
 		chromedp.WaitVisible(chromedp.CSS(`.recent-row .favorite-save`)),
 		chromedp.Click(chromedp.CSS(`.recent-row .favorite-save`)),
 		chromedp.Poll[chromedp.Void](`window.saved.length===2`),

@@ -2,9 +2,7 @@ import { h } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
-import { FavoriteButton } from './FavoriteButton.js';
-import { PresetPicker } from './PresetPicker.js';
-import { SourceIcon } from '../sourceIcons.js';
+import { RecentRow } from './RecentRow.js';
 import { artworkFor, presetArtIndex } from '../recentsArt.mjs';
 
 const html = htm.bind(h);
@@ -22,6 +20,7 @@ function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
     const [items, setItems] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [menuOwner, setMenuOwner] = useState(null);
     const refresh = useRef(null);
     const trigger = JSON.stringify([revision, refreshToken]);
     const lastTrigger = useRef(trigger);
@@ -126,31 +125,13 @@ function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
                     const ci = item.ContentItem;
                     if (!ci) return null;
                     const art = artworkFor(ci, artIndex);
-                    return html`
-                        <div class="recent-row" key=${item.ID || item.UTCTime || ci.Location}>
-                        <button
-                            class="recent-item"
-                            key=${item.ID || item.UTCTime}
-                            onClick=${() => play(item)}
-                            disabled=${commandBusy}
-                            aria-busy=${command?.action === 'recent' && commandBusy &&
-                                command?.expected?.targetId === String(item.ID || item.UTCTime || ci.Location)
-                                ? 'true' : null}
-                        >
-                            ${art
-                                ? html`<img class="recent-art" src=${art} alt="" />`
-                                : html`<div class="recent-art recent-art-empty"><${SourceIcon} source=${ci.Source} className="recent-source-icon" /></div>`
-                            }
-                            <div class="recent-info">
-                                <span class="recent-name">${ci.ItemName || ci.Source}</span>
-                                <span class="recent-source">${ci.Source}</span>
-                            </div>
-                            <span class="recent-play">▶</span>
-                        </button>
-                        <${FavoriteButton} item=${ci} favorites=${favorites} />
-                        ${presetMutations && html`<${PresetPicker} onSave=${slot => presetMutations.request(slot, ci)} />`}
-                        </div>
-                    `;
+                    // A reused speaker ID must not inherit an earlier item's
+                    // gesture or menu, even when a refresh reorders the list.
+                    const rowKey = JSON.stringify([item.ID || item.UTCTime || ci.Location, ci]);
+                    return html`<${RecentRow} key=${rowKey} rowKey=${rowKey} item=${item} art=${art}
+                        command=${command} commandBusy=${commandBusy} onPlay=${play}
+                        favorites=${favorites} presetMutations=${presetMutations}
+                        menuOwner=${menuOwner} setMenuOwner=${setMenuOwner} />`;
                 })}
             </div>
         </div>

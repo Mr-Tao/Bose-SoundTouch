@@ -1753,20 +1753,28 @@ img.source-icon { width: 16px; height: 16px; object-fit: contain; filter: var(--
 /* ── Recents ─────────────────────────────────────────────────────────────── */
 .recents-section { margin-top: 1.25rem; }
 
-.recents-list { display: flex; flex-direction: column; gap: 1px; }
+.recents-list { display: flex; flex-direction: column; gap: .4rem; }
+
+.recent-row {
+    position: relative; display: flex; align-items: center; min-width: 0;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.recent-row.recent-actions-open { border-color: var(--text-dim); z-index: 2; }
 
 .recent-item {
     display: flex;
     align-items: center;
     gap: .75rem;
-    width: 100%;
+    flex: 1; min-width: 0; width: 100%;
+    min-height: 64px;
     padding: .5rem .6rem;
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 0;
     border-radius: var(--radius);
     text-align: left;
     color: var(--text);
     transition: background .1s;
+    touch-action: pan-y; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 .recent-item:hover { background: var(--bg); }
 
@@ -1785,6 +1793,33 @@ img.recent-source-icon { width: 20px; height: 20px; object-fit: contain; filter:
 .recent-source { display: block; font-size: .75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; margin-top: .1rem; }
 .recent-play { color: var(--text-dim); font-size: .75rem; flex-shrink: 0; opacity: .5; }
 .recent-item:hover .recent-play { opacity: 1; }
+.recent-actions-toggle {
+    flex: 0 0 44px; min-width: 44px; min-height: 48px; margin-right: 3px;
+    border: 0; border-radius: var(--radius); background: transparent;
+    color: var(--text-dim); font-size: 1.5rem; line-height: 1;
+    display: grid; place-items: center; touch-action: manipulation;
+}
+.recent-actions-toggle:hover { background: var(--bg); }
+.recent-actions-menu {
+    position: absolute; right: 0; top: calc(100% + 5px); z-index: 4;
+    width: min(300px, 100%); padding: 5px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.recent-actions-menu.recent-actions-up { top: auto; bottom: calc(100% + 5px); }
+.recent-actions-menu .recent-action {
+    display: flex; align-items: center; width: 100%; min-height: 48px; margin: 0;
+    padding: .65rem .6rem; border: 0; border-radius: 5px; background: transparent;
+    color: var(--text); text-align: left; font-size: .875rem; font-weight: 400;
+}
+.recent-actions-menu .recent-action:hover:not(:disabled) { background: var(--bg); }
+.recent-actions-menu .recent-action:disabled { opacity: .5; cursor: wait; }
+.recent-actions-menu .favorite-save-error { display: block; padding: .3rem .6rem; }
+.recent-preset-wrap { width: 100%; }
+.recent-actions-menu .recent-preset-overlay {
+    position: static; min-width: 0; padding: .4rem .3rem; border: 0; box-shadow: none;
+}
+.recent-actions-menu .preset-picker-slots { display: grid; grid-template-columns: repeat(3, minmax(44px, 1fr)); }
+.recent-actions-menu .preset-picker-slot { width: 100%; }
 
 /* ── TuneIn ──────────────────────────────────────────────────────────────── */
 .tunein-toolbar { display: flex; gap: .5rem; margin-bottom: 1rem; }
@@ -2240,9 +2275,6 @@ img.recent-source-icon { width: 20px; height: 20px; object-fit: contain; filter:
 .favorite-save { min-height: 44px; padding: .4rem .55rem; font-size: .75rem; }
 .favorite-save-error { color: var(--danger); font-size: .75rem; overflow-wrap: anywhere; }
 .now-playing .favorite-save-control { margin-top: .5rem; }
-.recent-row { display: flex; align-items: center; gap: .4rem; min-width: 0; }
-.recent-row > .recent-item { flex: 1; min-width: 0; }
-.recent-row > .favorite-save-control { flex: 0 0 auto; max-width: 42%; }
 .library-section .recents-section { margin-top: 0; }
 .library-section .presets-section { margin-top: 0; }
 .library-tabs [role="tab"] { min-height: 44px; font-size: .9rem; }
@@ -2285,5 +2317,3 @@ img.recent-source-icon { width: 20px; height: 20px; object-fit: contain; filter:
 .preset-outcome.unverified, .preset-outcome.failed { color: var(--danger); }
 .preset-safety-actions { display: flex; gap: .7rem; flex-wrap: wrap; margin-top: .8rem; }
 .preset-safety-actions button { min-height: 44px; }
-.recent-row { flex-wrap: wrap; }
-.recent-row > .preset-picker-wrap { margin-left: auto; }
