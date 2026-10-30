@@ -84,6 +84,7 @@ export function NowPlaying({ nowPlaying, deviceId, presets, favorites, presetMut
                 </div>`
             }
             <div class="track-info">
+                <div class="now-playing-label">Now playing</div>
                 <div class="track-title" title=${title}>${title}</div>
                 ${nowPlaying.Artist && html`<div class="track-artist" title=${nowPlaying.Artist}>${nowPlaying.Artist}</div>`}
                 ${nowPlaying.Album && html`<div class="track-album" title=${nowPlaying.Album}>${nowPlaying.Album}</div>`}

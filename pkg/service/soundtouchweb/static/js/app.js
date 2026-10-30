@@ -474,6 +474,10 @@ export function DeviceDetail({
                     </svg>
                 </button>
             </div>
+            <header class="device-detail-heading">
+                <h2 class="device-detail-name">${device.info?.name || deviceId}</h2>
+                ${device.info?.type && html`<p class="device-detail-model">${device.info.type}</p>`}
+            </header>
             <${NowPlaying} nowPlaying=${device.status?.nowPlaying} deviceId=${deviceId} presets=${device.status?.presets} favorites=${favorites} presetMutations=${presetMutations} />
             <${PresetMutationDialog} mutations=${presetMutations} />
             <${Controls}
