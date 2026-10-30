@@ -39,7 +39,7 @@ func TestDetailContextReflectsTargetAndFreshness(t *testing.T) {
 	if err := chromedp.Do(ctx,
 		chromedp.EmulateViewport(320, 844), chromedp.Navigate(server.URL+"/fixture"),
 		chromedp.WaitVisible(chromedp.CSS(".device-detail-name")),
-		chromedp.Poll[chromedp.Void](`document.querySelector('.device-detail-name').textContent==='Bedroom' && document.querySelector('.device-detail-model').textContent==='SoundTouch 10' && document.querySelector('.volume-label label').textContent==='Volume'`),
+		chromedp.Poll[chromedp.Void](`document.querySelector('.device-detail-name').textContent==='Bedroom' && document.querySelector('.device-detail-model').textContent==='SoundTouch 10' && document.querySelector('.volume-label label').textContent==='Volume' && getComputedStyle(document.querySelector('.device-detail-status'),'::before').backgroundColor==='rgb(34, 197, 94)' && parseFloat(getComputedStyle(document.querySelector('.device-detail-status'),'::before').width)>=7`),
 		chromedp.Evaluate[chromedp.Void](`renderContext('group')`),
 		chromedp.Poll[chromedp.Void](`document.querySelector('.device-detail-model').textContent==='Group · 2 members · 3 speakers' && document.querySelector('.volume-label label').textContent==='Group volume' && document.querySelector('.library-owner').textContent==='Presets · Bedroom'`),
 		chromedp.Evaluate[chromedp.Void](`renderContext('member')`),
