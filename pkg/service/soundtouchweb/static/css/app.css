@@ -830,6 +830,10 @@ img { display: block; max-width: 100%; }
 }
 
 /* ── Now playing ─────────────────────────────────────────────────────────── */
+.device-detail-heading { min-width: 0; overflow-wrap: anywhere; }
+.device-detail-name { font-size: 1.45rem; font-weight: 500; line-height: 1.3; }
+.device-detail-model { margin-top: .15rem; color: var(--text-dim); font-size: .8rem; }
+
 .now-playing {
     display: flex;
     gap: 1rem;
@@ -846,6 +850,31 @@ img { display: block; max-width: 100%; }
     max-width: 100%;
 }
 .now-playing.standby { color: var(--text-dim); font-size: .9rem; }
+
+.device-detail .now-playing {
+    gap: .75rem;
+    background: transparent;
+    border-width: 1px 0;
+    border-radius: 0;
+    padding: .875rem 0;
+    margin: 1.25rem 0 1rem;
+    box-shadow: none;
+    min-height: 0;
+}
+.device-detail .now-playing .album-art { width: 40px; height: 40px; border-radius: .5rem; }
+.device-detail .now-playing-label { color: var(--text-dim); font-size: .75rem; }
+.device-detail .now-playing .track-title { font-weight: 500; }
+.device-detail .now-playing > .now-playing-fav-wrap { flex: 0 0 auto; }
+.device-detail .now-playing-fav-overlay { width: 20rem; max-width: calc(100vw - 2.5rem); }
+.device-detail .now-playing-fav-overlay .preset-picker-slots { flex-wrap: wrap; }
+@media (max-width: 520px) {
+    .device-detail .now-playing > .now-playing-fav-wrap {
+        flex-basis: 100%;
+        display: flex;
+        justify-content: flex-end;
+    }
+    .device-detail .now-playing-fav-overlay { max-width: 100%; }
+}
 
 /* ── Now-playing ★ fav / preset button ──────────────────────────────────── */
 .now-playing-fav-wrap {
