@@ -1109,6 +1109,12 @@ img.now-playing-source-icon { width: 28px; height: 28px; object-fit: contain; fi
     background: var(--surface);
     cursor: pointer;
     position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    touch-action: pan-y;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
     transition: background .1s, box-shadow .1s;
     min-height: 56px;
 }
@@ -2244,15 +2250,33 @@ img.recent-source-icon { width: 20px; height: 20px; object-fit: contain; filter:
     .favorites-toolbar { align-items: flex-start; flex-direction: column; }
 }
 
+/* Whole-tile hold progress stays behind the existing selected contrast,
+   artwork and labels. Caption overlay preserves each tile's resting size. */
+.preset-hold-fill { position: absolute; inset: 0; z-index: -1; pointer-events: none; transform: scaleX(0); transform-origin: left; background: currentColor; opacity: .14; color: var(--text); }
+.preset-slot.active .preset-hold-fill { color: var(--accent-fg); opacity: .22; }
+.preset-holding .preset-hold-fill { animation: preset-hold-fill 1100ms linear forwards; }
+.preset-hold-ready .preset-hold-fill { animation: none; transform: scaleX(1); }
+@keyframes preset-hold-fill { to { transform: scaleX(1); } }
+.preset-holding .preset-text { position: relative; }
+.preset-holding .preset-text > .preset-source-label, .preset-holding .preset-text > .preset-name { visibility: hidden; }
+.preset-hold-caption { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+.preset-hold-label { font-size: .55rem; line-height: 1.3; opacity: .8; }
+.preset-hold-name { font-size: .75rem; line-height: 1.25; }
+.preset-hold-label, .preset-hold-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.preset-slot.active .preset-hold-label, .preset-slot.active .preset-hold-name { color: var(--accent-fg); }
+.presets-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 44px; margin-bottom: .4rem; }
+.presets-toolbar .section-title { margin-bottom: 0; }
+.preset-edit-control { min-width: 44px; min-height: 44px; margin-left: auto; padding: .4rem .5rem; color: var(--text-dim); background: transparent; border: 0; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: .25em; }
+.preset-hold-hint, .preset-hold-status { font-size: .75rem; line-height: 1.4; color: var(--text-dim); margin-top: .5rem; }
+.preset-hold-status { min-height: 2.8em; overflow-wrap: anywhere; }
 /* Explicit preset editing and bank-confirmed outcomes. */
-.preset-slot-wrap { flex-direction: column; }
-.preset-slot-wrap .preset-slot { flex: 1; }
-.preset-edit-control { min-width: 60px; min-height: 44px; align-self: flex-end; padding: .4rem .8rem; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; margin-top: .3rem; }
 .preset-save-text { width: auto; height: auto; min-height: 44px; min-width: 44px; padding: .4rem .6rem; font-size: .8rem; line-height: 1.3; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; opacity: 1; }
 .now-playing-fav-wrap { position: relative; top: auto; right: auto; align-self: flex-start; }
 .now-playing { flex-wrap: wrap; }
 .preset-picker-slot, .catalog-move-slot, .catalog-action-btn, .catalog-clear-btn { min-width: 44px; min-height: 44px; }
 .preset-editor { margin-top: .7rem; }
+.preset-editor-choice { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .6rem; font-size: .8rem; }
+.preset-editor-choice select { min-height: 44px; min-width: 44px; max-width: 100%; padding: .5rem; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; }
 .preset-save-current { min-height: 44px; margin-bottom: .5rem; }
 .preset-safety-dialog { position: fixed; z-index: 100; bottom: 1rem; left: 50%; transform: translateX(-50%); width: min(36rem, calc(100% - 2rem)); max-height: 75vh; overflow: auto; padding: 1rem; background: var(--surface); color: var(--text); border: 2px solid var(--text); border-radius: var(--radius); box-shadow: var(--shadow); }
 .preset-safety-dialog h3 { font-size: 1rem; margin-bottom: .5rem; }

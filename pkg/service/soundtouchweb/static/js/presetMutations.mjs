@@ -99,8 +99,9 @@ export function createPresetMutations({ api, deviceId, physicalId, epoch, isCurr
         onReadback?.(deviceId, data.status, data.info);
         return { bank, target };
     }
-    return {
-        async request(slot, content, { rename = false, moveFrom = null } = {}) {
+    const mutations = {
+        isPending: () => locked || operation !== null,
+        async request(slot, content, { rename = false, moveFrom = null, authorizeEmpty = false } = {}) {
             if (locked || disposed || !isCurrent() || !Number.isInteger(Number(slot)) || slot < 1 || slot > 6) return;
             locked = true;
             const token = ++ticket;
@@ -118,7 +119,16 @@ export function createPresetMutations({ api, deviceId, physicalId, epoch, isCurr
                     return;
                 }
                 operation = { slot: Number(slot), item, rename, moveFrom, ...snapshot };
-                show({ phase: 'confirm', message: presetWarning(snapshot.bank, slot, item) + (moveFrom !== null ? ` Preset ${moveFrom} will be cleared after the destination is verified if the speaker keeps a copy there.` : '') });
+                // A completed hold authorizes only a fresh, simple empty-slot
+                // save. confirm still performs its second read and asks again
+                // on any bank drift, before the single write.
+                if (authorizeEmpty === true && item && !rename && moveFrom === null && !snapshot.bank[slot - 1] &&
+                    !snapshot.bank.some(entry => entry && identity(entry) === identity(item))) {
+                    locked = false;
+                    await mutations.confirm();
+                } else {
+                    show({ phase: 'confirm', message: presetWarning(snapshot.bank, slot, item) + (moveFrom !== null ? ` Preset ${moveFrom} will be cleared after the destination is verified if the speaker keeps a copy there.` : '') });
+                }
             } catch (error) {
                 operation = null;
                 if (live(token)) show({ phase: 'failed', message: `${error.message} No preset was written.` });
@@ -205,4 +215,5 @@ export function createPresetMutations({ api, deviceId, physicalId, epoch, isCurr
         cancel() { if (!locked) { ++ticket; operation = null; show(null); } },
         dispose() { disposed = true; ++ticket; operation = null; },
     };
+    return mutations;
 }

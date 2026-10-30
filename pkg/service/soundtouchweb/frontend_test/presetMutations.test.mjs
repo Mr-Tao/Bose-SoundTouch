@@ -212,3 +212,50 @@ test('unnamed confirmations do not expose opaque replay URLs', async () => {
     assert.match(f.view.message, /Unnamed station/);
     assert.doesNotMatch(f.view.message, /private.example|secret/);
 });
+
+test('a completed hold can authorize a new item only into a fresh empty slot', async () => {
+    const f = fixture();
+    await f.controller.request(2, station('C'), { authorizeEmpty: true });
+    assert.equal(f.view.phase, 'confirmed');
+    assert.equal(f.writes.length, 1);
+    assert.equal(f.writes[0].slot, 2);
+    assert.equal(f.writes[0].item.location, 'C');
+    assert.equal(f.reads, 3, 'preflight, final freshness check, complete-bank readback');
+});
+
+test('hold authorization does not bypass move, overwrite, clear, rename or default confirmation', async () => {
+    for (const [slot, item, options] of [
+        [2, station('A'), { authorizeEmpty: true }],
+        [3, station('C'), { authorizeEmpty: true }],
+        [3, null, { authorizeEmpty: true }],
+        [2, station('C'), { authorizeEmpty: true, rename: true }],
+        [2, station('C'), {}],
+    ]) {
+        const f = fixture();
+        await f.controller.request(slot, item, options);
+        assert.equal(f.view.phase, 'confirm');
+        assert.equal(f.writes.length, 0);
+    }
+});
+
+test('any bank drift after an authorized hold requires review even when target remains empty', async () => {
+    for (const driftSlot of [1, 2, 5]) {
+        const f = fixture();
+        f.beforeRead = () => { if (f.reads === 2) f.bank[driftSlot] = station('External'); };
+        await f.controller.request(2, station('C'), { authorizeEmpty: true });
+        assert.equal(f.view.phase, 'confirm');
+        assert.match(f.view.message, /Presets changed\. Review again/);
+        assert.equal(f.writes.length, 0);
+    }
+});
+
+test('double hold authorization freezes one payload and writes once', async () => {
+    const f = fixture();
+    const item = station('C');
+    const first = f.controller.request(2, item, { authorizeEmpty: true });
+    item.ItemName = 'Changed after release';
+    await Promise.all([first, f.controller.request(2, station('D'), { authorizeEmpty: true }), f.controller.confirm()]);
+    assert.equal(f.writes.length, 1);
+    assert.equal(f.writes[0].item.itemName, 'C');
+    assert.equal(f.view.phase, 'confirmed');
+});

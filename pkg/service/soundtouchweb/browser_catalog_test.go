@@ -71,8 +71,8 @@ func TestPresetSlotFillsFromTheCatalog(t *testing.T) {
 
 	if err := chromedp.Do(ctx,
 		chromedp.Navigate(server.URL+"/fixture"),
-		chromedp.WaitVisible(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(2) .preset-edit-control`)),
-		chromedp.Click(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(2) .preset-edit-control`)),
+		chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
+		openPresetEditor(2),
 
 		// Wait for the list itself, not just the panel: the entries arrive
 		// with the catalog fetch, and clicking before they render would hit a
@@ -136,8 +136,8 @@ func TestCatalogPickerSaysWhenThereIsNoCatalog(t *testing.T) {
 	var note string
 	if err := chromedp.Do(ctx,
 		chromedp.Navigate(server.URL+"/fixture"),
-		chromedp.WaitVisible(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(2) .preset-edit-control`)),
-		chromedp.Click(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(2) .preset-edit-control`)),
+		chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
+		openPresetEditor(2),
 		// Poll for the settled note rather than the first one: the panel shows
 		// "Loading…" in the same element while the catalog request is in
 		// flight, so reading it straight away races the fetch.
@@ -187,13 +187,13 @@ func TestPresetSlotClearsWithConfirmation(t *testing.T) {
 
 		// Slot 2 is empty in the fixture: there is nothing to empty, so the
 		// action is not offered at all.
-		chromedp.WaitVisible(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(2) .preset-edit-control`)),
-		chromedp.Click(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(2) .preset-edit-control`)),
+		chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
+		openPresetEditor(2),
 		chromedp.WaitVisible(chromedp.CSS(`#presets .catalog-entry`)),
 		evalInto(`document.querySelector('#presets .catalog-clear-btn') !== null`, &emptySlotOffersClear),
 
 		// Slot 1 holds WDR 2.
-		chromedp.Click(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(1) .preset-edit-control`)),
+		openPresetEditor(1),
 		chromedp.WaitVisible(chromedp.CSS(`#presets .catalog-clear-btn`)),
 		chromedp.Click(chromedp.CSS(`#presets .catalog-clear-btn`)),
 		chromedp.WaitVisible(chromedp.CSS(`.preset-confirm`)),
@@ -256,8 +256,8 @@ func TestPresetSlotRenamesAndMoves(t *testing.T) {
 		chromedp.Navigate(server.URL+"/fixture"),
 
 		// Slot 1 holds WDR 2. Rename it.
-		chromedp.WaitVisible(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(1) .preset-edit-control`)),
-		chromedp.Click(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(1) .preset-edit-control`)),
+		chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
+		openPresetEditor(1),
 		chromedp.WaitVisible(chromedp.CSS(`#presets .catalog-rename-input`)),
 		chromedp.Evaluate[chromedp.Void](`(() => {
 			const input = document.querySelector('#presets .catalog-rename-input');
@@ -361,8 +361,8 @@ renderSafePresetComponent(Presets, { deviceId: 'speaker', status });
 
 	if err := chromedp.Do(ctx,
 		chromedp.Navigate(server.URL+"/fixture"),
-		chromedp.WaitVisible(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(1) .preset-edit-control`)),
-		chromedp.Click(chromedp.CSS(`#presets .preset-slot-wrap:nth-child(1) .preset-edit-control`)),
+		chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
+		openPresetEditor(1),
 		chromedp.WaitVisible(chromedp.CSS(`#presets .catalog-entry`)),
 
 		// Exactly the one entry whose account this speaker lacks.

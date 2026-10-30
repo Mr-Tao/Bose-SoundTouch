@@ -5,6 +5,7 @@ package soundtouchweb
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/chromedp/cdproto/emulation"
@@ -58,9 +59,9 @@ import { Presets } from '/app/static/js/components/Presets.js';
 import { CatalogPicker } from '/app/static/js/components/CatalogPicker.js';
 const item = name => ({Source:'TUNEIN',SourceAccount:'',Location:name,ItemName:name,Type:'',ContainerArt:''});
 let bank = [item('Station A'),null,item('Station B'),null,null,null];
-let revision = 1;
-window.writes = []; window.reads = []; window.picks = [];
-const status = () => ({epoch:1, revision:++revision, nowPlaying:{Source:'TUNEIN',ContentItem:item('Station A')},
+let revision = 1, playbackName = 'Station A';
+window.writes = []; window.reads = []; window.picks = []; window.plays = [];
+const status = () => ({epoch:1, revision:++revision, nowPlaying:{Source:'TUNEIN',ContentItem:item(playbackName)},
   presets:{Preset:bank.flatMap((ContentItem,index) => ContentItem ? [{ID:index+1,ContentItem}] : [])}});
 api.storedPresets = async () => ({success:true,data:{disagrees:false}});
 api.catalog = async () => ({success:true,data:{available:true,entries:[{source:'TUNEIN',location:'Catalog Station',name:'Catalog Station'}]}});
@@ -85,10 +86,12 @@ function Fixture(){
   const [deviceId,setDeviceId]=useState('speaker');
   const [currentStatus,setStatus]=useState(status);
   window.changeDevice=()=>setDeviceId('other');
+  window.changePlayback=name=>{playbackName=name;setStatus(status());};
+  window.changeEpoch=()=>setStatus(previous=>({...previous,epoch:previous.epoch+1}));
   const device={info:{device_id:'physical'},status:currentStatus};
   const mutations=usePresetMutations({deviceId,device,onStatusReadback:(_id,next)=>setStatus(next)});
   return h('div',null,
-    h(Presets,{deviceId,status:currentStatus,presetMutations:mutations}),
+    h(Presets,{deviceId,status:currentStatus,presetMutations:mutations,onSelect:preset=>window.plays.push(preset.ID)}),
     h(PresetMutationDialog,{mutations}),
     h('div',{id:'favorite-catalog'},h(CatalogPicker,{deviceId,onPick:ci=>window.picks.push(ci)})));
 }
@@ -106,8 +109,8 @@ func TestPresetFeedbackConfirmationMoveAndNoop(t *testing.T) {
 	var writes int
 	if err := chromedp.Do(ctx,
 		chromedp.Navigate(presetFixture(t)),
-		chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit preset 3"]`)),
-		chromedp.Click(chromedp.CSS(`[aria-label="Edit preset 3"]`)),
+		chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
+		openPresetEditor(3),
 		chromedp.Click(chromedp.CSS(`.preset-save-current`)),
 		chromedp.WaitVisible(chromedp.CSS(`.preset-confirm`)),
 		textInto(chromedp.CSS(`.preset-outcome`), &warning),
@@ -143,8 +146,8 @@ func TestPresetFeedbackDriftAndReadbackFailures(t *testing.T) {
 			ctx := newHeadlessChromeContext(t)
 			if err := chromedp.Do(ctx,
 				chromedp.Navigate(presetFixture(t)),
-				chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit preset 3"]`)),
-				chromedp.Click(chromedp.CSS(`[aria-label="Edit preset 3"]`)),
+				chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
+				openPresetEditor(3),
 				chromedp.Click(chromedp.CSS(`.preset-save-current`)),
 				chromedp.WaitVisible(chromedp.CSS(`.preset-confirm`)),
 				chromedp.Evaluate[chromedp.Void](`window.drift=true`),
@@ -165,10 +168,10 @@ func TestPresetFeedbackDeviceChangeAndFavoriteSelector(t *testing.T) {
 	ctx := newHeadlessChromeContext(t)
 	if err := chromedp.Do(ctx,
 		chromedp.Navigate(presetFixture(t)),
-		chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit preset 3"]`)),
+		chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
 		chromedp.Click(chromedp.CSS(`#favorite-catalog .catalog-entry`)),
 		chromedp.Poll[chromedp.Void](`window.picks.length===1 && window.writes.length===0 && window.reads.length===0`),
-		chromedp.Click(chromedp.CSS(`[aria-label="Edit preset 3"]`)),
+		openPresetEditor(3),
 		chromedp.Evaluate[chromedp.Void](`window.hold=true`),
 		chromedp.Click(chromedp.CSS(`.preset-save-current`)),
 		chromedp.Poll[chromedp.Void](`typeof window.release==='function'`),
@@ -219,9 +222,9 @@ func TestPresetFeedbackExplicitMoveClearsOnlyRetainedCopy(t *testing.T) {
 			ctx := newHeadlessChromeContext(t)
 			if err := chromedp.Do(ctx,
 				chromedp.Navigate(presetFixture(t)),
-				chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit preset 1"]`)),
+				chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
 				chromedp.Evaluate[chromedp.Void](fmt.Sprintf(`window.copy=%t`, copy)),
-				chromedp.Click(chromedp.CSS(`[aria-label="Edit preset 1"]`)),
+				openPresetEditor(1),
 				chromedp.Click(chromedp.CSS(`.catalog-move-slot:nth-child(2)`)),
 				chromedp.WaitVisible(chromedp.CSS(`.preset-confirm`)),
 				chromedp.Poll[chromedp.Void](`window.writes.length===0 && document.querySelector('.preset-outcome').textContent.includes('Preset 1 will be cleared')`),
@@ -235,4 +238,17 @@ func TestPresetFeedbackExplicitMoveClearsOnlyRetainedCopy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Shared Edit preserves keyboard/touch access without six permanent controls.
+func openPresetEditor(slot int) chromedp.Action[chromedp.Void] {
+	return chromedp.Func(func(ctx context.Context, _ *chromedp.Target) error {
+		return chromedp.Do(ctx,
+			chromedp.WaitVisible(chromedp.CSS(`[aria-label="Edit presets"]`)),
+			chromedp.Evaluate[chromedp.Void](`{ const button=document.querySelector('[aria-label="Edit presets"]'); if(button.getAttribute('aria-expanded')!=='true') button.click(); }`),
+			chromedp.WaitVisible(chromedp.CSS(`[aria-label="Preset to edit"]`)),
+			chromedp.Evaluate[chromedp.Void](`{ const select=document.querySelector('[aria-label="Preset to edit"]'); select.value=`+strconv.Quote(strconv.Itoa(slot))+`; select.dispatchEvent(new Event('change',{bubbles:true})); }`),
+			chromedp.WaitVisible(chromedp.CSS(`.preset-save-current`)),
+		)
+	})
 }
