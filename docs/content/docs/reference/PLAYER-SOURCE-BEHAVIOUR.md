@@ -107,9 +107,9 @@ seconds later, surfacing as a transition to an error source
   events are not arriving. They stop as soon as a confirmation arrives *and*
   the readback reports a live event stream, so a confirmed selection normally
   costs one request rather than three. That signal is `webSocketConnected`,
-  which reports the service's own socket to the speaker; it is opened lazily
-  on first fetch or control of a device, so the very first click after
-  loading one can still take all three.
+  which reports the service's own socket to the speaker; it is opened when
+  the speaker is registered, so only a click before that socket is up (or
+  while it reconnects) takes all three.
 - Readbacks use `GET /devices/{id}/now-playing`, which refreshes only
   `/now_playing`. The full device fetch runs a complete status poll: six
   sequential speaker calls plus `/getGroup` on a stereo-capable model, to

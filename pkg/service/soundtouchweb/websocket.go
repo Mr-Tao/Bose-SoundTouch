@@ -323,11 +323,11 @@ var balanceWatchSchedule = []time.Duration{
 // watchBalance establishes the balance reading for a device, retrying briefly
 // until the speaker answers.
 //
-// It reads over HTTP, deliberately. Reads do not need the WebSocket — only
-// writes do — and that socket is created lazily, on the first control request
-// that needs one. Hanging the read off it meant a paired speaker showed no
-// slider until something was pressed: the pair was on screen, the speaker
-// answered balanceAvailable=true to anyone who asked, and nobody asked.
+// It reads over HTTP, deliberately. Reads do not need the WebSocket, only
+// writes do. The socket is started at registration but connects
+// asynchronously and may be down or retrying, and hanging the read off it
+// would leave a paired speaker without a slider until it came up. (Before the
+// socket was started at registration, that meant until something was pressed.)
 //
 // Retrying rather than reading once covers the other case: a pair that already
 // existed at startup is discovered by the /getGroup poll running concurrently,
@@ -687,7 +687,9 @@ func (app *WebApp) HandleAPIDiscover(w http.ResponseWriter, r *http.Request) {
 // connection's own lifetime (conn.Done) is the scope that matters. Work it
 // starts derives its context from that rather than inheriting a caller's.
 //
-// It also outlives the browsers that caused it to open. Unlike the status
+// It is started at registration (addDeviceByHost), so it does not depend on
+// a browser or a control request; the calls in the control handlers are a
+// safety net that TryStartWebSocketLoop turns into no-ops. Unlike the status
 // poll (issue 766), it is left running when nobody watches: an established
 // speaker WebSocket costs one idle connection and no requests, its events
 // keep the cache correct for REST clients in between refreshes (zoneUpdated
