@@ -601,7 +601,7 @@ func (app *WebApp) HandleAPIDevice(w http.ResponseWriter, r *http.Request) {
 	// Update device status to get fresh power state
 	app.UpdateDeviceStatus(deviceID, device)
 
-	// Connect WebSocket for real-time updates if not already connected
+	// Safety net: registration already starts the event subscription; this is a no-op while it runs
 	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
@@ -695,7 +695,7 @@ func (app *WebApp) HandleAPIControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Connect WebSocket for real-time updates if not already connected
+	// Safety net: registration already starts the event subscription; this is a no-op while it runs
 	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
@@ -1229,7 +1229,7 @@ func (app *WebApp) HandleDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Connect WebSocket for real-time updates if not already connected
+	// Safety net: registration already starts the event subscription; this is a no-op while it runs
 	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
@@ -1261,7 +1261,7 @@ func (app *WebApp) HandleDirectVolumeControl(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Connect WebSocket for real-time updates if not already connected
+	// Safety net: registration already starts the event subscription; this is a no-op while it runs
 	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
@@ -1286,7 +1286,7 @@ func (app *WebApp) HandleDevicePower(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Connect WebSocket for real-time updates if not already connected
+	// Safety net: registration already starts the event subscription; this is a no-op while it runs
 	if device.CurrentWebSocket() == nil {
 		go app.ConnectDeviceWebSocket(deviceID, device)
 	}
