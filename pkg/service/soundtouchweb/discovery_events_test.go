@@ -16,6 +16,9 @@ import (
 func TestRegisteredSpeakerReceivesEventsBeforeAnyControl(t *testing.T) {
 	// The production client uses the firmware's fixed event port. A distinct
 	// loopback address keeps this mock separate from local localhost services.
+	// 127.0.0.2 is routable on Linux (CI) but not assigned on macOS by
+	// default, so this test skips there: a green local run on macOS does not
+	// cover it.
 	listener, err := net.Listen("tcp", "127.0.0.2:8080")
 	if err != nil {
 		t.Skipf("mock SoundTouch event endpoint unavailable: %v", err)
@@ -86,7 +89,18 @@ func TestRegisteredSpeakerReceivesEventsBeforeAnyControl(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// Re-registering a known host returns at the TouchDevice fast path, so it
+	// cannot reach the start guard. The control handlers' call is what can:
+	// it must find the running supervisor instead of opening a second socket.
 	app.AddDeviceByHost("127.0.0.2", 8080, "manual")
+	// In a goroutine: without the guard this call would run a second
+	// supervisor loop and never return.
+	go app.ConnectDeviceWebSocket("127.0.0.2", conn)
+	select {
+	case <-connected:
+		t.Fatal("a second ConnectDeviceWebSocket opened another subscription")
+	case <-time.After(200 * time.Millisecond):
+	}
 	if connections.Load() != 1 || writes.Load() != 0 {
 		t.Fatalf("connections=%d writes=%d; want one subscription and zero writes", connections.Load(), writes.Load())
 	}
