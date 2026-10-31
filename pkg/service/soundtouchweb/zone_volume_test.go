@@ -383,7 +383,6 @@ func TestHandleZoneVolumeConfirmsTargetWhileActualRamps(t *testing.T) {
 	memberSpeaker := newVolumeTestSpeaker(t, 35, "")
 	memberSpeaker.volumeResponse = `<volume deviceID="MEMBER"><targetvolume>80</targetvolume><actualvolume>36</actualvolume></volume>`
 	app := NewWebApp()
-	app.volumeReadbackRetryWait = func(time.Duration) {}
 	addVolumeTestDevice(app, "192.0.2.10", "MASTER", "Kitchen", "SoundTouch 30", masterSpeaker, 20, nil, zone)
 	addVolumeTestDevice(app, "192.0.2.20", "MEMBER", "Dining", "SoundTouch 20", memberSpeaker, 35, nil, nil)
 	request := withChiParams(httptest.NewRequest(http.MethodPost, "/zone/volume/80", nil),
@@ -397,18 +396,18 @@ func TestHandleZoneVolumeConfirmsTargetWhileActualRamps(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if response.Code != http.StatusOK || !payload.Success || !payload.Data.Partial {
+	if response.Code != http.StatusOK || !payload.Success || payload.Data.Partial {
 		t.Fatalf("ramping readback = %d %s", response.Code, response.Body.String())
 	}
 	for _, member := range payload.Data.Members {
-		if member.DeviceID == "MEMBER" && member.Status != volumeUnverified {
+		if member.Status != volumeConfirmed {
 			t.Fatalf("member = %+v", member)
 		}
 		if member.DeviceID == "MEMBER" && (member.Actual == nil || *member.Actual != 36) {
 			t.Fatalf("ramping actual = %+v", member)
 		}
 	}
-	if _, posts, gets := memberSpeaker.operations(); fmt.Sprint(posts) != "[80]" || gets != 4 {
+	if _, posts, gets := memberSpeaker.operations(); fmt.Sprint(posts) != "[80]" || gets != 2 { // fresh baseline read + one readback
 		t.Fatalf("operations = posts %v gets %d", posts, gets)
 	}
 }
@@ -451,13 +450,13 @@ func TestApplyVolumeTargetRejectsStaleGenerationsWithoutActual(t *testing.T) {
 	t.Run("volume generation invalidated during readback", func(t *testing.T) {
 		result := zoneVolumeMemberResult{}
 		atTarget, cacheApplied := app.applyVolumeTarget(&result, "192.0.2.30", conn, topology, nil, 40)
-		if atTarget || cacheApplied || result.Actual != nil || result.Status != volumeUnverified {
+		if !atTarget || cacheApplied || result.Actual != nil || result.Status != volumeConfirmed {
 			t.Fatalf("matching stale readback result = %+v, atTarget=%v cacheApplied=%v", result, atTarget, cacheApplied)
 		}
 		if conn.Status().Volume.ActualVolume != 77 {
 			t.Fatalf("rejected readback replaced event cache: %+v", conn.Status().Volume)
 		}
-		if _, posts, gets := speaker.operations(); fmt.Sprint(posts) != "[40]" || gets != 3 {
+		if _, posts, gets := speaker.operations(); fmt.Sprint(posts) != "[40]" || gets != 1 {
 			t.Fatalf("readback operations = posts %v gets %d", posts, gets)
 		}
 	})

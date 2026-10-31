@@ -26,8 +26,9 @@ func TestVolumeReadbackConvergence(t *testing.T) {
 		wantActual                                                                    *int
 	}{
 		{name: "lagging readback", queue: []int{10, 10, 40}, wantConfirmed: true, wantGets: 3, wantActual: intPointer(40)},
-		{name: "matching event invalidates first read", invalidateFirst: true, wantConfirmed: true, wantGets: 2, wantActual: intPointer(40)},
-		{name: "bounded repeated invalidation", invalidateEvery: true, wantGets: 3},
+		// A fenced read still confirms on its target; it just does not touch the cache.
+		{name: "matching event invalidates first read", invalidateFirst: true, wantConfirmed: true, wantGets: 1},
+		{name: "repeated invalidation still confirms on target", invalidateEvery: true, wantConfirmed: true, wantGets: 1},
 		{name: "matching cache cannot confirm fresh mismatch", invalidateFirst: true, ignoreWrites: true, wantGets: 3, wantActual: intPointer(10)},
 		{name: "unrelated field event preserves cache", unrelated: true, wantConfirmed: true, wantGets: 1, wantActual: intPointer(40)},
 		{name: "topology changes during retry wait", ignoreWrites: true, topologyDuringWait: true, wantGets: 1},
