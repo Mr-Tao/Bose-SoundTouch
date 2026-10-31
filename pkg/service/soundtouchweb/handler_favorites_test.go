@@ -2,14 +2,18 @@ package soundtouchweb
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/gesellix/bose-soundtouch/pkg/models"
 	"github.com/gesellix/bose-soundtouch/pkg/service/favorites"
+	"github.com/gesellix/bose-soundtouch/pkg/service/soundtouchweb/webtypes"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -114,5 +118,112 @@ func TestFavoritesAPIUnavailableAndCorruptionAreNotEmptyLibrary(t *testing.T) {
 	unchanged, err := os.ReadFile(path)
 	if err != nil || string(unchanged) != string(original) {
 		t.Fatalf("corrupt file replaced: %s %v", unchanged, err)
+	}
+}
+
+type failingFavoritesStore struct {
+	err error
+}
+
+func (s failingFavoritesStore) List() ([]favorites.Entry, error) {
+	return nil, s.err
+}
+
+func (s failingFavoritesStore) Add(models.ContentItem) (favorites.Entry, error) {
+	return favorites.Entry{}, s.err
+}
+
+func (s failingFavoritesStore) Remove(string) error {
+	return s.err
+}
+
+func TestFavoritesAPIStorageErrorsStayOnOneLogLine(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path, logPrefix, message string
+	}{
+		{"read", http.MethodGet, "/favorites", "Favorites read failed: ", "Could not load favorites. Your saved library has not been replaced."},
+		{"save", http.MethodPost, "/favorites", "Favorites save failed: ", "Could not save the favorite. Refresh the library before retrying."},
+		{"remove", http.MethodDelete, "/favorites/" + strings.Repeat("a", 64), "Favorites removal failed: ", "Could not remove the favorite. Refresh the library before retrying."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := NewWebApp()
+			app.Favorites = failingFavoritesStore{err: errors.New("storage diagnostic\r\nFORGED_RECORD")}
+			var response *httptest.ResponseRecorder
+			out := captureLog(t, func() {
+				response = favoriteRequest(t, app, tc.method, tc.path, `{"Source":"TUNEIN","Location":"s1"}`)
+			})
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500: %s", response.Code, response.Body.String())
+			}
+			var payload webtypes.APIResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Success || payload.Error != tc.message || payload.Data != nil {
+				t.Fatalf("storage error did not return the generic failure: %s", response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "FORGED_RECORD") || strings.Contains(response.Body.String(), "storage diagnostic") {
+				t.Fatalf("storage diagnostics reflected in response: %s", response.Body.String())
+			}
+			if want := tc.logPrefix + `storage diagnostic\r\nFORGED_RECORD` + "\n"; out != want {
+				t.Fatalf("log = %q, want one physical line preserving diagnostics %q", out, want)
+			}
+		})
+	}
+}
+
+func TestFavoritesAPIFileStoreErrorLogging(t *testing.T) {
+	for _, tc := range []struct {
+		name, directory, body string
+		status                int
+		wantEscapedPath       bool
+	}{
+		{"configured_path", "blocked\r\nPATH_MARKER", `{"Source":"TUNEIN","Location":"s1"}`, http.StatusInternalServerError, true},
+		{"request_fields", "blocked", `{"Source":"TUNEIN","Location":"s1\r\nREQUEST_MARKER","ItemName":"Name\r\nREQUEST_MARKER"}`, http.StatusInternalServerError, false},
+		{"rejected_source", "blocked", `{"Source":"AUX\r\n","Location":"s1"}`, http.StatusBadRequest, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantEscapedPath && runtime.GOOS == "windows" {
+				t.Skip("Windows forbids CR/LF in path components; the fake-store log cases still run")
+			}
+			// A regular file used as the parent forces an error even when run as root.
+			blocked := filepath.Join(t.TempDir(), tc.directory)
+			if err := os.WriteFile(blocked, []byte("guard"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			app := NewWebApp()
+			app.Favorites = favorites.NewFileStore(filepath.Join(blocked, "favorites.json"))
+			var response *httptest.ResponseRecorder
+			out := captureLog(t, func() {
+				response = favoriteRequest(t, app, http.MethodPost, "/favorites", tc.body)
+			})
+			if response.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", response.Code, tc.status, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "PATH_MARKER") || strings.Contains(response.Body.String(), "REQUEST_MARKER") {
+				t.Fatalf("storage diagnostics reflected in response: %s", response.Body.String())
+			}
+			if tc.status == http.StatusBadRequest {
+				if out != "" {
+					t.Fatalf("rejected input reached storage error logging: %q", out)
+				}
+				return
+			}
+			// Windows treats the blocked parent as a missing path, so Add can
+			// reach directory creation before reporting the storage error.
+			if !strings.HasPrefix(out, "Favorites save failed: open favorites: ") &&
+				!strings.HasPrefix(out, "Favorites save failed: create favorites directory: ") {
+				t.Fatalf("missing storage diagnostic: %q", out)
+			}
+			if !strings.HasSuffix(out, "\n") || strings.ContainsAny(strings.TrimSuffix(out, "\n"), "\r\n") {
+				t.Fatalf("storage error escaped its physical log line: %q", out)
+			}
+			if strings.Contains(out, "REQUEST_MARKER") {
+				t.Fatalf("FileStore reflected request content in its error: %q", out)
+			}
+			if tc.wantEscapedPath && !strings.Contains(out, `blocked\r\nPATH_MARKER`) {
+				t.Fatalf("configured path diagnostic lost: %q", out)
+			}
+		})
 	}
 }

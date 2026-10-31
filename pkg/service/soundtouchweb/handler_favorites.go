@@ -26,7 +26,7 @@ func (app *WebApp) HandleFavorites(w http.ResponseWriter, _ *http.Request) {
 	if app.Favorites != nil {
 		entries, err := app.Favorites.List()
 		if err != nil {
-			log.Printf("Favorites read failed: %v", err)
+			log.Printf("Favorites read failed: %s", sanitizeLog(err.Error()))
 			app.sendError(w, "Could not load favorites. Your saved library has not been replaced.", http.StatusInternalServerError)
 
 			return
@@ -68,7 +68,7 @@ func (app *WebApp) HandleAddFavorite(w http.ResponseWriter, r *http.Request) {
 
 	entry, err := app.Favorites.Add(*item)
 	if err != nil {
-		log.Printf("Favorites save failed: %v", err)
+		log.Printf("Favorites save failed: %s", sanitizeLog(err.Error()))
 		app.sendError(w, "Could not save the favorite. Refresh the library before retrying.", http.StatusInternalServerError)
 
 		return
@@ -91,7 +91,7 @@ func (app *WebApp) HandleRemoveFavorite(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := app.Favorites.Remove(id); err != nil {
-		log.Printf("Favorites removal failed: %v", err)
+		log.Printf("Favorites removal failed: %s", sanitizeLog(err.Error()))
 		app.sendError(w, "Could not remove the favorite. Refresh the library before retrying.", http.StatusInternalServerError)
 
 		return
