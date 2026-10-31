@@ -114,7 +114,7 @@ function RecentItems({ deviceId, presets, command, commandBusy = false, onPlay,
     return html`
         <div class="recents-section">
             <div class="section-title">Recents</div>
-            ${error ? html`<div role="alert">
+            ${error ? html`<div class="settings-error" role="alert">
                 ${error}
                 <button type="button" class="btn-secondary" disabled=${loading}
                         onClick=${() => refresh.current?.()}>Retry recents</button>
