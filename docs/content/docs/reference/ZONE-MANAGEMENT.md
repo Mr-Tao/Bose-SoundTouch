@@ -22,7 +22,9 @@ same absolute delta, clamped to `0..100`. Expanded members have individual
 sliders. A stereo pair contributes one logical volume and receives one write
 through its confirmed firmware master.
 
-The baseline is the loudest available member in the cached projection.
+The baseline is the loudest available member, read fresh from every member
+(in parallel) right before the write, because the cached projection can lag
+the previous move.
 Clamping at 0 or 100 loses that member's original offset; a later adjustment
 uses the current volumes rather than restoring the old offset.
 
@@ -37,14 +39,25 @@ the requested target, accepted actual volume, any member error, and a
 `status`: `confirmed`, `unverified`, or `failed`. Matching parsed target volume
 confirms the request even while actual volume ramps. Missing, mismatched,
 or obsolete confirmation and uncertain transport are unverified, not failed.
-Each member receives one write and at most one best-effort readback, without
-retries or write replay. Newer events or topology invalidate older cache merges.
+Each member receives one write and up to three readbacks 50 ms apart,
+stopping at the first one whose target matches; the write is never replayed.
+A readback that a newer volume event fenced off still confirms on its target,
+but only an unfenced one updates the cache. Newer topology ends the readbacks
+as unverified.
+
+Group and member moves on the same zone master run one at a time. Every
+write to a speaker, including a direct single-speaker write, also holds that
+speaker's volume lock, so a direct write cannot land between a move's write
+and its readback. It can still land between a group move's baseline read and
+its write.
 
 Any confirmed or unverified member yields HTTP 200 and `success: true`;
 `partial` is true unless all members confirm. Total definitive failure yields
 HTTP 502 and `success: false`, retaining member results. A prewrite topology
-conflict yields HTTP 409. Direct single-speaker routes retain their existing
-write-only behavior.
+conflict yields HTTP 409. Direct single-speaker volume
+(`/api/control/devices/{id}/volume/{volume}` and the JSON control `volume`
+action) stays write-only: no topology check, no readback, and the response reports only
+whether the write was accepted.
 
 ## Quick Start
 
