@@ -28,7 +28,7 @@ func TestZoneVolumeResponseStatuses(t *testing.T) {
 		}{
 			{name: "confirmed", wantCode: 200, wantStatus: volumeConfirmed, wantGets: 1},
 			{name: "mismatch", mismatch: true, wantCode: 200, wantStatus: volumeUnverified, wantGets: 3},
-			{name: "newer event", stale: true, wantCode: 200, wantStatus: volumeUnverified, wantGets: 3},
+			{name: "newer event", stale: true, wantCode: 200, wantStatus: volumeConfirmed, wantGets: 1},
 			{name: "uncertain transport", uncertain: true, mismatch: true, wantCode: 200, wantStatus: volumeUnverified, wantGets: 3},
 			{name: "unknown HTTP outcome", unknownHTTP: true, wantCode: 200, wantStatus: volumeUnverified, wantGets: 3},
 			{name: "read failed", readFailure: true, wantCode: 200, wantStatus: volumeUnverified, wantGets: 1},

@@ -399,15 +399,20 @@ func (app *WebApp) applyVolumeTarget(member *zoneVolumeMemberResult, controlID s
 			member.Actual = nil
 			if merged {
 				member.Actual = intPointer(volume.ActualVolume)
-				if volume.TargetVolume == level && volume.ActualVolume == level {
-					member.Status = volumeConfirmed
-					member.Error = ""
-					atTarget = true
+			}
+			// Confirm on the target alone. Actual volume can still be ramping
+			// toward it, and a newer volume event that fenced this read off
+			// the cache does not make the speaker's own target less true.
+			if volume.TargetVolume == level && app.volumeTargetCurrent(controlID, conn, group, zone) {
+				member.Status = volumeConfirmed
+				member.Error = ""
+				atTarget = true
 
-					return
-				}
+				return
+			}
 
-				member.Error = fmt.Sprintf("Volume update unverified: target %d actual %d does not both match requested %d", volume.TargetVolume, volume.ActualVolume, level)
+			if merged {
+				member.Error = fmt.Sprintf("Volume update unverified: target %d, requested %d", volume.TargetVolume, level)
 			} else {
 				member.Error = "Volume update unverified: newer topology or volume state"
 			}
