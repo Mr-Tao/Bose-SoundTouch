@@ -54,7 +54,12 @@ func TestRecentsRefreshLifecycle(t *testing.T) {
 		t.Fatalf("unrelated renders made %d reads, want1", count)
 	}
 	// Hold a read through an invalidation burst; its result is superseded.
-	run(js(`show({revision:1})`), wait(`requests.length===2`), js(`show({revision:2});show({revision:3})`), js(`window.burstReady=false;setTimeout(()=>window.burstReady=true,180)`), wait(`burstReady`), js(`answer(1,'Stale')`), wait(`requests.length===3`))
+	run(js(`show({revision:1})`), wait(`requests.length===2`), js(`show({revision:2});show({revision:3})`), js(`window.burstReady=false;setTimeout(()=>window.burstReady=true,180)`), wait(`burstReady`), js(`answer(1,'Stale')`), wait(`requests.length===3`), js(`window.staleReady=false;setTimeout(()=>window.staleReady=true,180)`), wait(`staleReady`))
+	var shown string
+	run(evalInto(`document.querySelector('.recent-name')?.textContent`, &shown))
+	if shown != "Initial" {
+		t.Fatalf("superseded response rendered %q, want the previous list (Initial)", shown)
+	}
 	run(js(`show({revision:4})`), js(`window.followupReady=false;setTimeout(()=>window.followupReady=true,180)`), wait(`followupReady`), js(`requests[2].reject(new Error('temporary'))`), wait(`requests.length===4`), js(`answer(3,'Latest')`), wait(`document.querySelector('.recent-name')?.textContent==='Latest' && !document.querySelector('[role=alert]')`))
 	// JSON API failures preserve the valid list, retry recovers, and empty clears.
 	run(js(`show({revision:5})`), wait(`requests.length===5`), js(`answer(4,null,false)`), wait(`document.querySelector('[role=alert]')?.textContent.includes('Could not load recents.') && document.querySelector('.recent-name')?.textContent==='Latest'`), chromedp.Click(chromedp.CSS(`[role=alert] button`)), wait(`requests.length===6`), js(`answer(5,'Recovered')`), wait(`document.querySelector('.recent-name')?.textContent==='Recovered' && !document.querySelector('[role=alert]')`))
@@ -75,7 +80,7 @@ func TestRecentsRefreshLifecycle(t *testing.T) {
 		t.Fatal("old physical speaker's history remained clickable")
 	}
 	run(wait(`requests.length===12`), js(`answer(11,'Replacement')`), wait(`document.querySelector('.recent-name')?.textContent==='Replacement'`))
-	run(js(`show({revision:7})`), wait(`requests.length===13`), js(`unmount();answer(12,'Unmounted')`), wait(`document.getElementById('fixture').childElementCount===0 && writes.length===0 && requests[8].options.signal.aborted`))
+	run(js(`show({revision:7})`), wait(`requests.length===13`), js(`unmount();answer(12,'Unmounted')`), wait(`document.getElementById('fixture').childElementCount===0 && writes.length===0 && requests[12].options.signal.aborted`))
 }
 
 func TestDeviceDetailForwardsRecentsInvalidations(t *testing.T) {
