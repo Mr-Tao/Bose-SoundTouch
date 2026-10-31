@@ -252,10 +252,12 @@ func TestVolumePhysicalSerializationIncludesDirectRoute(t *testing.T) {
 	releaseOnce.Do(func() { close(release) })
 	awaitVolumeTestDone(t, firstDone)
 	awaitVolumeTestDone(t, secondDone)
-	if first.Code != 200 || second.Code != 200 || conn.Status().Volume.ActualVolume != 45 {
+	// The direct route is write-only: it reads nothing back and leaves the
+	// cache to events, so the member readback's 40 stays.
+	if first.Code != 200 || second.Code != 200 || conn.Status().Volume.ActualVolume != 40 {
 		t.Fatalf("serialized results = %d %s / %d %s, cache=%+v", first.Code, first.Body.String(), second.Code, second.Body.String(), conn.Status().Volume)
 	}
-	if _, posts, gets := member.operations(); fmt.Sprint(posts) != "[40 45]" || gets != 2 {
+	if _, posts, gets := member.operations(); fmt.Sprint(posts) != "[40 45]" || gets != 1 {
 		t.Fatalf("physical operations = posts %v gets %d", posts, gets)
 	}
 }
@@ -299,29 +301,6 @@ func TestZoneVolumeWritesLogicalStereoMasterOnce(t *testing.T) {
 	}
 	if _, posts, gets := left.operations(); len(posts) != 0 || gets != 0 {
 		t.Fatalf("pair slave operations = %v / %d", posts, gets)
-	}
-}
-
-func TestVerifiedDirectVolumeRejectsSlaveAndUnconfirmedPair(t *testing.T) {
-	for _, slave := range []bool{false, true} {
-		t.Run(fmt.Sprintf("slave=%v", slave), func(t *testing.T) {
-			speaker := newVolumeTestSpeaker(t, 20, "")
-			app := NewWebApp()
-			conn := webtypes.NewDeviceConnection(client.NewClient(&client.Config{Host: speaker.server.URL}), &models.DeviceInfo{DeviceID: "SPEAKER", Type: "SoundTouch 10"})
-			if slave {
-				conn.ApplyGroupEvent(&models.Group{ID: "pair", MasterDeviceID: "OTHER"}, time.Now())
-			}
-			conn.WebSocket = &client.WebSocketClient{}
-			app.AddDevice("speaker", conn)
-			response := httptest.NewRecorder()
-			app.HandleDirectVolumeControl(response, withChiParams(httptest.NewRequest(http.MethodPost, "/", nil), map[string]string{"id": "speaker", "volume": "40"}))
-			if response.Code != http.StatusConflict {
-				t.Fatalf("response = %d %s", response.Code, response.Body.String())
-			}
-			if _, posts, gets := speaker.operations(); len(posts) != 0 || gets != 0 {
-				t.Fatalf("unwritable target performed I/O: %v / %d", posts, gets)
-			}
-		})
 	}
 }
 
@@ -382,72 +361,6 @@ func TestZoneVolumeRepeatedMovesPreservePhysicalOffsets(t *testing.T) {
 					t.Fatalf("move %d projected max = %+v", index, view.Zone)
 				}
 				previousMax = requested
-			}
-		})
-	}
-}
-
-func TestQueuedDirectVolumeRechecksPhysicalAdmission(t *testing.T) {
-	for _, replaceRegistry := range []bool{false, true} {
-		t.Run(fmt.Sprintf("registry replacement=%v", replaceRegistry), func(t *testing.T) {
-			zone, zoneXML := testZone()
-			master := newVolumeTestSpeaker(t, 20, zoneXML)
-			member := newVolumeTestSpeaker(t, 20, "")
-			entered, release := make(chan struct{}), make(chan struct{})
-			var releaseOnce sync.Once
-			defer releaseOnce.Do(func() { close(release) })
-			member.onVolumeGet = func(get int) {
-				if get == 1 {
-					close(entered)
-					<-release
-				}
-			}
-			app := NewWebApp()
-			addVolumeTestDevice(app, "192.0.2.10", "MASTER", "Master", "SoundTouch 30", master, 20, nil, zone)
-			conn := addVolumeTestDevice(app, "192.0.2.20", "MEMBER", "Member", "SoundTouch 20", member, 20, nil, nil)
-			first, second := httptest.NewRecorder(), httptest.NewRecorder()
-			firstDone, secondDone := make(chan struct{}), make(chan struct{})
-			go func() {
-				app.HandleZoneMemberVolume(first, zoneMemberVolumeTestRequest("192.0.2.10", "MEMBER", 40))
-				close(firstDone)
-			}()
-			awaitVolumeTestDone(t, entered)
-			// The direct handler's resolved connection is captured before waiting
-			// for the operation mutex, even if discovery replaces its registry slot.
-			go func() { app.handleVerifiedVolumeControl(second, "192.0.2.20", conn, 45); close(secondDone) }()
-			select {
-			case <-secondDone:
-				t.Fatal("direct operation did not wait for member reconciliation")
-			case <-time.After(50 * time.Millisecond):
-			}
-			var replacement *webtypes.DeviceConnection
-			var replacementSpeaker *volumeTestSpeaker
-			if replaceRegistry {
-				replacementSpeaker = newVolumeTestSpeaker(t, 70, "")
-				app.RemoveDevice("192.0.2.20")
-				replacement = addVolumeTestDevice(app, "192.0.2.20", "REPLACEMENT", "Replacement", "SoundTouch 20", replacementSpeaker, 70, nil, nil)
-			} else {
-				conn.ApplyGroupEvent(&models.Group{ID: "changed-pair", MasterDeviceID: "OTHER"}, time.Now())
-			}
-			releaseOnce.Do(func() { close(release) })
-			awaitVolumeTestDone(t, firstDone)
-			awaitVolumeTestDone(t, secondDone)
-			if first.Code != 200 || second.Code != http.StatusConflict {
-				t.Fatalf("responses = %d %s / %d %s", first.Code, first.Body.String(), second.Code, second.Body.String())
-			}
-			if _, posts, gets := member.operations(); fmt.Sprint(posts) != "[40]" || gets != 1 {
-				t.Fatalf("queued obsolete operation performed I/O: posts %v gets %d", posts, gets)
-			}
-			if conn.Status().Volume.ActualVolume != 20 {
-				t.Fatalf("obsolete readback merged into original cache: %+v", conn.Status().Volume)
-			}
-			if replacement != nil {
-				if replacement.Status().Volume.ActualVolume != 70 {
-					t.Fatalf("obsolete readback merged into replacement: %+v", replacement.Status().Volume)
-				}
-				if _, posts, gets := replacementSpeaker.operations(); len(posts) != 0 || gets != 0 {
-					t.Fatalf("queued operation reached replacement: posts %v gets %d", posts, gets)
-				}
 			}
 		})
 	}

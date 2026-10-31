@@ -279,7 +279,7 @@ func TestZoneVolumeSlowMemberDoesNotDelayOtherWrites(t *testing.T) {
 	}
 }
 
-func TestStandaloneVolumeRoutesVerifyVolumeKeepSuccessEnvelope(t *testing.T) {
+func TestStandaloneVolumeRoutesKeepWriteOnlyContract(t *testing.T) {
 	tests := []struct {
 		name    string
 		level   int
@@ -333,6 +333,16 @@ func TestStandaloneVolumeRoutesVerifyVolumeKeepSuccessEnvelope(t *testing.T) {
 				nil,
 				nil,
 			)
+			// Neither an unpolled stereo-capable device nor its pair-slave role
+			// may add admission restrictions to the existing direct routes.
+			unpolled := webtypes.NewDeviceConnection(conn.Client, conn.DeviceInfo)
+			unpolled.SetStatus(conn.Status())
+			app.RemoveDevice("speaker")
+			app.AddDevice("speaker", unpolled)
+			conn = unpolled
+			if test.name == "JSON action" {
+				conn.ApplyGroupEvent(&models.Group{ID: "pair", MasterDeviceID: "OTHER"}, time.Now())
+			}
 			conn.WebSocket = &client.WebSocketClient{}
 			response := httptest.NewRecorder()
 			test.handle(app, response, test.request(test.level))
@@ -357,17 +367,17 @@ func TestStandaloneVolumeRoutesVerifyVolumeKeepSuccessEnvelope(t *testing.T) {
 			if payload.Data.Message != fmt.Sprintf("Volume set to %d", test.level) {
 				t.Fatalf("legacy confirmation message = %q", payload.Data.Message)
 			}
-			if _, posts, gets := speaker.operations(); fmt.Sprint(posts) != fmt.Sprintf("[%d]", test.level) || gets != 1 {
+			if _, posts, gets := speaker.operations(); fmt.Sprint(posts) != fmt.Sprintf("[%d]", test.level) || gets != 0 {
 				t.Fatalf("speaker operations = posts %v gets %d", posts, gets)
 			}
-			if got := conn.Status().Volume; got == nil || got.TargetVolume != test.level || got.ActualVolume != test.level {
+			if got := conn.Status().Volume; got == nil || got.TargetVolume != 10 || got.ActualVolume != 10 {
 				t.Fatalf("cached readback = %+v", got)
 			}
 		})
 	}
 }
 
-func TestHandleZoneVolumeRequiresActualToFinishRamping(t *testing.T) {
+func TestHandleZoneVolumeConfirmsTargetWhileActualRamps(t *testing.T) {
 	zone, zoneXML := testZone()
 	masterSpeaker := newVolumeTestSpeaker(t, 20, zoneXML)
 	memberSpeaker := newVolumeTestSpeaker(t, 35, "")

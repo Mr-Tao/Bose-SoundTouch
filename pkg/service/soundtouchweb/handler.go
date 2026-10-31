@@ -43,6 +43,8 @@ type WebApp struct {
 	settingsLocks   map[string]*sync.Mutex
 
 	// Group and member moves share one batch lock per authoritative zone master.
+	// Direct single-speaker writes only take the per-device volume operation
+	// lock (see handleDirectVolumeWrite), not this one.
 	zoneVolumeLocks sync.Map
 	// Tests can advance events during the bounded readback convergence wait.
 	volumeReadbackRetryWait func(time.Duration)
@@ -794,35 +796,24 @@ func (app *WebApp) handleVolumeControl(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	app.handleVerifiedVolumeControl(w, chi.URLParam(r, "id"), device, volumeReq.Level)
+	app.handleDirectVolumeWrite(w, device, volumeReq.Level)
 }
 
-func (app *WebApp) handleVerifiedVolumeControl(w http.ResponseWriter, controlID string, device *webtypes.DeviceConnection, level int) {
-	topology, current := device.SnapshotGroupTopology()
-	if !volumeTopologyWritable(device, topology, current) {
-		app.sendError(w, "Volume control topology is unverified", http.StatusConflict)
-		return
-	}
+// handleDirectVolumeWrite is the single-speaker volume route. It stays
+// write-only, as before group volume gained readbacks: no topology gate, no
+// readback, no device-list broadcast (the slider is a hot path, and events
+// report the result). It does take the per-device volume operation lock, so
+// it cannot land between a group or member move's write and its readback on
+// the same speaker. It does not take the zone batch lock: a direct write can
+// still fall between a zone move's baseline read and its write.
+func (app *WebApp) handleDirectVolumeWrite(w http.ResponseWriter, device *webtypes.DeviceConnection, level int) {
+	var err error
 
-	member := zoneVolumeMemberResult{ControlID: controlID, Target: intPointer(level)}
+	device.WithVolumeOperation(func() {
+		err = device.Client.SetVolume(level)
+	})
 
-	atTarget, merged := app.applyVolumeTarget(&member, controlID, device, topology, nil, level)
-	if merged {
-		app.BroadcastDeviceList()
-	}
-
-	if !atTarget {
-		status := http.StatusBadGateway
-		if errors.Is(member.failure, errVolumeTopologyConflict) {
-			status = http.StatusConflict
-		}
-
-		app.sendError(w, member.Error, status)
-
-		return
-	}
-
-	app.sendControlResponse(w, nil, fmt.Sprintf("Volume set to %d", level))
+	app.sendControlResponse(w, err, fmt.Sprintf("Volume set to %d", level))
 }
 
 // handlePresetControl processes preset control requests
@@ -1282,7 +1273,7 @@ func (app *WebApp) HandleDirectVolumeControl(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 
-	app.handleVerifiedVolumeControl(w, deviceID, device, volumeLevel)
+	app.handleDirectVolumeWrite(w, device, volumeLevel)
 }
 
 // HandleDevicePower handles power toggle commands for devices
