@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -68,10 +69,14 @@ func TestPersistenceOrderAndIndependentResults(t *testing.T) {
 	if next := mustList(t, store); next[0].ContentItem.ItemName == "caller mutation" {
 		t.Fatal("List exposed mutable store state")
 	}
-	for target, mode := range map[string]os.FileMode{path: 0o600, filepath.Dir(path): 0o700} {
-		info, err := os.Stat(target)
-		if err != nil || info.Mode().Perm() != mode {
-			t.Fatalf("permissions for %s: info=%v, err=%v", target, info, err)
+	// Windows synthesizes POSIX mode bits from the read-only attribute; these
+	// assertions describe Unix permissions, not Windows access-control lists.
+	if runtime.GOOS != "windows" {
+		for target, mode := range map[string]os.FileMode{path: 0o600, filepath.Dir(path): 0o700} {
+			info, err := os.Stat(target)
+			if err != nil || info.Mode().Perm() != mode {
+				t.Fatalf("permissions for %s: info=%v, err=%v", target, info, err)
+			}
 		}
 	}
 	if err := store.Remove(saved[5].ID); err != nil {
