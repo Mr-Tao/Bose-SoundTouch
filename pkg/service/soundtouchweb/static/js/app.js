@@ -92,7 +92,7 @@ export function mergeDevicesSnapshot(previous, snapshot) {
         // device-list broadcast).
         return [deviceId, current];
     }));
-    return reconcileZoneMemberships(refreshAcceptedZoneVolumes(devices));
+    return reconcileZoneMemberships(refreshAcceptedZoneMembers(devices));
 }
 
 // The server projects a member's zoneMembership from its master's status, but
@@ -131,23 +131,46 @@ function reconcileZoneMemberships(devices) {
     }));
 }
 
-// Zone volume depends on every member's accepted status, not just the master's
-// revision. Keep accepted topology intact and update only the matching logical
-// members' volume values; a stale master snapshot cannot revive old membership.
-function refreshAcceptedZoneVolumes(devices) {
+// Mirrors projectedConnectivity on the server. Null when the status doesn't say.
+function statusConnectivity(status) {
+    if (status?.connectivity) return status.connectivity;
+    if (typeof status?.isConnected !== 'boolean') return null;
+    return status.isConnected ? 'online' : 'offline';
+}
+
+function withMemberConnectivity(member, identity, connectivity) {
+    if (!connectivity || connectivity === member.connectivity) return member;
+    const available = connectivity === 'online';
+    return { ...member, connectivity, available,
+        physicalMembers: member.physicalMembers?.map(physical => physical?.deviceId === identity
+            ? { ...physical, connectivity, available } : physical) };
+}
+
+// Zone volume and availability depend on every member's accepted status, not
+// just the master's revision. Keep accepted topology intact and update only the
+// matching logical members' values; a stale master snapshot cannot revive old
+// membership.
+function refreshAcceptedZoneMembers(devices) {
     return Object.fromEntries(Object.entries(devices).map(([id, device]) => {
         if (!Array.isArray(device?.zone?.members)) return [id, device];
         let changed = false;
+        let availabilityChanged = false;
         const members = device.zone.members.map(member => {
             const current = devices[member.controlId];
             const identity = current?.info?.device_id;
             if (current?.volumeIdentityPending || !identity || identity !== member.hwId ||
                 !member.deviceIds?.includes(identity)) return member;
+            const refreshed = withMemberConnectivity(member, identity,
+                statusConnectivity(current.status));
+            if (refreshed !== member) {
+                changed = true;
+                availabilityChanged = true;
+            }
             const expectedPair = member.stereoPair;
             const currentPair = current.stereoPair;
-            if (Boolean(expectedPair) !== Boolean(currentPair)) return member;
+            if (Boolean(expectedPair) !== Boolean(currentPair)) return refreshed;
             if (expectedPair && JSON.stringify(volumePairIdentity(expectedPair)) !==
-                JSON.stringify(volumePairIdentity(currentPair))) return member;
+                JSON.stringify(volumePairIdentity(currentPair))) return refreshed;
             const group = current.status?.group;
             if (expectedPair) {
                 const reportedPair = { id: String(group?.ID || '').trim(),
@@ -156,18 +179,23 @@ function refreshAcceptedZoneVolumes(devices) {
                         deviceId: String(role.DeviceID || '').trim(), role: String(role.Role || '').trim().toUpperCase(),
                     })) };
                 if (JSON.stringify(volumePairIdentity(expectedPair)) !==
-                    JSON.stringify(volumePairIdentity(reportedPair))) return member;
-            } else if (group?.ID || group?.MasterDeviceID || group?.Roles?.Roles?.length) return member;
+                    JSON.stringify(volumePairIdentity(reportedPair))) return refreshed;
+            } else if (group?.ID || group?.MasterDeviceID || group?.Roles?.Roles?.length) return refreshed;
             const volume = current.status?.volume?.ActualVolume;
             if (!Number.isSafeInteger(volume) || volume < 0 || volume > 100 ||
-                member.actualVolume === volume) return member;
+                refreshed.actualVolume === volume) return refreshed;
             changed = true;
-            return { ...member, actualVolume: volume };
+            return { ...refreshed, actualVolume: volume };
         });
         if (!changed) return [id, device];
         const volumes = members.map(member => member.actualVolume).filter(Number.isFinite);
-        return [id, { ...device, zone: { ...device.zone, members,
-            volume: volumes.length ? Math.max(...volumes) : device.zone.volume } }];
+        const zone = { ...device.zone, members,
+            volume: volumes.length ? Math.max(...volumes) : device.zone.volume };
+        if (availabilityChanged) {
+            zone.availableMemberCount = members.filter(member => member.available).length;
+            zone.degraded = members.some(member => !member.available || member.stereoPair?.degraded);
+        }
+        return [id, { ...device, zone }];
     }));
 }
 
@@ -192,7 +220,7 @@ export function mergeStatusUpdate(previous, deviceId, status) {
         !acceptsNewerStatus(previous[deviceId]?.status, status)) {
         return previous;
     }
-    return refreshAcceptedZoneVolumes(replaceDevice(previous, deviceId, {
+    return refreshAcceptedZoneMembers(replaceDevice(previous, deviceId, {
         ...previous[deviceId],
         status,
         // A status delta carries no fresh info identity. After a connection
