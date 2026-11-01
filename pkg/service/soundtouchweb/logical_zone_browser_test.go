@@ -134,6 +134,56 @@ func TestOpenZoneDetailTracksExternalTopologyChanges(t *testing.T) {
 	}
 }
 
+// A zone change on the master alone doesn't move the member's status revision,
+// so the browser keeps the member's entry from the earlier snapshot. The
+// dashboard still has to follow the master, without waiting for the member.
+func TestDashboardFollowsMasterOnlyZoneChanges(t *testing.T) {
+	const (
+		masterID = "192.0.2.10"
+		memberID = "192.0.2.11"
+	)
+	zone := &models.ZoneInfo{
+		Master: "master-device",
+		Members: []models.Member{
+			{DeviceID: "master-device", IP: masterID},
+			{DeviceID: "member-device", IP: memberID},
+		},
+	}
+	app := NewWebApp()
+	master := projectionDeviceWithZone(masterID, "master-device", "Atrium", true, nil, nil)
+	member := projectionDeviceWithZone(memberID, "member-device", "Breakfast Room", true, nil, nil)
+	app.AddDevice(master.ID, master.Device)
+	app.AddDevice(member.ID, member.Device)
+
+	router := chi.NewRouter()
+	app.MountWeb(router, nil)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+
+	ctx := newHeadlessChromeContext(t)
+	if err := chromedp.Do(ctx,
+		chromedp.Navigate(server.URL+"/app"),
+		chromedp.Poll[chromedp.Void](`document.querySelectorAll('.device-card').length === 2 &&
+			!document.querySelector('.zone-card')`),
+	); err != nil {
+		t.Fatalf("standalone dashboard: %v", err)
+	}
+
+	master.Device.UpdateStatus(func(status *webtypes.DeviceStatus) { status.Zone = zone })
+	app.BroadcastDeviceList()
+	if err := chromedp.Do(ctx, chromedp.Poll[chromedp.Void](`document.querySelectorAll('.device-card').length === 1 &&
+		document.querySelector('.zone-card .device-name')?.textContent.trim() === 'Atrium'`)); err != nil {
+		t.Fatalf("first join kept the member's duplicate card: %v", err)
+	}
+
+	master.Device.UpdateStatus(func(status *webtypes.DeviceStatus) { status.Zone = nil })
+	app.BroadcastDeviceList()
+	if err := chromedp.Do(ctx, chromedp.Poll[chromedp.Void](`document.querySelectorAll('.device-card').length === 2 &&
+		!document.querySelector('.zone-card') && !document.querySelector('.zone-member-badge')`)); err != nil {
+		t.Fatalf("dissolution left the member card marked as grouped: %v", err)
+	}
+}
+
 func writeLogicalZoneBrowserState(w http.ResponseWriter, app *WebApp, masterID string) {
 	w.Header().Set("Content-Type", "application/json")
 	projection := app.deviceViewSnapshot()[masterID].Zone

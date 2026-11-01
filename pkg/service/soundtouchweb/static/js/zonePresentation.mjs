@@ -33,7 +33,9 @@ function addIdentifier(ids, value) {
 }
 
 // Keep the inventory intact for member detail routes. A member's duplicate
-// card is hidden only when both projected sides agree it is in the master card.
+// card is hidden only when its membership and the master's zone agree. Both
+// come from the master's claim, so this says the group card lists the member,
+// not that the speaker itself confirmed it.
 export function filterGroupedDeviceEntries(entries) {
     const devices = Object.fromEntries(entries);
     const grouped = ([id, device]) => {
