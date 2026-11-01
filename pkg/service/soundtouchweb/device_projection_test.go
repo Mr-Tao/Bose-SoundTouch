@@ -276,6 +276,34 @@ func TestProjectDeviceEntriesFoldsStereoBeforeZone(t *testing.T) {
 	}
 }
 
+func TestProjectDeviceEntriesPreservesLogicalIdentityWhenStereoPeerMastersZone(t *testing.T) {
+	group := testStereoGroup()
+	zone := &models.ZoneInfo{
+		Master: "right-id",
+		Members: []models.Member{
+			{DeviceID: "right-id", IP: "192.0.2.11"},
+			{DeviceID: "member-id", IP: "192.0.2.20"},
+		},
+	}
+	got := projectDeviceEntries([]DeviceEntry{
+		projectionDeviceWithZone("192.0.2.10", "left-id", "Living Left", true, group, nil),
+		projectionDeviceWithZone("192.0.2.11", "right-id", "Living Right", true, group, zone),
+		projectionDeviceWithZone("192.0.2.20", "member-id", "Dining", true, nil, nil),
+	})
+	view := got["192.0.2.10"].Zone
+	if len(got) != 2 || view == nil || len(view.Members) != 2 {
+		t.Fatalf("missing logical pair-led zone: %+v", got)
+	}
+	if view.MasterDeviceID != "right-id" || view.MasterControlID != "192.0.2.10" {
+		t.Fatalf("physical zone master and logical control must differ: %+v", view)
+	}
+	member := view.Members[0]
+	if member.ControlID != "192.0.2.10" || member.HardwareID != "left-id" ||
+		len(member.DeviceIDs) != 2 || member.DeviceIDs[0] != "left-id" || member.DeviceIDs[1] != "right-id" {
+		t.Fatalf("first logical member lost pair identity: %+v", member)
+	}
+}
+
 func TestProjectDeviceEntriesFailsOpenWithoutMasterZoneClaim(t *testing.T) {
 	zone := &models.ZoneInfo{
 		Master:  "master-id",
