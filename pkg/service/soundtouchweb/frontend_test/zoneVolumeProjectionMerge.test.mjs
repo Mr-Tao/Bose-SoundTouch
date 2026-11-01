@@ -122,3 +122,66 @@ test('two accepted zones claiming one member leave it without a membership', () 
     snapshot.other.zone = { masterControlId: 'other', members: [member('other', 5), member('child', 10)] };
     assert.equal(mergeDevicesSnapshot({}, snapshot).child.zoneMembership, undefined);
 });
+
+function availabilityInventory() {
+    const devices = inventory();
+    devices.master.status.connectivity = 'online';
+    devices.child.status.connectivity = 'online';
+    devices.master.zone.availableMemberCount = 2;
+    devices.master.zone.degraded = false;
+    for (const zoneMember of devices.master.zone.members) {
+        zoneMember.connectivity = 'online';
+        zoneMember.physicalMembers = [{ deviceId: zoneMember.hwId, connectivity: 'online', available: true }];
+    }
+    return devices;
+}
+
+test('a member going offline degrades the group without a master revision', () => {
+    const previous = availabilityInventory();
+    const merged = mergeStatusUpdate(previous, 'child', { epoch: 1, revision: 2, connectivity: 'offline',
+        volume: { ActualVolume: 10 } });
+    assert.equal(merged.master.status, previous.master.status);
+    assert.equal(merged.master.zone.availableMemberCount, 1);
+    assert.equal(merged.master.zone.degraded, true);
+    assert.equal(merged.master.zone.members[1].connectivity, 'offline');
+    assert.equal(merged.master.zone.members[1].available, false);
+    assert.equal(merged.master.zone.members[1].physicalMembers[0].available, false);
+    assert.equal(previous.master.zone.availableMemberCount, 2);
+
+    const recovered = mergeStatusUpdate(merged, 'child', { epoch: 1, revision: 3, connectivity: 'online',
+        volume: { ActualVolume: 10 } });
+    assert.equal(recovered.master.zone.availableMemberCount, 2);
+    assert.equal(recovered.master.zone.degraded, false);
+});
+
+test('a snapshot with an offline member degrades a retained master zone', () => {
+    const previous = availabilityInventory();
+    const snapshot = availabilityInventory();
+    snapshot.child.status = { ...snapshot.child.status, revision: 2, connectivity: 'offline' };
+    const merged = mergeDevicesSnapshot(previous, snapshot);
+    assert.equal(merged.master.status, previous.master.status);
+    assert.equal(merged.master.zone.availableMemberCount, 1);
+    assert.equal(merged.master.zone.degraded, true);
+    assert.equal(merged.child.zoneMembership.degraded, true);
+});
+
+test('a status without connectivity and a mismatched member keep the projected availability', () => {
+    const previous = availabilityInventory();
+    assert.equal(mergeStatusUpdate(previous, 'child', { epoch: 1, revision: 2, volume: { ActualVolume: 10 } })
+        .master.zone.availableMemberCount, 2);
+    const snapshot = availabilityInventory();
+    snapshot.child = { ...snapshot.child, info: { device_id: 'REPLACEMENT' },
+        status: { ...snapshot.child.status, revision: 2, connectivity: 'offline' } };
+    assert.equal(mergeDevicesSnapshot(previous, snapshot).master.zone.availableMemberCount, 2);
+});
+
+test('a stereo member stays degraded after its connectivity recovers while the pair is degraded', () => {
+    const previous = availabilityInventory();
+    previous.master.zone.members[1].connectivity = 'offline';
+    previous.master.zone.members[1].available = false;
+    previous.master.zone.members[1].stereoPair = { degraded: true };
+    previous.child.stereoPair = { degraded: true };
+    const merged = mergeStatusUpdate(previous, 'child', { epoch: 1, revision: 2, connectivity: 'online' });
+    assert.equal(merged.master.zone.availableMemberCount, 2);
+    assert.equal(merged.master.zone.degraded, true);
+});

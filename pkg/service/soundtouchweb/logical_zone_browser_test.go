@@ -176,6 +176,28 @@ func TestDashboardFollowsMasterOnlyZoneChanges(t *testing.T) {
 		t.Fatalf("first join kept the member's duplicate card: %v", err)
 	}
 
+	setMemberOnline := func(online bool) {
+		connectivity := webtypes.ConnectivityOffline
+		if online {
+			connectivity = webtypes.ConnectivityOnline
+		}
+		member.Device.UpdateStatus(func(status *webtypes.DeviceStatus) {
+			status.IsConnected = online
+			status.Connectivity = connectivity
+		})
+		app.BroadcastDeviceList()
+	}
+	setMemberOnline(false)
+	if err := chromedp.Do(ctx, chromedp.Poll[chromedp.Void](`document.querySelector('.zone-card .device-indicator')
+		?.getAttribute('aria-label') === 'Degraded group: 1 unavailable'`)); err != nil {
+		t.Fatalf("hidden member going offline left the group card healthy: %v", err)
+	}
+	setMemberOnline(true)
+	if err := chromedp.Do(ctx, chromedp.Poll[chromedp.Void](`document.querySelector('.zone-card .device-indicator')
+		?.getAttribute('aria-label') === 'Healthy group'`)); err != nil {
+		t.Fatalf("hidden member recovering left the group card degraded: %v", err)
+	}
+
 	master.Device.UpdateStatus(func(status *webtypes.DeviceStatus) { status.Zone = nil })
 	app.BroadcastDeviceList()
 	if err := chromedp.Do(ctx, chromedp.Poll[chromedp.Void](`document.querySelectorAll('.device-card').length === 2 &&
