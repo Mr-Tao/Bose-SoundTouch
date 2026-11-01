@@ -18,9 +18,9 @@ type deviceView struct {
 	LastSeen   time.Time              `json:"lastSeen"`
 	StereoPair *stereoPairView        `json:"stereoPair,omitempty"`
 	Zone       *zoneView              `json:"zone,omitempty"`
-	// ZoneMembership marks a non-master member of a projected zone, so its
-	// own card can say which group it belongs to. Only the master carries
-	// the full Zone view.
+	// ZoneMembership marks a non-master member for dashboard filtering and
+	// fallback group labels. The registry entry stays reachable for member
+	// details; only the master carries the full Zone view.
 	ZoneMembership *zoneMembershipView `json:"zoneMembership,omitempty"`
 }
 
