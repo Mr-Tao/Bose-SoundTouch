@@ -84,3 +84,41 @@ test('status-only connection replacement waits for accepted identity inventory',
     snapshot.child.info.device_id = 'REPLACEMENT';
     assert.equal(mergeDevicesSnapshot(delta, snapshot).master.zone.members[1].actualVolume, 10);
 });
+
+test('a join that moves only the master revision marks the member as grouped', () => {
+    const previous = inventory();
+    delete previous.master.zone;
+    previous.master.status.revision = 4;
+    const merged = mergeDevicesSnapshot(previous, inventory());
+    assert.equal(merged.child.status, previous.child.status);
+    assert.deepEqual(merged.child.zoneMembership,
+        { masterControlId: 'master', masterName: '', degraded: false });
+});
+
+test('a dissolution that moves only the master revision clears the membership', () => {
+    const previous = mergeDevicesSnapshot({}, inventory());
+    assert.equal(previous.child.zoneMembership.masterControlId, 'master');
+    const snapshot = inventory();
+    snapshot.master.status.revision = 6;
+    delete snapshot.master.zone;
+    const merged = mergeDevicesSnapshot(previous, snapshot);
+    assert.equal(merged.master.zone, undefined);
+    assert.equal(merged.child.zoneMembership, undefined);
+    assert.equal(merged.child.status, previous.child.status);
+});
+
+test('a stale snapshot cannot revive a membership the accepted master dropped', () => {
+    const previous = inventory();
+    delete previous.master.zone;
+    previous.master.status.revision = 6;
+    const merged = mergeDevicesSnapshot(previous, inventory());
+    assert.equal(merged.master.zone, undefined);
+    assert.equal(merged.child.zoneMembership, undefined);
+});
+
+test('two accepted zones claiming one member leave it without a membership', () => {
+    const snapshot = inventory();
+    snapshot.other = device('other', 5, 3);
+    snapshot.other.zone = { masterControlId: 'other', members: [member('other', 5), member('child', 10)] };
+    assert.equal(mergeDevicesSnapshot({}, snapshot).child.zoneMembership, undefined);
+});

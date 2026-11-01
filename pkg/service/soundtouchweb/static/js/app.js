@@ -92,7 +92,43 @@ export function mergeDevicesSnapshot(previous, snapshot) {
         // device-list broadcast).
         return [deviceId, current];
     }));
-    return refreshAcceptedZoneVolumes(devices);
+    return reconcileZoneMemberships(refreshAcceptedZoneVolumes(devices));
+}
+
+// The server projects a member's zoneMembership from its master's status, but
+// each entry above is accepted on its own revision. A join or dissolution that
+// only moves the master's revision would leave the member's entry claiming the
+// old state. Derive membership from the zones we accepted instead, so the
+// master's zone and its members' memberships can't disagree. A stale snapshot
+// can't revive a membership this way, because the master's zone is still
+// revision-gated.
+function reconcileZoneMemberships(devices) {
+    const claims = new Map();
+    for (const [masterId, device] of Object.entries(devices)) {
+        const zone = device?.zone;
+        if (zone?.masterControlId !== masterId || !Array.isArray(zone.members)) continue;
+        for (const member of zone.members) {
+            if (!member?.controlId || member.controlId === masterId) continue;
+            claims.set(member.controlId, [...(claims.get(member.controlId) || []), masterId]);
+        }
+    }
+
+    return Object.fromEntries(Object.entries(devices).map(([id, device]) => {
+        const masters = claims.get(id) || [];
+        if (masters.length !== 1) {
+            if (!device?.zoneMembership) return [id, device];
+            const { zoneMembership: _dropped, ...rest } = device;
+            return [id, rest];
+        }
+
+        const master = devices[masters[0]];
+        const masterMember = master.zone.members.find(member => member?.controlId === masters[0]);
+        return [id, { ...device, zoneMembership: {
+            masterControlId: masters[0],
+            masterName: masterMember?.name || master.info?.name || '',
+            degraded: Boolean(master.zone.degraded),
+        } }];
+    }));
 }
 
 // Zone volume depends on every member's accepted status, not just the master's
