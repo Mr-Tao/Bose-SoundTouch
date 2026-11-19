@@ -24,10 +24,14 @@ export function currentPresetContent(nowPlaying) {
     return { ...item, ContainerArt: item.ContainerArt || (art?.ArtImageStatus === 'IMAGE_PRESENT' ? art.URL : '') || '' };
 }
 
+function samePresetSource(expected, actual) {
+    return expected && actual && expected.source === actual.source && expected.sourceAccount === actual.sourceAccount &&
+        canonicalLocation(expected.source, expected.location) === canonicalLocation(actual.source, actual.location);
+}
+
 function samePreset(expected, actual, allowNormalization = false) {
     if (!expected || !actual) return expected === actual;
-    return expected.source === actual.source && expected.sourceAccount === actual.sourceAccount &&
-        canonicalLocation(expected.source, expected.location) === canonicalLocation(actual.source, actual.location) &&
+    return samePresetSource(expected, actual) &&
         expected.itemName === actual.itemName &&
         (expected.type === actual.type || (allowNormalization && !expected.type)) &&
         (expected.containerArt === actual.containerArt || (allowNormalization && !expected.containerArt));
@@ -147,5 +151,40 @@ export async function verifyPresetEdit({ slot, content, expected, ...target }) {
         const confirmed = await waitForBank(bank => samePreset(item, bank[slot], true) &&
             before.every((entry, index) => index === slot || samePreset(entry, bank[index])));
         if (!confirmed) throw new Error('Preset change unverified. Check the speaker before trying again.');
+    });
+}
+
+// Only the preset-grid save can authorize the possible removal of a named
+// duplicate. Ordinary edits still require every other slot to stay put.
+export async function saveGridPreset({ slot, content, hold = false, approvedBank, ...target }) {
+    const item = presetContent(content);
+    if (!validSlot(slot) || !item?.source || !item.location) {
+        throw new Error('Choose content and a valid preset slot.');
+    }
+    const matchesBank = (bank, expected) => bank.every((entry, index) => samePreset(entry, expected[index]));
+    const confirmation = bank => {
+        const duplicates = bank.flatMap((entry, index) => index !== slot && samePresetSource(item, entry) ? [index] : []);
+        return { bank, duplicates };
+    };
+    return editBank(target, async ({ readBank, waitForBank, write }) => {
+        let before = await readBank();
+        let { duplicates } = confirmation(before);
+        if (samePreset(item, before[slot], true)) return null;
+        if (approvedBank) {
+            if (!matchesBank(before, approvedBank)) return confirmation(before);
+        } else {
+            if (!hold || before[slot] || duplicates.length) return confirmation(before);
+            // Release authorizes only a fresh empty slot with no duplicate.
+            const latest = await readBank();
+            if (!matchesBank(latest, before)) return confirmation(latest);
+            before = latest;
+            duplicates = [];
+        }
+        await write(slot, item);
+        const confirmed = await waitForBank(bank => samePreset(item, bank[slot], true) &&
+            before.every((entry, index) => index === slot || samePreset(entry, bank[index]) ||
+                (duplicates.includes(index) && !bank[index])));
+        if (!confirmed) throw new Error('Preset change unverified. Check the speaker before trying again.');
+        return null;
     });
 }

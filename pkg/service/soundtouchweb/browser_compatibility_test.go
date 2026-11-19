@@ -1249,11 +1249,9 @@ render(h(Fixture), document.getElementById('fixture'));
 	}
 }
 
-// TestEmptyPresetSlotStaysSavableWhileACommandIsPending: an empty slot's
-// tile is a save gesture, not a playback command, so an in-flight command
-// has no reason to disable it -- and the sibling star button, which saves the
-// same thing, stays enabled throughout anyway.
-func TestEmptyPresetSlotStaysSavableWhileACommandIsPending(t *testing.T) {
+// TestPresetSaveWaitsForThePlaybackCommand checks the real DeviceDetail flow.
+// Playback may change which content the preset gesture would capture.
+func TestPresetSaveWaitsForThePlaybackCommand(t *testing.T) {
 	const fixture = `
 import { h, render } from 'preact';
 import { useState } from 'preact/hooks';
@@ -1270,71 +1268,72 @@ const initialStatus = {
 function Fixture() {
   const [devices, setDevices] = useState({ speaker: { info: { name: 'Speaker', device_id: 'SPEAKER' }, status: initialStatus } });
   return h(DeviceDetail, {
-    deviceId: 'speaker', devices, onBack: () => {}, commandReadbackDelays: [100, 250, 500],
+    deviceId: 'speaker', devices, onBack: () => {}, commandReadbackDelays: [100],
     onStatusReadback: (deviceId, status) => setDevices(previous => mergeStatusUpdate(previous, deviceId, status)),
   });
 }
 render(h(Fixture), document.getElementById('fixture'));
 `
 
-	var mu sync.Mutex
-	storedSlots := []string{}
+	playback := make(chan struct{})
+	var releasePlayback sync.Once
+	finishPlayback := func() { releasePlayback.Do(func() { close(playback) }) }
 	server := newPlayerFixtureServer(t, fixture, func(r chi.Router) {
 		r.Get("/api/control/devices/speaker/action/preset", func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true})
 		})
-		r.Post("/api/control/devices/speaker/preset/{slot}", func(w http.ResponseWriter, req *http.Request) {
-			mu.Lock()
-			storedSlots = append(storedSlots, chi.URLParam(req, "slot"))
-			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true})
+		r.Post("/api/control/devices/speaker/preset/{slot}", func(w http.ResponseWriter, _ *http.Request) {
+			t.Error("preset save sent a write during a pending playback command")
+			w.WriteHeader(http.StatusConflict)
 		})
 		r.Get("/api/control/devices/speaker/presets", func(w http.ResponseWriter, _ *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-			const slotOne = `{"ID":1,"ContentItem":{"Source":"TUNEIN","Location":"/station/preset","ItemName":"Preset station"}}`
-			if len(storedSlots) == 0 {
-				writePresetFixtureBank(w, slotOne)
+			t.Error("preset save reached preflight during a pending playback command")
+			w.WriteHeader(http.StatusConflict)
+		})
+		r.Get("/api/control/devices/speaker/now-playing", func(w http.ResponseWriter, req *http.Request) {
+			select {
+			case <-playback:
+			case <-req.Context().Done():
 				return
 			}
-			writePresetFixtureBank(w, slotOne, `{"ID":2,"ContentItem":{"Source":"TUNEIN","Location":"s23456","ItemName":"Playing station"}}`)
-		})
-		// Never matches the preset, so the command stays pending for the whole
-		// readback window while the empty slot is clicked.
-		r.Get("/api/control/devices/speaker/now-playing", func(w http.ResponseWriter, _ *http.Request) {
 			_ = json.NewEncoder(w).Encode(webtypes.APIResponse{Success: true, Data: map[string]any{
 				"status": map[string]any{
-					"revision": 1, "nowPlayingRevision": 1,
-					"nowPlaying": map[string]any{"Source": "PRODUCT", "PlayStatus": "PLAY_STATE"},
-					"volume":     map[string]any{"ActualVolume": 20, "MuteEnabled": false},
+					"epoch": 1, "revision": 2, "nowPlayingRevision": 2,
+					"nowPlaying": map[string]any{"Source": "TUNEIN", "PlayStatus": "PLAY_STATE",
+						"ContentItem": map[string]any{"Source": "TUNEIN", "Location": "/station/preset", "ItemName": "Preset station"}},
+					"volume": map[string]any{"ActualVolume": 20, "MuteEnabled": false},
 				},
 			}})
 		})
 		registerDeviceDetailSideRoutes(r)
 	})
+	defer finishPlayback()
 
 	ctx := newHeadlessChromeContext(t)
-	var savableEnabled bool
+	var point presetPointerPoint
 	if err := chromedp.Do(ctx,
 		chromedp.Navigate(server.URL+"/fixture"),
-		chromedp.WaitVisible(chromedp.CSS(`.preset-slot.savable`)),
-		chromedp.Click(chromedp.CSS(`.preset-slot:not(.empty)`)),
+		chromedp.WaitVisible(chromedp.CSS(presetSlotSelector(2))),
+		chromedp.Click(chromedp.CSS(presetSlotSelector(1))),
 		chromedp.Poll[chromedp.Void](`document.querySelector('.discrete-command-status').textContent === 'Starting preset'`),
-		evalInto(`document.querySelector('.preset-slot.savable').disabled === false`, &savableEnabled),
-		chromedp.Click(chromedp.CSS(`.preset-slot.savable`)),
-		chromedp.WaitVisible(chromedp.CSS(`.preset-save-btn.saved`)),
+		chromedp.Poll[chromedp.Void](`document.querySelector('.preset-edit-control').disabled &&
+			document.querySelector('.preset-slot[data-preset-slot="2"]').disabled`),
+		locatePresetPointer(2, &point),
+		presetPointer(&point, chromedp.MousePressed),
+		chromedp.Sleep(1300*time.Millisecond),
+		presetPointer(&point, chromedp.MouseReleased),
+		chromedp.Poll[chromedp.Void](`!document.querySelector('.preset-holding, .preset-hold-ready, .preset-confirm') &&
+			document.querySelector('.discrete-command-status').textContent === 'Starting preset'`),
 	); err != nil {
-		t.Fatalf("exercise empty preset slot during a pending command: %v", err)
+		t.Fatalf("exercise preset save during a pending command: %v", err)
 	}
-
-	if !savableEnabled {
-		t.Error("the empty slot's save gesture was disabled while a command was pending")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if got, want := fmt.Sprint(storedSlots), "[2]"; got != want {
-		t.Errorf("stored preset slots = %s, want %s", got, want)
+	finishPlayback()
+	if err := chromedp.Do(ctx,
+		chromedp.Poll[chromedp.Void](`!document.querySelector('.preset-edit-control').disabled`),
+		chromedp.Click(chromedp.CSS(presetSlotSelector(2))),
+		chromedp.Poll[chromedp.Void](`document.querySelector('.preset-save-current')?.disabled === false`),
+	); err != nil {
+		t.Fatalf("preset editor did not recover after the playback command: %v", err)
 	}
 }
 

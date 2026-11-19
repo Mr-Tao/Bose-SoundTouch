@@ -12,9 +12,9 @@ const css = await readFile(new URL('../static/css/app.css', import.meta.url), 'u
 // rendered only while something was playing *and* revealed only on hover, so
 // two reporters concluded the feature did not exist and filed a bug against
 // something else entirely.
-test('the save button is disabled rather than hidden when nothing is playing', () => {
-    assert.match(presets, /disabled=\$\{!canSave \|\| saveState === 'saving'\}/);
-    assert.doesNotMatch(presets, /\$\{canSave && html/);
+test('the shared editor provides a disabled Save current here control without playable content', () => {
+    assert.match(presets, /class="[^"]*\bpreset-save-current" disabled=\$\{!current \|\| busy\}/);
+    assert.doesNotMatch(presets, /\$\{current && html`<button/);
 });
 
 // Issue 700: a STORED_MUSIC preset tile showed the raw source name and had no
@@ -30,17 +30,13 @@ test('a library preset tile has its own accent colour', () => {
     assert.match(css, /\[data-source="STORED_MUSIC"\][^{]*\{[^}]*--slot-color/);
 });
 
-test('the save button is not hidden behind a hover reveal', () => {
-    const rule = css.match(/\.preset-save-btn \{[^}]*\}/);
-    assert.ok(rule, 'expected a .preset-save-btn rule');
-    // Touch devices have no hover, so opacity:0 made it unreachable there.
-    assert.doesNotMatch(rule[0], /opacity:\s*0\s*[;}]/);
-    assert.doesNotMatch(css, /:hover\s+\.preset-save-btn/);
-});
-
-test('an empty slot saves the current content when clicked', () => {
-    assert.match(presets, /savableEmpty = isEmpty && canSave/);
-    assert.match(presets, /if \(savableEmpty\) store\(\)/);
+test('the shared edit and save controls are visible without hovering', () => {
+    for (const control of ['preset-edit-control', 'preset-save-current']) {
+        const rule = css.match(new RegExp(`\\.${control} \\{[^}]*\\}`));
+        assert.ok(rule, `expected a .${control} rule`);
+        assert.doesNotMatch(rule[0], /opacity:\s*0\s*[;}]/);
+        assert.doesNotMatch(css, new RegExp(`:hover\\s+\\.${control}`));
+    }
 });
 
 // The grid item is .preset-slot-wrap, which stretches to the row height; the

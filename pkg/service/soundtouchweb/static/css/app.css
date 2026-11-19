@@ -1074,7 +1074,7 @@ img.now-playing-source-icon { width: 28px; height: 28px; object-fit: contain; fi
     align-items: center;
     text-align: left;
     gap: .5rem;
-    padding: .45rem 1.7rem .45rem .45rem; /* right gutter: slot number + star */
+    padding: .45rem 1.7rem .45rem .45rem; /* right gutter: slot number */
     border: 1px solid var(--border);
     /* The source colour lives here, clear of the artwork. */
     border-bottom: 2px solid var(--slot-color, var(--border));
@@ -1084,6 +1084,11 @@ img.now-playing-source-icon { width: 28px; height: 28px; object-fit: contain; fi
     position: relative;
     transition: background .1s, box-shadow .1s;
     min-height: 56px;
+    isolation: isolate;
+    overflow: hidden;
+    user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: pan-y;
 }
 .preset-slot:hover:not(:disabled) { box-shadow: var(--shadow); }
 .preset-slot:hover:not(:disabled):not(.active) { background: var(--bg); }
@@ -1126,10 +1131,6 @@ img.now-playing-source-icon { width: 28px; height: 28px; object-fit: contain; fi
     overflow: hidden;
     display: flex; align-items: center; justify-content: center;
 }
-/* An empty slot has no source to colour, so the whole box carries the
-   save invitation instead. */
-.preset-slot.savable .preset-thumb { border: 1px dashed var(--fav); }
-.preset-thumb-glyph { font-size: 1.05rem; line-height: 1; color: var(--fav); opacity: .85; }
 .preset-art { position: relative; width: 100%; height: 100%; object-fit: cover; }
 .preset-source-icon {
     position: relative; width: 20px; height: 20px;
@@ -1145,43 +1146,35 @@ img.preset-source-icon { object-fit: contain; filter: var(--content-icon-filter)
     font-size: .6rem; font-weight: 700; color: var(--text-dim); opacity: .5;
 }
 
-/* Save-to-preset star.  Always visible - disabled, never hidden, when nothing
-   is playing - so it stays reachable on touch, which has no hover.  It lives
-   outside the play button to avoid invalid nested <button> elements.  Gold in
-   both states; only the fill carries meaning (☆ neutral, ★ currently playing),
-   matching the star on the now-playing card. */
-.preset-save-wrap { position: absolute; right: .2rem; bottom: .2rem; z-index: 1; display: flex; }
-.preset-save-btn {
-    font-size: .8rem; line-height: 1;
-    background: none; border: none; padding: 2px 3px;
-    border-radius: 3px; cursor: pointer;
-    color: var(--fav); opacity: .85;
-    transition: opacity .15s, color .15s;
-}
-.preset-save-btn:hover:not(:disabled),
-.preset-save-btn:focus-visible:not(:disabled) { opacity: 1; color: var(--fav-bright); }
-.preset-save-btn.mapped { opacity: 1; }
-.preset-save-btn:disabled { color: var(--text-dim); opacity: .3; cursor: default; }
-.preset-save-btn.saved { color: var(--fav-bright); opacity: 1; }
-.preset-save-btn.error { color: var(--danger); opacity: 1; }
-/* An active tile inverts its background, so neither the gold nor the neutral
-   disabled grey is readable on it. The glyph still tells the states apart. */
-.preset-slot-wrap.active .preset-save-btn { color: var(--accent-fg); }
+/* Whole-tile hold progress stays behind the existing selected contrast,
+   artwork and labels. Caption overlay preserves each tile's resting size. */
+.preset-hold-fill { position: absolute; inset: 0; z-index: -1; pointer-events: none; transform: scaleX(0); transform-origin: left; background: currentColor; opacity: .14; color: var(--text); }
+.preset-slot.active .preset-hold-fill { color: var(--accent-fg); opacity: .22; }
+.preset-holding .preset-hold-fill { animation: preset-hold-fill 1100ms linear forwards; }
+.preset-hold-ready .preset-hold-fill { animation: none; transform: scaleX(1); }
+@keyframes preset-hold-fill { to { transform: scaleX(1); } }
+.preset-holding .preset-text { position: relative; }
+.preset-holding .preset-text > .preset-source-label, .preset-holding .preset-text > .preset-name { visibility: hidden; }
+.preset-hold-caption { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+.preset-hold-label { font-size: .55rem; line-height: 1.3; opacity: .8; }
+.preset-hold-name { font-size: .75rem; line-height: 1.25; }
+.preset-hold-label, .preset-hold-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.preset-slot.active .preset-hold-label, .preset-slot.active .preset-hold-name { color: var(--accent-fg); }
+.presets-footer { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-top: .35rem; }
+.presets-footer .preset-hold-hint { margin-top: 0; }
+.preset-edit-control { min-width: 44px; min-height: 44px; margin-left: auto; padding: .4rem .5rem; color: var(--text-dim); background: transparent; border: 0; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: .25em; }
+.preset-hold-hint, .preset-hold-status { font-size: .75rem; line-height: 1.4; color: var(--text-dim); margin-top: .5rem; }
+.preset-hold-status { min-height: 2.8em; overflow-wrap: anywhere; }
+.preset-editor { margin-top: .7rem; }
+.preset-editor-choice { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .6rem; font-size: .8rem; }
+.preset-editor-choice select { min-height: 44px; min-width: 44px; max-width: 100%; padding: .5rem; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; }
+.preset-save-current { min-height: 44px; margin-bottom: .5rem; }
 
-/* The pencil sits left of the star in the same corner, so a tile carries its
-   two save gestures in one place: the star stores what is playing, the pencil
-   fills the slot from the catalog (issue 754). */
-.preset-edit-wrap { position: absolute; right: 1.5rem; bottom: .2rem; z-index: 1; display: flex; }
-.preset-edit-btn {
-    font-size: .75rem; line-height: 1;
-    background: none; border: none; padding: 2px 3px;
-    border-radius: 3px; cursor: pointer;
-    color: var(--text-dim); opacity: .8;
-    transition: opacity .15s, color .15s;
+.preset-outcome { overflow-wrap: anywhere; margin-top: .5rem; }
+.preset-outcome .preset-confirm, .preset-outcome .preset-cancel { min-height: 44px; margin: .4rem .4rem 0 0; }
+@media (prefers-reduced-motion: reduce) {
+    .preset-holding:not(.preset-hold-ready) .preset-hold-fill { animation: none; }
 }
-.preset-edit-btn:hover, .preset-edit-btn:focus-visible { opacity: 1; color: var(--text); }
-.preset-edit-btn.open { opacity: 1; color: var(--accent); }
-.preset-slot-wrap.active .preset-edit-btn { color: var(--accent-fg); }
 
 /* ── Sources on other speakers ───────────────────────────────────────────── */
 /* Rendered only when there is something this speaker could be given, so a

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { movePreset, verifyPresetEdit } from '../static/js/presetMove.mjs';
+import { movePreset, saveGridPreset, verifyPresetEdit } from '../static/js/presetMove.mjs';
 
 const source = { Source: 'TUNEIN', Location: 's12345', ItemName: 'WDR 2' };
 const preset = (ID, ContentItem = source) => ({ ID, ContentItem });
@@ -87,4 +87,39 @@ test('losing a differently named preset for the same station prevents confirmati
     const { options, calls } = setup({ before: [preset(1, another)], afterStore: [preset(3)] });
     await assert.rejects(verifyPresetEdit({ ...options, slot: 3, content: source, expected: null }), /Preset change unverified/);
     assert.deepEqual(calls, ['read', 'write 3', 'read', 'read', 'read']);
+});
+
+test('a released hold on an empty slot saves only after two matching fresh reads', async () => {
+    const { options, calls } = setup({ before: [], afterStore: [preset(3)] });
+    assert.equal(await saveGridPreset({ ...options, slot: 3, content: source, hold: true }), null);
+    assert.deepEqual(calls, ['read', 'read', 'write 3', 'read']);
+});
+
+test('a changed bank after release or after confirmation requires fresh approval', async () => {
+    const other = preset(2, { ...source, Location: 's54321', ItemName: 'WDR 4' });
+    const { options, calls } = setup({ before: [] });
+    const read = options.api.devicePresets;
+    let stage = 0;
+    options.api.devicePresets = async (...args) => {
+        const response = await read(...args);
+        response.data.status.presets.Preset = [[], [other], [other, preset(1)]][stage++];
+        return response;
+    };
+    const request = { ...options, slot: 3, content: source, hold: true };
+    const revised = await saveGridPreset(request);
+    assert.equal(revised.bank[2].itemName, 'WDR 4');
+    assert.deepEqual(revised.duplicates, []);
+    const latest = await saveGridPreset({ ...request, approvedBank: revised.bank });
+    assert.deepEqual(latest.duplicates, [1]);
+    assert.deepEqual(calls, ['read', 'read', 'read']);
+});
+
+test('a confirmed duplicate can be removed by the speaker without an additional clear', async () => {
+    const { options, calls } = setup({ afterStore: [preset(3)] });
+    const request = { ...options, slot: 3, content: source, hold: true };
+    const prompt = await saveGridPreset(request);
+    assert.deepEqual(prompt.duplicates, [1]);
+    assert.deepEqual(calls, ['read']);
+    assert.equal(await saveGridPreset({ ...request, approvedBank: prompt.bank }), null);
+    assert.deepEqual(calls, ['read', 'read', 'write 3', 'read']);
 });

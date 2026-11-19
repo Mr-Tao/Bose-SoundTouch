@@ -1,220 +1,187 @@
 import { h } from 'preact';
-import { useLayoutEffect, useRef, useState } from 'preact/hooks';
+import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import htm from 'htm';
 import { api } from '../api.js';
 import { SourceIcon } from '../sourceIcons.js';
 import { sourceLabel } from '../sourceLabels.js';
 import { CatalogPicker } from './CatalogPicker.js';
 import { StoredPresets } from './StoredPresets.js';
-import { sameContentLocation } from '../contentLocation.mjs';
-import { currentPresetContent, verifyPresetEdit } from '../presetMove.mjs';
+import { canonicalLocation, sameContentLocation } from '../contentLocation.mjs';
+import { currentPresetContent, saveGridPreset } from '../presetMove.mjs';
+import { createPresetHoldGesture } from '../presetHold.mjs';
 import { usePresetTarget } from '../usePresetTarget.js';
 
 const html = htm.bind(h);
+const slotNumbers = [1, 2, 3, 4, 5, 6];
 
-// PresetSlot renders a single preset button plus an overlaid save button that
-// stores the currently playing content into that slot.  The save button lives
-// *outside* the play button in the DOM (via the wrapper div) to avoid invalid
-// nested <button> elements.
-//
-// The save button is always rendered and merely disabled when nothing is
-// playing, rather than hidden.  It used to be hover-revealed, which made it
-// unreachable on touch devices and easy to miss everywhere else.  It shares
-// the star glyph and the gold --fav colour with the now-playing preset
-// picker (see NowPlaying.js) so both save paths read as the same gesture.
-function PresetSlot({ preset, deviceId, active, canSave, command, commandBusy, onSelect, onEdit, editing, onStore, onStoreError, isCurrent }) {
-    const [saveState, setSaveState] = useState(null);
-    const resetTimer = useRef(null);
-    useLayoutEffect(() => () => clearTimeout(resetTimer.current), []);
-
-    const item = preset?.ContentItem;
-    const isEmpty = !item;
-    const art = item?.ContainerArt;
-    const name = item?.ItemName || `Preset ${preset?.ID ?? ''}`;
-
-    // An empty slot doubles as its own save target while something is
-    // playing: there is nothing to overwrite, so the whole tile can invite
-    // the save instead of hiding it behind the small corner button.
-    const savableEmpty = isEmpty && canSave;
-
-    // The star is always gold; only its fill carries meaning.  Solid ★ means
-    // "what's playing right now is this preset" - the same thing the star on
-    // the now-playing card means.  Outline ☆ is the neutral "save into this
-    // slot" state.
-    const mapped = !!active;
-
-    function flash(state) {
-        setSaveState(state);
-        resetTimer.current = setTimeout(() => setSaveState(null), 1500);
-    }
-
-    async function store() {
-        if (!canSave || saveState === 'saving') return;
-        clearTimeout(resetTimer.current);
-        setSaveState('saving');
-        try {
-            await onStore(preset);
-            if (isCurrent()) flash('saved');
-        } catch (error) {
-            if (isCurrent()) {
-                flash('error');
-                onStoreError(error.message);
-            }
-        }
-    }
-
-    function select() {
-        if (savableEmpty) store();
-        else if (!isEmpty) (onSelect || (() => api.control(deviceId, 'preset', preset.ID)))(preset);
-    }
-
-    function save(e) {
-        e.stopPropagation();
-        store();
-    }
-
-    function edit(e) {
-        e.stopPropagation();
-        onEdit?.(editing ? null : preset.ID);
-    }
-
-    const saveTitle = !canSave
-        ? 'Play something first, then save it to a preset'
-        : mapped
-            ? `Save again to preset ${preset.ID} (already saved there)`
-            : `Save what's playing to preset ${preset.ID}`;
-
-    // The star saves what is playing; the pencil fills the slot from the
-    // catalog, which is how a slot that was emptied gets its station back
-    // without anyone editing XML (issue 754).
-    const editTitle = `Fill preset ${preset.ID} from the catalog`;
-
-    const slotTitle = isEmpty
-        ? (savableEmpty ? "Save what's playing here" : 'Empty')
-        : name;
-
+function PresetSlot({ preset, active, command, busy, gesture, hold }) {
+    const item = preset.ContentItem;
+    const name = item?.ItemName || `Preset ${preset.ID}`;
     return html`
         <div class="preset-slot-wrap ${active ? 'active' : ''}">
-            <button
-                class="preset-slot ${isEmpty ? 'empty' : ''} ${active ? 'active' : ''} ${savableEmpty ? 'savable' : ''}"
+            <button type="button"
+                class="preset-slot ${item ? '' : 'empty'} ${active ? 'active' : ''} ${hold ? 'preset-holding' : ''} ${hold?.phase === 'ready' ? 'preset-hold-ready' : ''}"
                 data-source=${item?.Source ?? ''}
-                onClick=${select}
-                disabled=${saveState === 'saving' || (!savableEmpty && (isEmpty || commandBusy))}
-                aria-busy=${command?.action === 'preset' && commandBusy &&
-                    command?.expected?.targetId === String(preset.ID) ? 'true' : null}
-                title=${slotTitle}
-            >
+                data-preset-slot=${preset.ID}
+                onPointerDown=${event => gesture.down(event, Number(preset.ID))}
+                onPointerMove=${gesture.move} onPointerUp=${gesture.up}
+                onPointerCancel=${gesture.interrupted} onLostPointerCapture=${gesture.interrupted}
+                onContextMenu=${event => event.preventDefault()} onDragStart=${event => event.preventDefault()}
+                onClick=${event => gesture.click(event, Number(preset.ID))}
+                onKeyDown=${event => { if (event.key === 'Escape') gesture.interrupted(); }}
+                disabled=${busy} aria-pressed=${active ? 'true' : 'false'}
+                aria-label=${`Preset ${preset.ID}: ${item ? name : 'empty, edit preset'}`}
+                aria-busy=${command?.action === 'preset' && busy && command?.expected?.targetId === String(preset.ID) ? 'true' : null}
+                title=${item ? name : `Edit empty preset ${preset.ID}`}>
+                <span class="preset-hold-fill" aria-hidden="true"></span>
                 <span class="preset-thumb">
-                    ${art
-                        ? html`<img class="preset-art" src=${art} alt="" />`
-                        : savableEmpty
-                            ? html`<span class="preset-thumb-glyph">☆</span>`
-                            : isEmpty
-                                ? null
-                                : html`<${SourceIcon} source=${item.Source} className="preset-source-icon" />`
-                    }
+                    ${item?.ContainerArt
+                        ? html`<img class="preset-art" src=${item.ContainerArt} alt="" />`
+                        : item && html`<${SourceIcon} source=${item.Source} className="preset-source-icon" />`}
                 </span>
                 <span class="preset-text">
-                    ${!isEmpty && html`<span class="preset-source-label">${sourceLabel(item.Source)}</span>`}
-                    <span class="preset-name">
-                        ${isEmpty ? (savableEmpty ? 'Save current here' : 'Empty') : name}
-                    </span>
+                    ${item && html`<span class="preset-source-label">${sourceLabel(item.Source)}</span>`}
+                    <span class="preset-name">${item ? name : 'Empty · Edit'}</span>
+                    ${hold && html`<span class="preset-hold-caption" aria-hidden="true">
+                        <span class="preset-hold-label">${hold.phase === 'ready' ? 'Release to save' : 'Save current playback'}</span>
+                        <span class="preset-hold-name">${hold.item.ItemName || 'Current playback'}</span>
+                    </span>`}
                 </span>
-                <span class="preset-num">${preset?.ID ?? ''}</span>
+                <span class="preset-num">${preset.ID}</span>
             </button>
-            <span class="preset-edit-wrap" title=${editTitle}>
-                <button
-                    class="preset-edit-btn ${editing ? 'open' : ''}"
-                    onClick=${edit}
-                    aria-label=${editTitle}
-                    aria-expanded=${editing ? 'true' : 'false'}
-                >✎</button>
-            </span>
-            <span class="preset-save-wrap" title=${saveTitle}>
-                <button
-                    class="preset-save-btn ${mapped ? 'mapped' : ''} ${saveState ?? ''}"
-                    onClick=${save}
-                    disabled=${!canSave || saveState === 'saving'}
-                    aria-busy=${saveState === 'saving' ? 'true' : null}
-                    aria-label=${saveTitle}
-                >
-                    ${saveState === 'saved' ? '✓' : saveState === 'error' ? '✗' : mapped ? '★' : '☆'}
-                </button>
-            </span>
-        </div>
-    `;
+        </div>`;
+}
+
+function confirmationMessage(slot, item, { bank, duplicates }) {
+    const name = item.ItemName || 'current playback';
+    const previous = bank[slot]?.itemName || `preset ${slot}`;
+    const action = bank[slot] ? `Replace “${previous}” in preset ${slot} with “${name}”?` : `Save “${name}” to preset ${slot}?`;
+    const sources = duplicates.map(id => `preset ${id} (“${bank[id].itemName || 'Unnamed station'}”)`).join(', ');
+    return sources ? `${action} The speaker may remove it from ${sources}.` : action;
 }
 
 export function Presets({ deviceId, physicalId, status, command, commandBusy = false, onSelect }) {
-    // Which slot the catalog picker is open for, if any. One picker for the
-    // whole section rather than a popover per tile: six tiles wrap to two or
-    // three rows on a phone, and a list that has to be filtered needs the
-    // width of the section, not the width of a tile.
     const [editingSlot, setEditingSlot] = useState(null);
-    const [saveError, setSaveError] = useState(null);
-    const presetTarget = usePresetTarget(deviceId, physicalId, status?.epoch);
-
+    const [hold, setHold] = useState(null);
+    const [notice, setNotice] = useState('');
+    const [saveState, setSaveState] = useState(null);
+    const latest = useRef(null);
+    const pending = useRef(false);
+    const confirmationText = useRef(null);
+    const target = usePresetTarget(deviceId, physicalId, status?.epoch);
+    const owner = JSON.stringify([deviceId, physicalId, status?.epoch]);
     const presets = status?.presets?.Preset ?? [];
-    const currentSource = status?.nowPlaying?.Source;
-    const currentLocation = status?.nowPlaying?.ContentItem?.Location;
+    const byId = Object.fromEntries(presets.map(preset => [preset.ID, preset]));
+    const current = currentPresetContent(status?.nowPlaying);
+    const account = current?.SourceAccount === current?.Source ? '' : current?.SourceAccount || '';
+    const identity = current ? JSON.stringify([current.Source, account, canonicalLocation(current.Source, current.Location)]) : '';
+    const busy = commandBusy || ['checking', 'confirm'].includes(saveState?.phase);
+    const playing = status?.nowPlaying?.ContentItem;
+    const isActive = item => item && item.Source === playing?.Source && sameContentLocation(item.Source, item.Location, playing?.Location);
+    const activeSlot = slotNumbers.find(id => isActive(byId[id]?.ContentItem));
 
-    const currentContent = currentPresetContent(status?.nowPlaying);
-    const canSave = !!currentContent;
-
-    // Build a map for quick lookup, then render slots 1-6
-    const byId = Object.fromEntries(presets.map(p => [p.ID, p]));
-    const slots = [1, 2, 3, 4, 5, 6].map(id => byId[id] ?? { ID: id, ContentItem: null });
-
-    function isActive(preset) {
-        const item = preset.ContentItem;
-        return item && item.Source === currentSource &&
-            sameContentLocation(currentSource, item.Location, currentLocation);
+    async function save(operation, approvedBank) {
+        if (pending.current || !operation.target.isCurrent()) return;
+        pending.current = true;
+        setSaveState({ phase: 'checking' });
+        try {
+            const confirmation = await saveGridPreset({ api, ...operation.target, slot: operation.slot,
+                content: operation.item, hold: operation.hold, approvedBank });
+            if (!operation.target.isCurrent()) return;
+            setSaveState(confirmation ? { phase: 'confirm', operation, confirmation }
+                : { phase: 'confirmed', message: `Preset ${operation.slot} saved.` });
+        } catch (error) {
+            if (operation.target.isCurrent()) setSaveState({ phase: 'error', message: error.message });
+        } finally {
+            if (operation.target.isCurrent()) pending.current = false;
+        }
     }
 
-    function store(preset) {
-        setSaveError(null);
-        return verifyPresetEdit({ api, ...presetTarget, slot: Number(preset.ID), content: currentContent, expected: preset.ContentItem });
+    latest.current = { owner, current, identity, byId, deviceId, onSelect, target, save,
+        canTap: !busy, canHold: !!current && !busy && editingSlot === null };
+    const gesture = useMemo(() => createPresetHoldGesture({
+        getSnapshot: () => ({ ...latest.current, canTap: latest.current.canTap && !pending.current,
+            canHold: latest.current.canHold && !pending.current }),
+        onChange: (next, message = '') => { setHold(next); setNotice(message); },
+        onTap: slot => {
+            const props = latest.current;
+            if (pending.current || !props.canTap) return;
+            const preset = props.byId[slot];
+            if (!preset?.ContentItem) {
+                setSaveState(null);
+                setEditingSlot(slot);
+            } else if (props.onSelect) {
+                props.onSelect(preset);
+            } else {
+                api.control(props.deviceId, 'preset', slot);
+            }
+        },
+        onSave: (slot, item) => {
+            const props = latest.current;
+            if (props.canHold) props.save({ slot, item, target: props.target, hold: true });
+        },
+    }), []);
+    useLayoutEffect(() => {
+        pending.current = false;
+        setSaveState(null);
+        setEditingSlot(null);
+    }, [owner]);
+    useLayoutEffect(() => gesture.attach(), [gesture]);
+    useLayoutEffect(() => { gesture.check(); }, [gesture, owner, identity, busy, editingSlot]);
+    useLayoutEffect(() => {
+        if (saveState?.phase === 'confirm') confirmationText.current?.focus();
+    }, [saveState]);
+
+    function edit() {
+        gesture.cancel();
+        setSaveState(null);
+        setEditingSlot(editingSlot === null ? activeSlot || 1 : null);
     }
 
     return html`
         <div class="presets-section">
             <h3 class="section-title">Presets</h3>
-            <${StoredPresets} key=${JSON.stringify([deviceId, physicalId, status?.epoch])}
+            <${StoredPresets} key=${owner}
                 deviceId=${deviceId} physicalId=${physicalId} epoch=${status?.epoch} revision=${status?.revision} />
             <div class="preset-grid">
-                ${slots.map(preset => html`
-                    <${PresetSlot}
-                        key=${JSON.stringify([deviceId, physicalId, status?.epoch, preset.ID])}
-                        preset=${preset}
-                        deviceId=${deviceId}
-                        active=${isActive(preset)}
-                        canSave=${canSave}
-                        command=${command}
-                        commandBusy=${commandBusy}
-                        onSelect=${onSelect}
-                        onStore=${store}
-                        onStoreError=${setSaveError}
-                        isCurrent=${presetTarget.isCurrent}
-                        onEdit=${setEditingSlot}
-                        editing=${editingSlot === preset.ID}
-                    />
-                `)}
+                ${slotNumbers.map(id => html`<${PresetSlot} key=${owner + ':' + id}
+                    preset=${byId[id] ?? { ID: id, ContentItem: null }}
+                    active=${isActive(byId[id]?.ContentItem)} command=${command} busy=${busy}
+                    gesture=${gesture} hold=${hold?.slot === id ? hold : null} />`)}
             </div>
-            ${saveError && html`<p class="settings-error" role="alert">${saveError}</p>`}
-            ${editingSlot !== null && html`
-                <${CatalogPicker}
-                    key=${JSON.stringify([deviceId, physicalId, status?.epoch, editingSlot])}
-                    deviceId=${deviceId}
-                    physicalId=${physicalId}
-                    epoch=${status?.epoch}
-                    slot=${editingSlot}
-                    presets=${status?.presets}
-                    sources=${status?.sources}
-                    current=${byId[editingSlot] ?? null}
-                    onClose=${() => setEditingSlot(null)}
-                    onAssigned=${() => setEditingSlot(null)}
-                />
-            `}
-        </div>
-    `;
+            <div class="presets-footer">
+                ${current && html`<p class="preset-hold-hint">Tap to play · hold to save current playback</p>`}
+                <button type="button" class="preset-edit-control" aria-label="Edit presets" aria-expanded=${editingSlot !== null ? 'true' : 'false'}
+                    disabled=${busy} onClick=${edit}>Edit</button>
+            </div>
+            <p class="preset-hold-status" role="status">${notice}</p>
+            ${saveState?.phase === 'confirm' && html`<div class="preset-outcome"
+                onKeyDown=${event => { if (event.key === 'Escape') setSaveState(null); }}>
+                <p role="status" tabIndex="-1" ref=${confirmationText}>
+                    ${confirmationMessage(saveState.operation.slot, saveState.operation.item, saveState.confirmation)}</p>
+                <button type="button" class="btn-secondary preset-confirm" disabled=${commandBusy}
+                    onClick=${() => save(saveState.operation, saveState.confirmation.bank)}>Save preset</button>
+                <button type="button" class="btn-secondary preset-cancel" onClick=${() => setSaveState(null)}>Cancel</button>
+            </div>`}
+            ${saveState?.phase === 'checking' && html`<p class="preset-outcome" role="status">Checking presets…</p>`}
+            ${saveState?.phase === 'confirmed' && html`<p class="preset-outcome confirmed" role="status">${saveState.message}</p>`}
+            ${saveState?.phase === 'error' && html`<p class="settings-error" role="alert">${saveState.message}</p>`}
+            ${editingSlot !== null && html`<div class="preset-editor">
+                <label class="preset-editor-choice">Preset
+                    <select aria-label="Preset to edit" value=${editingSlot} disabled=${busy}
+                        onChange=${event => { setSaveState(null); setEditingSlot(Number(event.currentTarget.value)); }}>
+                        ${slotNumbers.map(id => html`<option value=${id}>${id} · ${byId[id]?.ContentItem?.ItemName ||
+                            (byId[id]?.ContentItem ? 'Unnamed station' : 'Empty')}</option>`)}
+                    </select>
+                </label>
+                <button type="button" class="btn-secondary preset-save-current" disabled=${!current || busy}
+                    onClick=${() => save({ slot: editingSlot, item: current, target })}>Save current here</button>
+                <div inert=${busy ? '' : null}>
+                    <${CatalogPicker} key=${owner + ':' + editingSlot}
+                        deviceId=${deviceId} physicalId=${physicalId} epoch=${status?.epoch}
+                        slot=${editingSlot} presets=${status?.presets} sources=${status?.sources} current=${byId[editingSlot] ?? null}
+                        onClose=${() => setEditingSlot(null)} onAssigned=${() => setEditingSlot(null)} />
+                </div>
+            </div>`}
+        </div>`;
 }

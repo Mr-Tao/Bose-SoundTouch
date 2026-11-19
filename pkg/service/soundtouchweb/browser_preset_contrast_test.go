@@ -53,18 +53,9 @@ window.contrast = (boxSelector, textSelector) => {
   const text = textSelector ? box.querySelector(textSelector) : box;
   const page = channels(getComputedStyle(document.body).backgroundColor);
   const alpha = Number(getComputedStyle(box).opacity);
-  const background = over(channels(getComputedStyle(box).backgroundColor), alpha, page);
+  const fill = channels(getComputedStyle(box).backgroundColor);
+  const background = over(fill, (fill[3] ?? 1) * alpha, page);
   const foreground = over(channels(getComputedStyle(text).color), alpha, page);
-  const [light, dark] = [luminance(background), luminance(foreground)].sort((a, b) => b - a);
-  return (light + 0.05) / (dark + 0.05);
-};
-// The star has no fill of its own: it is drawn on the selected tile next to it.
-window.starContrast = () => {
-  const star = getComputedStyle(document.querySelector('.preset-slot-wrap.active .preset-save-btn'));
-  const tile = getComputedStyle(document.querySelector('.preset-slot.active'));
-  const page = channels(getComputedStyle(document.body).backgroundColor);
-  const background = over(channels(tile.backgroundColor), Number(tile.opacity), page);
-  const foreground = over(channels(star.color), Number(star.opacity), background);
   const [light, dark] = [luminance(background), luminance(foreground)].sort((a, b) => b - a);
   return (light + 0.05) / (dark + 0.05);
 };
@@ -163,25 +154,30 @@ func TestSelectedControlsKeepContrastUnderHover(t *testing.T) {
 	}
 }
 
-func TestSelectedPresetStarKeepsContrast(t *testing.T) {
+func TestSharedPresetEditorControlsKeepContrast(t *testing.T) {
 	ctx := selectedControlPage(t)
 
-	const star = `.preset-slot-wrap.active .preset-save-btn`
+	const edit = `.preset-edit-control`
+	const save = `.preset-save-current`
 
 	for _, scheme := range []string{"light", "dark"} {
 		t.Run(scheme, func(t *testing.T) {
 			emulateColorScheme(t, ctx, scheme)
 
 			hoverOver(t, ctx, `.source-btn.active`)
-			if err := chromedp.Do(ctx, chromedp.Poll[chromedp.Void](
-				`!document.querySelector(`+"`"+star+"`"+`).disabled && window.starContrast() >= 4.5`,
-			)); err != nil {
-				t.Fatalf("star on the selected preset is unreadable: %v", err)
+			if err := chromedp.Do(ctx,
+				chromedp.Poll[chromedp.Void](readableExpr(edit, "")),
+				openPresetEditor(1),
+				chromedp.Poll[chromedp.Void](readableExpr(save, "")),
+			); err != nil {
+				t.Fatalf("preset editor controls are unreadable: %v", err)
 			}
 
-			hoverOver(t, ctx, star)
-			if err := chromedp.Do(ctx, chromedp.Poll[chromedp.Void](`window.starContrast() >= 4.5`)); err != nil {
-				t.Fatalf("star on the selected preset is unreadable under hover: %v", err)
+			for _, control := range []string{edit, save} {
+				hoverOver(t, ctx, control)
+				if err := chromedp.Do(ctx, chromedp.Poll[chromedp.Void](readableExpr(control, ""))); err != nil {
+					t.Fatalf("%s is unreadable under hover: %v", control, err)
+				}
 			}
 		})
 	}

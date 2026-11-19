@@ -30,10 +30,7 @@ that is not the case yet, see [Getting Started](GETTING-STARTED.md).
 4. Press the **★** at the top right of the now-playing card, then pick a slot
    from **1 2 3 4 5 6**.
 
-The star turns gold once the current content is saved in a slot, and its
-tooltip names which one. An empty preset tile reads **Save current here** and
-saves to that slot when you click it, which is quicker when you already know
-where you want it.
+The star turns gold once the current content is saved in a slot, and its tooltip names which one. You can also hold a preset tile until it says **Release to save**, then release. AfterTouch asks you to confirm before it replaces another item or when the speaker may remove the same item from a different slot. Release early or scroll to cancel.
 
 Press the matching button on the speaker. It should start playing within a few
 seconds.
@@ -76,9 +73,7 @@ source, and a name. Two consequences worth knowing:
 
 ## Change a slot without playing anything
 
-The **✎** next to each preset tile opens the slot editor. It lists what
-AfterTouch has seen this household play or store, so filling a slot is picking
-from that list rather than finding the station again first.
+Select **Edit** below the presets and choose a slot, or tap an empty tile to open its editor. The editor lists what AfterTouch has seen this household play or store. While something is playing, **Save current here** is also available in the editor.
 
 From the editor you can:
 
